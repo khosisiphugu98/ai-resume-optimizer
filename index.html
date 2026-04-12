@@ -1,0 +1,1873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Resume Optimizer - Multi-Resume Support</title>
+    <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- PDF and DOCX parsing libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: 'Open Sans', sans-serif; line-height: 1.4; color: #333; background: #f0f2f5; padding: 20px; font-size: 13px; }
+        .resume-container { display: flex; align-items: stretch; max-width: 900px; margin: 0 auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); background: white; position: relative; }
+        .resume-container::before { content: ''; position: absolute; top: 0; left: 0; bottom: 0; width: 35%; background: #2c3e50; z-index: 0; }
+        .sidebar { width: 35%; background: transparent; color: white; padding: 20px 15px; box-sizing: border-box; overflow: visible; position: relative; z-index: 1; }
+        .main-content { width: 65%; padding: 20px; background: white; overflow: visible; box-sizing: border-box; position: relative; z-index: 1; }
+
+        /* === AUTO-FIT COMPRESSION CLASSES === */
+        /* Phase 1: Compact spacing */
+        .compact-spacing .sidebar { padding: 12px 10px; }
+        .compact-spacing .main-content { padding: 12px 15px; }
+        .compact-spacing h2 { margin-top: 8px; margin-bottom: 5px; padding-bottom: 2px; }
+        .compact-spacing .profile { margin-bottom: 10px; }
+        .compact-spacing .experience-item, .compact-spacing .education-item { margin-bottom: 2px; }
+        .compact-spacing ul { margin: 2px 0; }
+        .compact-spacing li { margin-bottom: 1px; line-height: 1.2; }
+        .compact-spacing .skill-tag { padding: 2px 4px; margin: 0 2px 2px 0; }
+        .compact-spacing .skill-category { margin-bottom: 2px; }
+        .compact-spacing .skill-category h4 { margin-bottom: 2px; }
+        .compact-spacing .reference-item { margin-bottom: 6px; padding-bottom: 5px; }
+        .compact-spacing .language-item { margin-bottom: 2px; }
+        .compact-spacing .contact-item { margin-bottom: 3px; }
+        .compact-spacing .profile-summary p { line-height: 1.2; }
+        .compact-spacing .job-header { margin-bottom: 1px; }
+
+        /* Phase 2: Compact fonts */
+        .compact-fonts h1 { font-size: 15px; }
+        .compact-fonts h2 { font-size: 12px; }
+        .compact-fonts h3 { font-size: 10px; }
+        .compact-fonts .job-title { font-size: 10px; }
+        .compact-fonts .company, .compact-fonts .degree { font-size: 9px; }
+        .compact-fonts .date { font-size: 8px; }
+        .compact-fonts li { font-size: 8px; }
+        .compact-fonts .skill-tag { font-size: 7.5px; }
+        .compact-fonts .skill-category h4 { font-size: 9px; }
+        .compact-fonts .contact-item { font-size: 8px; }
+        .compact-fonts .language-item { font-size: 8px; }
+        .compact-fonts .reference-name { font-size: 9px; }
+        .compact-fonts .reference-item div { font-size: 7.5px; }
+        .compact-fonts .reference-title { font-size: 7.5px; }
+        .compact-fonts .profile-summary p { font-size: 8px; }
+        .compact-fonts .profile-img { width: 55px; height: 55px; }
+
+        /* Phase 3: Content trimmed indicator */
+        .compact-content .skills-container .skill-category:nth-child(n+4) .skill-tag:nth-child(n+7) { display: none; }
+
+        /* Empty section hiding */
+        .section-hidden { display: none !important; }
+        h1, h2, h3 { font-family: 'Roboto Condensed', sans-serif; margin-bottom: 10px; }
+        h1 { font-size: 18px; color: white; text-transform: uppercase; letter-spacing: 1px; line-height: 1.2; }
+        h2 { font-size: 14px; color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 4px; margin-top: 15px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        .sidebar h2 { color: white; border-bottom-color: rgba(52, 152, 219, 0.7); }
+        h3 { font-size: 12px; color: #3498db; line-height: 1.3; }
+        .profile { margin-bottom: 20px; text-align: center; }
+        .profile-img { width: 70px; height: 70px; border-radius: 50%; border: 3px solid #3498db; margin: 0 auto 10px; background-color: #eee; display: flex; align-items: center; justify-content: center; overflow: hidden; cursor: pointer; }
+        .profile-img img { width: 100%; height: 100%; object-fit: cover; }
+        .profile-img span { font-size: 24px; color: #777; }
+        .contact-item { display: flex; align-items: center; margin-bottom: 6px; font-size: 10px; }
+        .contact-icon { margin-right: 8px; color: #3498db; width: 14px; text-align: center; }
+        .contact-link { color: white; text-decoration: none; }
+        .skill-tag { display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 3px 6px; border-radius: 3px; margin: 0 3px 3px 0; font-size: 9px; }
+        .skill-category h4 { color: #3498db; margin-bottom: 5px; font-size: 11px; text-transform: uppercase; }
+        .job-title { font-weight: 600; color: #2c3e50; font-size: 12px; }
+        .company, .degree { font-weight: 600; color: #2c3e50; font-size: 11px; }
+        .date { color: #7f8c8d; font-size: 10px; }
+        ul { padding-left: 16px; margin: 6px 0; }
+        li { margin-bottom: 3px; font-size: 10px; line-height: 1.3; }
+        .language-item { margin-bottom: 5px; font-size: 10px; }
+        .reference-name { font-weight: 600; font-size: 11px; margin-bottom: 2px; }
+        .reference-item { margin-bottom: 12px; padding-bottom: 10px; border-bottom: 1px solid rgba(255,255,255,0.1); }
+        .reference-item:last-child { border-bottom: none; }
+        .reference-item div { font-size: 9px; margin-bottom: 2px; }
+        .reference-title { color: #3498db; font-size: 9px; }
+        .reference-contact { display: flex; align-items: center; margin-top: 3px; }
+        .reference-icon { margin-right: 5px; font-size: 9px; width: 12px; text-align: center; }
+        .profile-summary p { font-size: 10px; line-height: 1.4; }
+        .highlight-skill { background-color: rgba(52, 152, 219, 0.2); padding: 2px 4px; border-radius: 3px; font-weight: 600; }
+        .job-description-input { margin-bottom: 20px; padding: 10px; border: 1px solid #ddd; border-radius: 4px; width: 100%; height: 120px; resize: vertical; }
+        .controls { margin-bottom: 20px; display: flex; gap: 10px; flex-wrap: wrap; }
+        .btn { padding: 8px 15px; background: #3498db; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 12px; transition: all 0.2s; }
+        .btn:hover { background: #2980b9; }
+        .btn-secondary { background: #95a5a6; }
+        .btn-secondary:hover { background: #7f8c8d; }
+        .btn-success { background: #27ae60; }
+        .btn-success:hover { background: #219653; }
+        .btn-warning { background: #f39c12; }
+        .btn-warning:hover { background: #e67e22; }
+        .btn-danger { background: #e74c3c; }
+        .btn-danger:hover { background: #c0392b; }
+        .message { padding: 10px; margin-bottom: 15px; border-radius: 4px; display: none; }
+        .message.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .message.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .message.info { background: #cce7ff; color: #004085; border: 1px solid #b3d7ff; }
+        .loading { display: none; text-align: center; padding: 10px; }
+        .spinner { border: 4px solid #f3f3f3; border-top: 4px solid #3498db; border-radius: 50%; width: 30px; height: 30px; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .api-key-container { margin-bottom: 15px; display: none; }
+        .api-key-input { padding: 8px; border: 1px solid #ddd; border-radius: 4px; width: 100%; margin-bottom: 10px; }
+        .keywords-display { margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px; }
+        .keyword-tag { display: inline-block; background: #e9ecef; padding: 3px 8px; border-radius: 3px; margin: 0 5px 5px 0; font-size: 11px; }
+        .editable { outline: 1px dashed rgba(52, 152, 219, 0.5); padding: 2px; }
+        .editable:focus { outline: 2px solid #3498db; background-color: rgba(52, 152, 219, 0.05); }
+        .config-container { display: flex; gap: 10px; align-items: center; margin-bottom: 15px; flex-wrap: wrap; }
+        .config-label { font-size: 12px; }
+        .config-input { padding: 5px; border: 1px solid #ddd; border-radius: 4px; width: 60px; }
+        .keyword-status { margin-top: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px; }
+        .keyword-tracker { margin-top: 10px; max-height: 200px; overflow-y: auto; }
+        .keyword-item { display: flex; align-items: center; margin-bottom: 5px; padding: 5px; background: white; border-radius: 3px; border: 1px solid #eee; }
+        .keyword-checkbox { margin-right: 10px; }
+        .keyword-text { flex-grow: 1; font-size: 11px; }
+        .keyword-status-indicator { width: 10px; height: 10px; border-radius: 50%; margin-left: 10px; }
+        .keyword-included { background-color: #27ae60; }
+        .keyword-missing { background-color: #e74c3c; }
+        .keyword-added { color: #27ae60; font-size: 10px; margin-left: 10px; }
+        .upload-section { margin-bottom: 20px; padding: 15px; background: #f0f7ff; border-radius: 8px; border: 1px dashed #3498db; }
+        .upload-section h3 { font-size: 14px; margin-bottom: 8px; color: #2c3e50; }
+        .upload-section p { font-size: 11px; margin-bottom: 10px; color: #666; }
+        .file-info { font-size: 11px; margin-top: 8px; color: #666; }
+        @media print {
+            body { padding: 0; background: white; }
+            .resume-container { box-shadow: none; }
+            .controls, .job-description-input, .message, .api-key-container, .keywords-display, .config-container, .keyword-status, .upload-section { display: none; }
+        }
+    </style>
+</head>
+<body>
+    <div class="api-key-container" id="api-key-container">
+        <input type="password" id="api-key" class="api-key-input" placeholder="Enter your OpenAI API key for AI-powered optimization">
+        <button id="save-api-key" class="btn btn-success">Save API Key</button>
+        <div style="font-size: 11px; margin-top: 5px; color: #666;">
+            Your API key is stored locally in your browser and never sent to our servers.
+            <a href="https://platform.openai.com/api-keys" target="_blank">Get your API key</a>
+        </div>
+    </div>
+
+    <!-- Resume Upload Section -->
+    <div class="upload-section">
+        <h3>📄 Upload a Different Resume</h3>
+        <p>Upload any resume (PDF, DOCX, TXT, or HTML) to optimize it for a job description. Your original resume is preserved and can be restored anytime.</p>
+        <div style="display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <input type="file" id="resume-upload" accept=".pdf,.docx,.txt,.html,.htm" style="padding: 8px; border: 1px solid #ddd; border-radius: 4px; background: white;">
+            <button id="upload-resume-btn" class="btn">📥 Load Resume</button>
+            <button id="reset-to-original" class="btn btn-secondary">↺ Reset to My Resume</button>
+            <button id="save-default-btn" class="btn btn-success">💾 Save as Default</button>
+        </div>
+        <div id="upload-status" class="file-info"></div>
+    </div>
+
+    <div class="controls">
+        <textarea id="job-description" class="job-description-input" placeholder="Paste job description here to optimize resume with relevant keywords..."></textarea>
+    </div>
+
+    <div class="config-container">
+        <span class="config-label">Number of keywords to extract:</span>
+        <input type="number" id="keyword-count" class="config-input" min="5" max="30" value="15">
+        <button id="advanced-options" class="btn btn-secondary">Advanced Options</button>
+    </div>
+
+    <div id="advanced-options-container" style="display: none; margin-bottom: 15px; padding: 10px; background: #f8f9fa; border-radius: 4px;">
+        <div style="display: flex; gap: 10px; margin-bottom: 10px; flex-wrap: wrap;">
+            <div>
+                <label style="font-size: 12px; display: block; margin-bottom: 5px;">Keyword Aggressiveness:</label>
+                <select id="aggressiveness" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">
+                    <option value="moderate">Moderate - Natural Integration</option>
+                    <option value="aggressive">Aggressive - All Keywords</option>
+                </select>
+            </div>
+            <div>
+                <label style="font-size: 12px; display: block; margin-bottom: 5px;">AI Model:</label>
+                <select id="ai-model" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">
+                    <option value="gpt-3.5-turbo">GPT-3.5 Turbo (Faster)</option>
+                    <option value="gpt-4">GPT-4 (Better Quality)</option>
+                </select>
+            </div>
+        </div>
+        <label style="font-size: 12px; display: flex; align-items: center; gap: 5px;">
+            <input type="checkbox" id="preserve-original" checked>
+            Preserve original content when possible
+        </label>
+    </div>
+
+    <div class="controls">
+        <button id="optimize-btn" class="btn">AI-Optimized Resume</button>
+        <button id="toggle-highlights" class="btn btn-secondary">Show Highlights</button>
+        <button id="toggle-edit" class="btn btn-warning">Enable Editing</button>
+        <button id="download-html-btn" class="btn">Download as HTML</button>
+        <button id="download-pdf-btn" class="btn btn-danger">Download as PDF</button>
+        <button id="reset-btn" class="btn btn-secondary">Reset Optimized Changes</button>
+        <button id="configure-ai" class="btn btn-success">Configure AI</button>
+    </div>
+
+    <div id="message" class="message"></div>
+    <div class="loading" id="loading">
+        <div class="spinner"></div>
+        <p>AI is optimizing your resume... This may take 20-30 seconds.</p>
+        <p id="loading-details" style="font-size: 11px; margin-top: 5px; color: #666;"></p>
+    </div>
+
+    <div id="keywords-display" class="keywords-display" style="display: none;">
+        <h3>Keywords Identified from Job Description:</h3>
+        <div id="keywords-list"></div>
+    </div>
+
+    <div id="keyword-status" class="keyword-status" style="display: none;">
+        <h3>Keyword Integration Status:</h3>
+        <div id="keyword-tracker" class="keyword-tracker"></div>
+        <div id="keyword-summary" style="margin-top: 10px; font-size: 11px;"></div>
+    </div>
+
+    <!-- Main Resume Container -->
+    <div class="resume-container" id="resume-content">
+        <!-- Left Sidebar -->
+        <div class="sidebar">
+            <div class="profile">
+                <div class="profile-img">
+                    <span>KS</span>
+                    <img id="profile-picture" src="" alt="Profile Picture" style="display: none;">
+                </div>
+                <input type="file" id="file-input" accept="image/*" style="display: none;">
+                <h1>Khosi Siphugu</h1>
+                <h3>Technical Marketing Specialist | Adops | Campaign Manager</h3>
+            </div>
+
+            <div class="contact-info">
+                <h2>Contact</h2>
+                <div class="contact-item"><span class="contact-icon"><i class="fas fa-envelope"></i></span><span>mksiphugu@gmail.com</span></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fas fa-phone"></i></span><span>+27 82 820 4538</span></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fas fa-map-marker-alt"></i></span><span>South Africa</span></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fab fa-linkedin"></i></span><a href="https://www.linkedin.com/in/khosi-siphugu-897567233" target="_blank" class="contact-link">linkedin.com/in/khosi-siphugu</a></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fab fa-google-drive"></i></span><a href="https://drive.google.com/drive/folders/1lokgVg0laICaXIJ8Lb_vVzme3HyvasSz?usp=sharing" target="_blank" class="contact-link">View Portfolio</a></div>
+            </div>
+
+            <div class="skills">
+                <h2>Technical Skills</h2>
+                <div class="skills-container">
+                    <div class="skill-category"><h4>Development &amp; APIs</h4><div class="skill-tag">Python</div><div class="skill-tag">API Integration</div><div class="skill-tag">API Configuration</div><div class="skill-tag">Endpoint Management</div><div class="skill-tag">Callback Systems</div><div class="skill-tag">GitHub</div><div class="skill-tag">GitLab</div><div class="skill-tag">HTML/CSS</div></div>
+                    <div class="skill-category"><h4>Data &amp; Analytics</h4><div class="skill-tag">SQL</div><div class="skill-tag">DataGrip</div><div class="skill-tag">Database Queries</div><div class="skill-tag">Data Mining</div><div class="skill-tag">Grafana</div><div class="skill-tag">Tableau</div><div class="skill-tag">Looker Studio</div><div class="skill-tag">Power BI</div><div class="skill-tag">R</div><div class="skill-tag">Statistical Analysis</div><div class="skill-tag">Microsoft SQL Server</div><div class="skill-tag">Data Visualization</div><div class="skill-tag">ETL Processes</div></div>
+                    <div class="skill-category"><h4>Marketing Platforms</h4><div class="skill-tag">Google Ads</div><div class="skill-tag">Meta Ads</div><div class="skill-tag">Twitter Ads</div><div class="skill-tag">TikTok Ads</div><div class="skill-tag">Google Marketing Platform</div><div class="skill-tag">DV360</div><div class="skill-tag">Google Analytics</div><div class="skill-tag">Google Tag Manager</div><div class="skill-tag">MailChimp</div><div class="skill-tag">Marketplace Integration</div><div class="skill-tag">Marketing Automation</div><div class="skill-tag">Marketing Operations</div></div>
+                    <div class="skill-category"><h4>DSPs &amp; AdTech</h4><div class="skill-tag">SMADEX</div><div class="skill-tag">APPRECIATE</div><div class="skill-tag">Campaign Manager</div><div class="skill-tag">Programmatic Advertising</div><div class="skill-tag">Google Optimize</div><div class="skill-tag">A/B Testing</div><div class="skill-tag">CRMs</div><div class="skill-tag">PPC Marketing</div><div class="skill-tag">Ad Serving</div><div class="skill-tag">Ad Ops</div></div>
+                    <div class="skill-category"><h4>Specialized Marketing</h4><div class="skill-tag">Influencer Marketing</div><div class="skill-tag">Affiliate Marketing</div><div class="skill-tag">Performance Marketing</div><div class="skill-tag">Social Media Management</div><div class="skill-tag">Engagement Campaigns</div><div class="skill-tag">Market Analysis</div><div class="skill-tag">Competitor Analysis</div><div class="skill-tag">Brand Strategy</div><div class="skill-tag">Content Marketing</div><div class="skill-tag">ROI Optimization</div><div class="skill-tag">Creative Strategy</div></div>
+                    <div class="skill-category"><h4>Tools &amp; Platforms</h4><div class="skill-tag">Zed Editor</div><div class="skill-tag">Claude AI</div><div class="skill-tag">Gemini</div><div class="skill-tag">Slack</div><div class="skill-tag">AWS</div><div class="skill-tag">WordPress</div><div class="skill-tag">Wix</div><div class="skill-tag">HostGator</div><div class="skill-tag">Basecamp</div><div class="skill-tag">Monday.com</div><div class="skill-tag">Notion</div><div class="skill-tag">MS Projects</div></div>
+                </div>
+            </div>
+
+            <div class="languages">
+                <h2>Languages</h2>
+                <div class="language-item"><div>English (Fluent)</div></div>
+                <div class="language-item"><div>Tsonga (Fluent)</div></div>
+                <div class="language-item"><div>SeTswana (Intermediate)</div></div>
+                <div class="language-item"><div>Afrikaans (Basic)</div></div>
+            </div>
+
+            <div class="references">
+                <h2>References</h2>
+                <div class="reference-item"><div class="reference-name">Harjot Singh</div><div class="reference-title">Co-founder at Zaio</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>harjot@zaio.io</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 72 934 7387</span></div></div>
+                <div class="reference-item"><div class="reference-name">Dave Kreeck</div><div class="reference-title">Colleague at Zaio</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>dave@kreeck.com</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 73 809 2731</span></div></div>
+                <div class="reference-item"><div class="reference-name">Jarred Stokes</div><div class="reference-title">Former Manager at Hyve Mobile</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>jarred@hyvemobile.co.za</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 82 689 9924</span></div></div>
+                <div class="reference-item"><div class="reference-name">Thabiso Mokhachane</div><div class="reference-title">Team-member at Hyve Mobile</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>thabiso.mokhachane@hyvemobile.co.za</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 76 884 5314</span></div></div>
+            </div>
+        </div>
+
+        <!-- Main Content -->
+        <div class="main-content">
+            <div class="profile-summary"><h2>Professional Summary</h2><p id="summary-text" class="editable-text">Results-driven Technical Marketing Specialist with 3+ years of comprehensive digital marketing and adops experience with expertise in digital marketing, leveraging data-driven insights for strategic decision-making, combining deep technical expertise with strategic campaign management. Proficient in programmatic advertising, DSP management (SMADEX, APPRECIATE), and full-stack campaign execution across Google, Meta, Twitter, and TikTok platforms. Expert in Python-driven data analysis, API integration, and database querying for performance optimization. Proven track record in influencer marketing, affiliate management, and performance marketing with strong capabilities in campaign trafficking, quality assurance, and technical troubleshooting. Strong analytical skills with ability to translate complex data into actionable insights and strategic recommendations.</p></div>
+            <div class="experience"><h2>Professional Experience</h2>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Adops Operations Assistant</span><span class="company"> | Hyve Mobile</span></div><div class="date">2023 - Present</div></div><ul id="hyve-experience" class="editable-list"><li>Execute comprehensive adops workflows including campaign trafficking, quality assurance testing, and technical troubleshooting across programmatic platforms (SMADEX, APPRECIATE)</li><li>Develop and maintain API integrations, configure callback endpoints, and manage data pipelines for seamless campaign attribution and performance tracking</li><li>Build automated reporting dashboards using Python, Grafana, and Looker Studio, connecting multiple data sources via SQL queries</li><li>Execute rigorous daily quality assurance protocols and conduct comprehensive competitive market analysis to identify optimization opportunities and inform strategic adjustments</li><li>Implement tracking pixel configurations and URL parameter setups for accurate campaign measurement</li><li>Partner with cross-functional teams (creative, product, analytics) to optimize campaign performance, achieving average conversion rate improvements of 30% and troubleshoot technical issues</li><li>Continuously monitor campaign delivery metrics and KPIs, implementing data-driven optimizations that consistently improve ROI by 25-40%</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Campaign Coordinator</span><span class="company"> | Zaio</span></div><div class="date">2023 - 2024</div></div><ul id="zaio-experience" class="editable-list"><li>Led end-to-end influencer marketing campaigns from sourcing and contract negotiation to performance tracking and ROI optimization</li><li>Executed multi-platform paid social campaigns across Meta, Twitter, and TikTok, managing creative testing and audience segmentation</li><li>Designed engagement farming and brand awareness campaigns that significantly expanded reach and community growth metrics</li><li>Built predictive performance models in Python to forecast campaign outcomes and guide strategic budget allocation decisions</li><li>Orchestrated influencer relationships and content calendars to ensure consistent brand messaging</li><li>Analyzed campaign performance data to identify trends and optimize future marketing strategies</li><li>Coordinated with creative teams to develop compelling ad content that resonated with target audiences</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Campaign Moderator</span><span class="company"> | Clarence AI</span></div><div class="date">2022</div></div><ul id="clarence-experience" class="editable-list"><li>Orchestrated high-profile client accounts (MTN NG, Johnny Walker) with consistent on-time campaign delivery</li><li>Developed sophisticated audience segmentation models that enhanced targeting precision and campaign performance</li><li>Implemented quality assurance protocols for campaign creatives, landing pages, and tracking implementation</li><li>Provided regular performance reports to clients with insights and recommendations for optimization</li><li>Collaborated with account managers to ensure client objectives were met and expectations exceeded</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Social Media &amp; Advertising Intern</span><span class="company"> | AfroStory</span></div><div class="date">2022 - 2023</div></div><ul id="afrostory-experience" class="editable-list"><li>Executed performance-driven social campaigns across Meta and Twitter platforms achieving above-industry-average engagement</li><li>Pioneered user-generated content (UGC) strategy that optimized content production costs while increasing organic engagement</li><li>Implemented A/B testing frameworks for creative optimization and audience targeting refinement</li><li>Monitored social media trends and competitor activities to inform content strategy</li><li>Architected engaging social media content that amplified follower growth by 35%</li><li>Assisted in developing social media calendars and content strategies aligned with marketing objectives</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Marketing Assistant</span><span class="company"> | Markham</span></div><div class="date">2021 - 2022</div></div><ul id="markham-experience" class="editable-list"><li>Supported marketing team in executing seasonal campaigns and promotional activities</li><li>Assisted in creating compelling visual merchandising displays to enhance brand presence</li><li>Coordinated with vendors and suppliers for marketing collateral production</li><li>Monitored competitor activities and market trends to inform marketing strategies</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Marketing Intern</span><span class="company"> | Rowdy Bags</span></div><div class="date">2021</div></div><ul id="rowdy-experience" class="editable-list"><li>Assisted in developing social media content and managing brand presence across platforms</li><li>Conducted market research to identify target audience preferences and trends</li><li>Supported product photography and content creation for e-commerce platforms</li></ul></div>
+                <div class="experience-item"><div class="job-header"><div><span class="job-title">Project Assistant</span><span class="company"> | Nhlohlorhi Major Projects</span></div><div class="date">2020 - 2021</div></div><ul id="nhlohlorhi-experience" class="editable-list"><li>Supported project managers in coordinating construction project timelines and deliverables</li><li>Assisted in preparing project documentation, reports, and presentations</li><li>Coordinated communication between project stakeholders and team members</li></ul></div>
+            </div>
+            <div class="education"><h2>Education &amp; Certifications</h2>
+                <div class="education-item"><div class="education-header"><div><span class="degree">BBusSc Management Studies (Analytics)</span><span class="company"> | University of Cape Town</span></div><div class="date">2017 - 2020</div></div><ul id="education-bbus"><li>Comprehensive coursework in Analytics, Statistics, and Business Management</li></ul></div>
+                <div class="education-item"><div class="education-header"><div><span class="degree">Marketing, Statistics, and Quantitative Methods</span><span class="company"> | University of Cape Town</span></div><div class="date">2021 - 2023</div></div><ul id="education-marketing"><li>Advanced studies in Marketing Analytics and Consumer Behavior</li></ul></div>
+                <div class="education-item"><div class="education-header"><div><span class="degree">Data Science Associate Certification</span><span class="company"> | DataCamp</span></div><div class="date">2024</div></div></div>
+                <div class="education-item"><div class="education-header"><div><span class="degree">AI Career Essentials</span><span class="company"> | ALX</span></div><div class="date">2024</div></div></div>
+                <div class="education-item"><div class="education-header"><div><span class="degree">Google Analytics Certification</span><span class="company"> | Google</span></div><div class="date">2023</div></div></div>
+            </div>
+            <div class="achievements section-hidden"><h2>Achievements &amp; Awards</h2></div>
+            <div class="projects section-hidden"><h2>Projects</h2></div>
+        </div>
+    </div>
+
+    <script>
+        // Configure PDF.js worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+
+        // Store FULL original HTML for perfect reset (snapshot the entire resume)
+        const originalResumeHTML = document.getElementById('resume-content').innerHTML;
+
+        // Global state
+        let highlightsVisible = false;
+        let aiApiKey = localStorage.getItem('aiApiKey');
+        let isEditing = false;
+        let extractedKeywords = [];
+        let usingUploadedResume = false;
+        let lastAppliedResume = null;
+
+        // Configure AI visibility
+        if (aiApiKey) document.getElementById('api-key-container').style.display = 'none';
+        else document.getElementById('api-key-container').style.display = 'block';
+
+        function showMessage(message, type) {
+            const msgEl = document.getElementById('message');
+            msgEl.textContent = message;
+            msgEl.className = 'message ' + type;
+            msgEl.style.display = 'block';
+            setTimeout(() => msgEl.style.display = 'none', 5000);
+        }
+
+        // =============================================
+        // UTILITY: Safely coerce any value into an array
+        // Handles: arrays, strings (split by newline/bullet), objects, null/undefined
+        // =============================================
+        function ensureArray(val) {
+            if (Array.isArray(val)) return val;
+            if (val == null) return [];
+            if (typeof val === 'string') {
+                // Split on newlines, bullet chars, numbered lists, or semicolons
+                const lines = val.split(/[\n\r]+|(?:\s*[\u2022\u2023\u25E6\u2043•·‣-]\s+)|(?:\s*\d+[.)]\s+)|;\s*/)
+                    .map(s => s.trim())
+                    .filter(s => s.length > 0);
+                return lines.length > 0 ? lines : [val];
+            }
+            if (typeof val === 'object') return Object.values(val);
+            return [String(val)];
+        }
+
+        // Sanitize text to prevent XSS when inserting into HTML
+        function escapeHTML(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // Helper functions (highlights, editing, reset)
+        document.getElementById('toggle-highlights').addEventListener('click', function() {
+            highlightsVisible = !highlightsVisible;
+            document.querySelectorAll('.highlight-skill').forEach(el => {
+                if (highlightsVisible) { el.style.backgroundColor = 'rgba(52,152,219,0.2)'; el.style.padding = '2px 4px'; el.style.borderRadius = '3px'; el.style.fontWeight = '600'; }
+                else { el.style.backgroundColor = 'transparent'; el.style.padding = '0'; el.style.borderRadius = '0'; el.style.fontWeight = 'inherit'; }
+            });
+            this.textContent = highlightsVisible ? 'Hide Highlights' : 'Show Highlights';
+        });
+
+        document.getElementById('toggle-edit').addEventListener('click', function() {
+            isEditing = !isEditing;
+            document.querySelectorAll('.editable-text, .editable-list li, .education ul li').forEach(el => {
+                el.contentEditable = isEditing;
+                if (isEditing) el.classList.add('editable');
+                else el.classList.remove('editable');
+            });
+            this.textContent = isEditing ? 'Disable Editing' : 'Enable Editing';
+            this.classList.toggle('btn-warning', isEditing);
+            showMessage(isEditing ? 'Editing enabled' : 'Editing disabled', 'info');
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            resetResume();
+            hideHighlights();
+            highlightsVisible = false;
+            document.getElementById('toggle-highlights').textContent = 'Show Highlights';
+            document.getElementById('job-description').value = '';
+            document.getElementById('keywords-display').style.display = 'none';
+            document.getElementById('keyword-status').style.display = 'none';
+            if (isEditing) { disableEditingManually(); }
+            showMessage('Resume changes reset', 'success');
+        });
+
+        function disableEditingManually() {
+            document.querySelectorAll('.editable-text, .editable-list li, .education ul li').forEach(el => {
+                el.contentEditable = false;
+                el.classList.remove('editable');
+            });
+            document.getElementById('toggle-edit').textContent = 'Enable Editing';
+            document.getElementById('toggle-edit').classList.remove('btn-warning');
+            isEditing = false;
+        }
+
+        function hideHighlights() {
+            document.querySelectorAll('.highlight-skill').forEach(el => {
+                el.style.backgroundColor = 'transparent';
+                el.style.padding = '0';
+                el.style.borderRadius = '0';
+                el.style.fontWeight = 'inherit';
+            });
+        }
+
+        function showHighlightsManually() {
+            document.querySelectorAll('.highlight-skill').forEach(el => {
+                el.style.backgroundColor = 'rgba(52,152,219,0.2)';
+                el.style.padding = '2px 4px';
+                el.style.borderRadius = '3px';
+                el.style.fontWeight = '600';
+            });
+        }
+
+        // Reset: restores the ENTIRE original resume HTML (no content leakage)
+        function resetResume() {
+            const container = document.getElementById('resume-content');
+            // Clear auto-fit classes and transform before restoring
+            container.classList.remove('compact-spacing', 'compact-fonts', 'compact-content');
+            container.style.transform = '';
+            container.style.transformOrigin = '';
+            container.innerHTML = originalResumeHTML;
+            usingUploadedResume = false;
+            // Re-attach profile picture click handler
+            document.querySelector('.profile-img').addEventListener('click', () => document.getElementById('file-input').click());
+            document.getElementById('file-input').addEventListener('change', handleProfilePicChange);
+        }
+
+        document.getElementById('configure-ai').addEventListener('click', () => {
+            document.getElementById('api-key-container').style.display = document.getElementById('api-key-container').style.display === 'none' ? 'block' : 'none';
+        });
+        document.getElementById('save-api-key').addEventListener('click', () => {
+            const key = document.getElementById('api-key').value.trim();
+            if (key) { localStorage.setItem('aiApiKey', key); aiApiKey = key; document.getElementById('api-key-container').style.display = 'none'; showMessage('API key saved!', 'success'); }
+            else showMessage('Enter valid API key', 'error');
+        });
+        document.getElementById('advanced-options').addEventListener('click', () => {
+            const cont = document.getElementById('advanced-options-container');
+            cont.style.display = cont.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Download functions
+        document.getElementById('download-html-btn').addEventListener('click', () => {
+            hideHighlights();
+            const resumeHTML = document.getElementById('resume-content').outerHTML;
+            const fullHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Resume</title><link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"><style>${getStylesForDownload()}</style></head><body>${resumeHTML}</body></html>`;
+            const blob = new Blob([fullHTML], { type: 'text/html' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = 'Resume.html';
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(a.href), 100);
+            if (highlightsVisible) showHighlightsManually();
+            showMessage('HTML downloaded', 'success');
+        });
+
+        function getStylesForDownload() {
+            const container = document.getElementById('resume-content');
+            const hasCompactSpacing = container.classList.contains('compact-spacing');
+            const hasCompactFonts = container.classList.contains('compact-fonts');
+            const scaleMatch = container.style.transform ? container.style.transform.match(/scale\(([\d.]+)\)/) : null;
+            let css = `*{margin:0;padding:0;box-sizing:border-box}body{font-family:'Open Sans',sans-serif;line-height:1.4;color:#333;background:white;padding:20px;font-size:13px}.resume-container{background:white;display:flex;align-items:stretch;max-width:900px;margin:0 auto;position:relative}.resume-container::before{content:'';position:absolute;top:0;left:0;bottom:0;width:35%;background:#2c3e50;z-index:0}.sidebar{width:35%;background:transparent;color:white;padding:20px 15px;position:relative;z-index:1}.main-content{width:65%;padding:20px;background:white;position:relative;z-index:1}h1,h2,h3{font-family:'Roboto Condensed',sans-serif;margin-bottom:10px}h1{font-size:18px;color:white;text-transform:uppercase}h2{font-size:14px;color:#2c3e50;border-bottom:2px solid #3498db}.skill-tag{display:inline-block;background:rgba(255,255,255,0.1);padding:3px 6px;border-radius:3px;margin:2px;font-size:9px}.skill-category h4{color:#3498db;margin-bottom:5px;font-size:11px;text-transform:uppercase}.job-title{font-weight:600;color:#2c3e50;font-size:12px}.company,.degree{font-weight:600;color:#2c3e50;font-size:11px}.date{color:#7f8c8d;font-size:10px}ul{padding-left:16px;margin:6px 0}li{margin-bottom:3px;font-size:10px;line-height:1.3}.language-item{margin-bottom:5px;font-size:10px}.reference-name{font-weight:600;font-size:11px;margin-bottom:2px}.reference-item{margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid rgba(255,255,255,0.1)}.reference-item:last-child{border-bottom:none}.reference-item div{font-size:9px;margin-bottom:2px}.reference-title{color:#3498db;font-size:9px}.reference-contact{display:flex;align-items:center;margin-top:3px}.reference-icon{margin-right:5px;font-size:9px;width:12px;text-align:center}.contact-item{display:flex;align-items:center;margin-bottom:6px;font-size:10px}.contact-icon{margin-right:8px;color:#3498db;width:14px;text-align:center}.contact-link{color:white;text-decoration:none}.profile{margin-bottom:20px;text-align:center}.profile-img{width:70px;height:70px;border-radius:50%;border:3px solid #3498db;margin:0 auto 10px;background-color:#eee;display:flex;align-items:center;justify-content:center;overflow:hidden}.profile-img img{width:100%;height:100%;object-fit:cover}.profile-summary p{font-size:10px;line-height:1.4}.section-hidden{display:none!important}`;
+            if (hasCompactSpacing) css += `.compact-spacing .sidebar{padding:12px 10px}.compact-spacing .main-content{padding:12px 15px}.compact-spacing h2{margin-top:8px;margin-bottom:5px;padding-bottom:2px}.compact-spacing .profile{margin-bottom:10px}.compact-spacing ul{margin:2px 0}.compact-spacing li{margin-bottom:1px;line-height:1.2}.compact-spacing .skill-tag{padding:2px 4px;margin:0 2px 2px 0}.compact-spacing .contact-item{margin-bottom:3px}.compact-spacing .reference-item{margin-bottom:6px;padding-bottom:5px}.compact-spacing .language-item{margin-bottom:2px}`;
+            if (hasCompactFonts) css += `.compact-fonts h1{font-size:15px}.compact-fonts h2{font-size:12px}.compact-fonts h3{font-size:10px}.compact-fonts .job-title{font-size:10px}.compact-fonts .company,.compact-fonts .degree{font-size:9px}.compact-fonts .date{font-size:8px}.compact-fonts li{font-size:8px}.compact-fonts .skill-tag{font-size:7.5px}.compact-fonts .skill-category h4{font-size:9px}.compact-fonts .contact-item{font-size:8px}.compact-fonts .language-item{font-size:8px}.compact-fonts .reference-name{font-size:9px}.compact-fonts .reference-item div{font-size:7.5px}.compact-fonts .profile-summary p{font-size:8px}.compact-fonts .profile-img{width:55px;height:55px}`;
+            if (scaleMatch) css += `.resume-container{transform:scale(${scaleMatch[1]});transform-origin:top center}`;
+            return css;
+        }
+
+        document.getElementById('download-pdf-btn').addEventListener('click', async () => {
+            showMessage('Generating PDF...', 'info');
+            const wasVisible = highlightsVisible;
+            hideHighlights();
+
+            // html2canvas cannot render ::before pseudo-elements, so temporarily
+            // set a real background on the sidebar for capture
+            const sidebar = document.querySelector('.sidebar');
+            const resumeEl = document.getElementById('resume-content');
+            const origSidebarBg = sidebar.style.background;
+            sidebar.style.background = '#2c3e50';
+
+            try {
+                const element = resumeEl;
+                // Use scrollWidth/scrollHeight to capture full content including auto-fit
+                const canvas = await html2canvas(element, {
+                    scale: 2,
+                    backgroundColor: '#ffffff',
+                    width: element.scrollWidth,
+                    height: element.scrollHeight,
+                    windowWidth: element.scrollWidth,
+                    windowHeight: element.scrollHeight
+                });
+                const imgData = canvas.toDataURL('image/png');
+                const { jsPDF } = window.jspdf;
+                // A4 dimensions in mm
+                const a4Width = 210;
+                const a4Height = 297;
+                const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+                const imgWidth = a4Width;
+                const imgHeight = (canvas.height * a4Width) / canvas.width;
+                // If content fits one page, center it; otherwise let it flow to multiple pages
+                if (imgHeight <= a4Height) {
+                    pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+                } else {
+                    // Multi-page: split the canvas
+                    let yOffset = 0;
+                    while (yOffset < imgHeight) {
+                        if (yOffset > 0) pdf.addPage();
+                        pdf.addImage(imgData, 'PNG', 0, -yOffset, imgWidth, imgHeight);
+                        yOffset += a4Height;
+                    }
+                }
+                pdf.save('Resume.pdf');
+                showMessage('PDF downloaded', 'success');
+            } catch (e) { console.error('PDF error:', e); showMessage('PDF error: ' + e.message, 'error'); }
+            finally {
+                sidebar.style.background = origSidebarBg;
+                if (wasVisible) showHighlightsManually();
+            }
+        });
+
+        // =============================================
+        // AI API CALL
+        // =============================================
+        async function callOpenAI(prompt, maxTokens, model = 'gpt-3.5-turbo', { systemMessage = null, temperature = 0.3 } = {}) {
+            const messages = [];
+            if (systemMessage) messages.push({ role: 'system', content: systemMessage });
+            messages.push({ role: 'user', content: prompt });
+            const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${aiApiKey}` },
+                body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature })
+            });
+            if (!response.ok) throw new Error(`API error: ${(await response.json()).error?.message}`);
+            return (await response.json()).choices[0].message.content.trim();
+        }
+
+        // =============================================
+        // KEYWORD EXTRACTION & OPTIMIZATION
+        // =============================================
+        async function extractAndFilterKeywords(jobDesc, count) {
+            const prompt = `Analyze job description and extract top ${count} keywords for a resume. Return ONLY a JSON array of strings. Job: ${jobDesc}`;
+            const response = await callOpenAI(prompt, 1000, 'gpt-3.5-turbo');
+            try { return JSON.parse(response); } catch (e) { return extractKeywordsFallback(jobDesc, count); }
+        }
+
+        function extractKeywordsFallback(text, count) {
+            const words = text.toLowerCase().split(/\s+/).filter(w => w.length > 4).slice(0, count * 2);
+            return [...new Set(words)].slice(0, count);
+        }
+
+        function displayKeywords(keywords) {
+            const container = document.getElementById('keywords-list');
+            container.innerHTML = keywords.map((k, i) => `<span class="keyword-tag">${i + 1}. ${escapeHTML(k)}</span>`).join('');
+            document.getElementById('keywords-display').style.display = 'block';
+        }
+
+        async function analyzeKeywordIntegration(keywords) {
+            const resumeText = document.getElementById('resume-content').innerText.toLowerCase();
+            const included = keywords.filter(k => resumeText.includes(k.toLowerCase()));
+            const missing = keywords.filter(k => !resumeText.includes(k.toLowerCase()));
+            return { includedKeywords: included, missingKeywords: missing, totalKeywords: keywords.length, inclusionRate: Math.round((included.length / keywords.length) * 100) };
+        }
+
+        function displayKeywordStatus(analysis) {
+            const tracker = document.getElementById('keyword-tracker');
+            tracker.innerHTML = [...analysis.includedKeywords, ...analysis.missingKeywords].map(k => {
+                const inc = analysis.includedKeywords.includes(k);
+                return `<div class="keyword-item"><div class="keyword-checkbox"><input type="checkbox" ${inc ? 'checked' : ''} disabled></div><div class="keyword-text">${escapeHTML(k)}</div><div class="keyword-status-indicator ${inc ? 'keyword-included' : 'keyword-missing'}"></div>${inc ? '<span class="keyword-added">\u2713 Included</span>' : ''}</div>`;
+            }).join('');
+            document.getElementById('keyword-summary').innerHTML = `<strong>Summary:</strong> ${analysis.includedKeywords.length}/${analysis.totalKeywords} keywords integrated (${analysis.inclusionRate}%)${analysis.missingKeywords.length ? `<br><span style="color:#e74c3c;">Missing: ${analysis.missingKeywords.map(k => escapeHTML(k)).join(', ')}</span>` : '<br><span style="color:#27ae60;">\u2713 All keywords integrated!</span>'}`;
+            document.getElementById('keyword-status').style.display = 'block';
+        }
+
+        function getResumeContent() {
+            const summary = document.getElementById('summary-text')?.textContent || '';
+            const experience = {};
+            document.querySelectorAll('.experience .experience-item').forEach((item, idx) => {
+                const ul = item.querySelector('ul');
+                const id = ul ? (ul.id || `exp-${idx}`) : `exp-${idx}`;
+                const sectionKey = id.replace('-experience', '');
+                experience[sectionKey] = ul ? Array.from(ul.querySelectorAll('li')).map(l => l.textContent) : [];
+            });
+            return { summary, experience };
+        }
+
+        function highlightExistingKeywords(keywords) {
+            const container = document.getElementById('resume-content');
+            const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null, false);
+            const textNodes = [];
+            while (walker.nextNode()) textNodes.push(walker.currentNode);
+
+            const regexes = keywords.map(k => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'));
+
+            textNodes.forEach(node => {
+                const text = node.textContent;
+                if (!regexes.some(r => { r.lastIndex = 0; return r.test(text); })) return;
+
+                const wrapper = document.createElement('span');
+                let highlighted = escapeHTML(text);
+                keywords.forEach(k => {
+                    const regex = new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
+                    highlighted = highlighted.replace(regex, match => `<span class="highlight-skill">${match}</span>`);
+                });
+                wrapper.innerHTML = highlighted;
+                node.parentNode.replaceChild(wrapper, node);
+            });
+        }
+
+        // =============================================
+        // AI OPTIMIZATION (works for both original and uploaded resumes)
+        // =============================================
+        document.getElementById('optimize-btn').addEventListener('click', async function() {
+            const jobDesc = document.getElementById('job-description').value.trim();
+            const kwCount = parseInt(document.getElementById('keyword-count').value) || 15;
+            if (!jobDesc) { showMessage('Paste job description', 'error'); return; }
+            if (!aiApiKey) { showMessage('Configure API key', 'error'); document.getElementById('api-key-container').style.display = 'block'; return; }
+            document.getElementById('loading').style.display = 'block';
+            try {
+                document.getElementById('loading-details').textContent = 'Extracting keywords...';
+                extractedKeywords = await extractAndFilterKeywords(jobDesc, kwCount);
+                displayKeywords(extractedKeywords);
+                document.getElementById('loading-details').textContent = 'Analyzing resume...';
+                const analysis = await analyzeKeywordIntegration(extractedKeywords);
+                displayKeywordStatus(analysis);
+                document.getElementById('loading-details').textContent = 'Optimizing with AI...';
+                await optimizeResumeWithAI(jobDesc, extractedKeywords, analysis);
+                const updatedAnalysis = await analyzeKeywordIntegration(extractedKeywords);
+                displayKeywordStatus(updatedAnalysis);
+                // Run auto-fit after AI optimization changes content
+                requestAnimationFrame(async () => { await document.fonts.ready; autoFitResume(); });
+                highlightsVisible = true;
+                showHighlightsManually();
+                document.getElementById('toggle-highlights').textContent = 'Hide Highlights';
+                showMessage(`Optimized! ${updatedAnalysis.includedKeywords.length}/${extractedKeywords.length} keywords integrated.`, 'success');
+            } catch (e) { showMessage(`Error: ${e.message}`, 'error'); }
+            finally { document.getElementById('loading').style.display = 'none'; }
+        });
+
+        async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
+            const missing = analysis.missingKeywords;
+            if (missing.length === 0) { highlightExistingKeywords(keywords); return; }
+            const resumeContent = getResumeContent();
+            const prompt = `Enhance this resume to naturally include these missing keywords: ${missing.join(', ')}.
+
+Current resume content: ${JSON.stringify(resumeContent)}
+
+Return ONLY valid JSON with:
+- "summary": the enhanced professional summary string
+- "enhancements": an object where each key is a section name (matching the keys in the experience object I gave you) and each value is an array of objects with "original" and "enhanced" strings.
+
+Important: Keep all enhancements natural and professional. Do not fabricate experience.`;
+
+            try {
+                const response = await callOpenAI(prompt, 3000, document.getElementById('ai-model').value);
+                const result = JSON.parse(response);
+                if (result.summary) document.getElementById('summary-text').textContent = result.summary;
+                if (result.enhancements) {
+                    for (const [section, enhancements] of Object.entries(result.enhancements)) {
+                        // Try multiple ID patterns to find the right UL
+                        const el = document.getElementById(`${section}-experience`) || document.getElementById(section);
+                        if (el && el.tagName === 'UL') {
+                            const bullets = el.querySelectorAll('li');
+                            const enhArray = ensureArray(enhancements);
+                            enhArray.forEach((enh, idx) => {
+                                if (bullets[idx]) {
+                                    // Handle both {original,enhanced} objects and plain strings
+                                    const text = (typeof enh === 'object' && enh !== null) ? (enh.enhanced || enh.original || String(enh)) : String(enh);
+                                    bullets[idx].textContent = text;
+                                }
+                            });
+                        }
+                    }
+                }
+                highlightExistingKeywords(keywords);
+            } catch (e) {
+                console.error('AI optimization failed, falling back to highlight-only:', e);
+                highlightExistingKeywords(keywords);
+            }
+        }
+
+        // =============================================
+        // RESUME UPLOAD FUNCTIONALITY
+        // =============================================
+        document.getElementById('upload-resume-btn').addEventListener('click', async function() {
+            const fileInput = document.getElementById('resume-upload');
+            const file = fileInput.files[0];
+            if (!file) { showMessage('Select a file first', 'error'); return; }
+            showMessage(`Processing ${file.name}...`, 'info');
+            document.getElementById('upload-status').innerHTML = '📄 Reading file...';
+            try {
+                let extractedText = '';
+                if (file.type === 'text/plain' || file.name.endsWith('.txt')) extractedText = await readTextFile(file);
+                else if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) extractedText = await readPDFFile(file);
+                else if (file.type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || file.name.endsWith('.docx')) extractedText = await readDOCXFile(file);
+                else if (file.type === 'text/html' || file.name.endsWith('.html')) extractedText = await readHTMLFile(file);
+                else { showMessage('Unsupported format. Use PDF, DOCX, TXT, or HTML', 'error'); return; }
+
+                if (!extractedText || extractedText.trim().length < 50) {
+                    showMessage('Could not extract enough text from the file', 'error');
+                    return;
+                }
+
+                // For PDFs, extractedText is actually JSON from Vision API
+                let parsed = null;
+
+                if (file.name.endsWith('.pdf')) {
+                    // PDF was extracted via Vision API, parse the JSON
+                    try {
+                        parsed = JSON.parse(extractedText);
+                        showMessage(`Extracted via Vision API`, 'info');
+                    } catch (e) {
+                        console.error('Failed to parse Vision API JSON:', e);
+                        showMessage('Failed to parse extracted resume data', 'error');
+                        return;
+                    }
+                } else {
+                    // Non-PDF: use text-based parsing
+                    if (aiApiKey) {
+                        document.getElementById('upload-status').innerHTML = '🤖 AI parsing resume structure...';
+                        try {
+                            parsed = await parseResumeWithAI(extractedText);
+                        } catch (e) {
+                            console.warn('AI parsing failed, will use fallback:', e);
+                            parsed = null;
+                        }
+                    }
+
+                    if (!parsed) {
+                        // FALLBACK: Smart text extraction without AI
+                        document.getElementById('upload-status').innerHTML = '📝 Using smart text extraction...';
+                        parsed = parseResumeFromText(extractedText);
+                    }
+                }
+
+                if (parsed && (parsed.name || parsed.summary || (parsed.experience && parsed.experience.length > 0))) {
+                    applyParsedResumeToUI(parsed);
+                    usingUploadedResume = true;
+                    // Run auto-fit after rendering imported content
+                    requestAnimationFrame(async () => { await document.fonts.ready; autoFitResume(); });
+                    showMessage(`Loaded: ${file.name}`, 'success');
+                    document.getElementById('upload-status').innerHTML = `✅ Loaded: ${file.name}`;
+                } else {
+                    showMessage('Could not extract resume data', 'error');
+                    document.getElementById('upload-status').innerHTML = '❌ Failed to extract data';
+                }
+
+                hideHighlights();
+                highlightsVisible = false;
+                document.getElementById('toggle-highlights').textContent = 'Show Highlights';
+                document.getElementById('keywords-display').style.display = 'none';
+                document.getElementById('keyword-status').style.display = 'none';
+            } catch (e) {
+                showMessage(`Error: ${e.message}`, 'error');
+                document.getElementById('upload-status').innerHTML = '❌ Failed';
+            }
+        });
+
+        document.getElementById('save-default-btn').addEventListener('click', saveCurrentAsDefault);
+
+        document.getElementById('reset-to-original').addEventListener('click', function() {
+            resetResume();
+            usingUploadedResume = false;
+            if (isEditing) { disableEditingManually(); }
+            hideHighlights();
+            highlightsVisible = false;
+            document.getElementById('toggle-highlights').textContent = 'Show Highlights';
+            document.getElementById('keywords-display').style.display = 'none';
+            document.getElementById('keyword-status').style.display = 'none';
+            showMessage('Reset to original resume', 'success');
+            document.getElementById('upload-status').innerHTML = '';
+        });
+
+        // =============================================
+        // SAVE AS DEFAULT / REVERT TO HARDCODED
+        // =============================================
+        const SAVED_DEFAULT_KEY = 'resumeDefault';
+        const SAVED_DEFAULT_VERSION = 1;
+
+        function saveCurrentAsDefault() {
+            if (!lastAppliedResume) {
+                showMessage('Import a resume first before saving it as default', 'error');
+                return;
+            }
+            try {
+                localStorage.setItem(SAVED_DEFAULT_KEY, JSON.stringify({ version: SAVED_DEFAULT_VERSION, data: lastAppliedResume }));
+                showMessage('Saved as default — will load automatically on next visit', 'success');
+            } catch (e) {
+                if (e.name === 'QuotaExceededError') {
+                    showMessage('Could not save — browser storage is full', 'error');
+                } else {
+                    showMessage('Could not save: ' + e.message, 'error');
+                }
+            }
+        }
+
+        function revertToHardcodedDefault() {
+            localStorage.removeItem(SAVED_DEFAULT_KEY);
+            resetResume();
+            usingUploadedResume = false;
+            lastAppliedResume = null;
+            if (isEditing) { disableEditingManually(); }
+            hideHighlights();
+            highlightsVisible = false;
+            document.getElementById('toggle-highlights').textContent = 'Show Highlights';
+            document.getElementById('keywords-display').style.display = 'none';
+            document.getElementById('keyword-status').style.display = 'none';
+            document.getElementById('upload-status').innerHTML = '';
+            showMessage('Saved default cleared — original hardcoded resume restored', 'success');
+        }
+
+        // =============================================
+        // FILE READERS
+        // =============================================
+        async function readTextFile(file) {
+            return new Promise((res, rej) => {
+                const r = new FileReader();
+                r.onload = e => res(e.target.result);
+                r.onerror = rej;
+                r.readAsText(file);
+            });
+        }
+
+        async function readPDFFile(file) {
+            if (!aiApiKey) {
+                throw new Error('AI API key required for PDF extraction');
+            }
+
+            const buf = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
+            const numPages = pdf.numPages;
+
+            // Render all pages as images and extract via OpenAI Vision API
+            const pageImages = [];
+
+            for (let i = 1; i <= Math.min(numPages, 3); i++) { // Limit to 3 pages to avoid token overuse
+                try {
+                    const page = await pdf.getPage(i);
+                    const viewport = page.getViewport({ scale: 2 }); // Scale 2 for better quality
+                    const canvas = document.createElement('canvas');
+                    canvas.width = viewport.width;
+                    canvas.height = viewport.height;
+
+                    const context = canvas.getContext('2d');
+                    await page.render({ canvasContext: context, viewport }).promise;
+
+                    // Convert canvas to base64 PNG
+                    const imageBase64 = canvas.toDataURL('image/png').split(',')[1];
+                    pageImages.push(imageBase64);
+                } catch (e) {
+                    console.warn(`Failed to render page ${i}:`, e);
+                }
+            }
+
+            if (pageImages.length === 0) {
+                throw new Error('Could not render any pages from PDF');
+            }
+
+            // Send images to OpenAI Vision API for extraction
+            const prompt = `Extract structured resume/CV data from these images. Return ONLY valid JSON with this structure:
+{
+  "name": "Full Name",
+  "title": "Professional Title / Headline",
+  "summary": "Professional summary",
+  "contact": {
+    "email": "",
+    "phone": "",
+    "location": "",
+    "linkedin": "",
+    "website": "",
+    "portfolio": ""
+  },
+  "skills": {
+    "categories": [
+      { "name": "Category", "items": ["skill1", "skill2"] }
+    ]
+  },
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "date": "Date Range",
+      "bullets": ["achievement 1", "achievement 2"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree",
+      "institution": "School",
+      "date": "Date Range",
+      "details": ["detail"]
+    }
+  ],
+  "languages": ["Language (Proficiency)"],
+  "references": [
+    {
+      "name": "Name",
+      "title": "Title",
+      "email": "",
+      "phone": ""
+    }
+  ],
+  "certifications": [
+    {
+      "name": "Cert Name",
+      "issuer": "Issuer",
+      "date": "Date"
+    }
+  ],
+  "achievements": ["achievement 1"],
+  "projects": [
+    {
+      "name": "Project Name",
+      "description": "Description",
+      "bullets": ["detail"]
+    }
+  ]
+}
+
+CRITICAL RULES:
+- Use EXACT text from the resume for names, titles, companies — NEVER guess or use generic labels
+- Extract ALL data: contact info, education, achievements, references, skills, projects
+- For phone numbers and emails: search entire resume carefully
+- For company names: use EXACT names as written, not descriptions
+- Return valid JSON only, no markdown or explanation`;
+
+            // Build vision API request with multiple images
+            const messageContent = [
+                {
+                    type: 'text',
+                    text: prompt
+                }
+            ];
+
+            // Add all page images
+            pageImages.forEach(imageBase64 => {
+                messageContent.push({
+                    type: 'image_url',
+                    image_url: {
+                        url: `data:image/png;base64,${imageBase64}`
+                    }
+                });
+            });
+
+            try {
+                const response = await fetch('https://api.openai.com/v1/chat/completions', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${aiApiKey}`
+                    },
+                    body: JSON.stringify({
+                        model: 'gpt-4o', // Use gpt-4o for vision capability (or gpt-4-turbo)
+                        messages: [
+                            {
+                                role: 'user',
+                                content: messageContent
+                            }
+                        ],
+                        max_tokens: 4000,
+                        temperature: 0
+                    })
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(`OpenAI API error: ${error.error?.message}`);
+                }
+
+                const result = await response.json();
+                let extractedJson = result.choices[0].message.content.trim();
+
+                // Strip markdown code fences if present
+                extractedJson = extractedJson.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+
+                // Parse and return the structured data
+                const parsed = JSON.parse(extractedJson);
+
+                // Return as JSON string so upload handler can parse it
+                return JSON.stringify(parsed);
+            } catch (e) {
+                console.error('PDF extraction via Vision API failed:', e);
+                throw e;
+            }
+        }
+
+        async function readDOCXFile(file) {
+            const buf = await file.arrayBuffer();
+            const result = await mammoth.extractRawText({ arrayBuffer: buf });
+            return result.value;
+        }
+
+        async function readHTMLFile(file) {
+            return new Promise((res, rej) => {
+                const r = new FileReader();
+                r.onload = e => {
+                    const parser = new DOMParser();
+                    const doc = parser.parseFromString(e.target.result, 'text/html');
+                    doc.querySelectorAll('script,style,iframe,object,embed,link[rel="import"]').forEach(el => el.remove());
+                    res(doc.body.textContent || doc.body.innerText || '');
+                };
+                r.onerror = rej;
+                r.readAsText(file);
+            });
+        }
+
+        // =============================================
+        // AI RESUME PARSING (with robust prompt for dynamic template)
+        // =============================================
+        async function parseResumeWithAI(rawText) {
+            if (!aiApiKey) return null;
+
+            const selectedModel = document.getElementById('ai-model').value;
+            const charLimit = selectedModel.includes('gpt-4') ? 20000 : 12000;
+
+            const systemMessage = `You are a precise resume parser. You extract structured data from resume text. You NEVER infer, guess, or fabricate information — you only use text that actually appears in the resume. If a field cannot be determined from the text, leave it as an empty string or empty array.`;
+
+            const prompt = `Parse the following resume text into structured JSON. Return ONLY valid JSON, no markdown fences, no explanation.
+
+The JSON must have this structure (include all fields you can find, leave empty arrays/strings for missing data):
+{
+  "name": "Full Name",
+  "title": "Professional Title / Headline",
+  "summary": "Professional summary paragraph",
+  "contact": {
+    "email": "",
+    "phone": "",
+    "location": "",
+    "linkedin": "",
+    "website": "",
+    "portfolio": ""
+  },
+  "skills": {
+    "categories": [
+      { "name": "Category Name", "items": ["skill1", "skill2"] }
+    ]
+  },
+  "experience": [
+    {
+      "title": "Job Title",
+      "company": "Company Name",
+      "date": "Date Range",
+      "bullets": ["achievement 1", "achievement 2"]
+    }
+  ],
+  "education": [
+    {
+      "degree": "Degree Name",
+      "institution": "School Name",
+      "date": "Date Range",
+      "details": ["detail 1"]
+    }
+  ],
+  "languages": ["Language (Proficiency)"],
+  "references": [
+    {
+      "name": "Reference Name",
+      "title": "Their Job Title",
+      "organization": "Company or Organization Name",
+      "email": "",
+      "phone": ""
+    }
+  ],
+  "certifications": [
+    {
+      "name": "Certification Name",
+      "issuer": "Issuing Organization",
+      "date": "Date"
+    }
+  ],
+  "achievements": ["achievement or award 1", "achievement or award 2"],
+  "projects": [
+    {
+      "name": "Project Name",
+      "description": "Brief description",
+      "bullets": ["detail 1", "detail 2"]
+    }
+  ]
+}
+
+CRITICAL RULES:
+- Use EXACT text from the resume for company names, job titles, and person names — NEVER rephrase, infer, or substitute generic labels like "Current Company" or "Previous Company"
+- "bullets" MUST be an array of strings, never a single string
+- "details" MUST be an array of strings, never a single string
+- "items" in skills MUST be an array of strings
+- Extract ALL experience entries, education entries, skills, and references you can find
+- Search the ENTIRE text for email patterns (word@domain.com) and phone patterns (digits with spaces/dashes)
+- If the text contains "---COLUMN_BREAK---", the text before it is from one column (often contact/skills/sidebar) and after it is another column (often experience/education). Parse BOTH columns fully.
+- For company names: the company name usually appears near or with the job title, often separated by | or on an adjacent line. Use the EXACT name as written.
+- For job titles: use the EXACT title as written in the resume, not a description of the role
+- Look for sections labeled "Achievements", "Awards", "Honours", "Accomplishments", "Recognition" and extract them into the achievements array
+- Look for sections labeled "Projects", "Key Projects" and extract them into the projects array
+- For references: extract the full title AND the full organization/company name separately. E.g. if the CV shows "CEO @ClarenceAI & Commodore Power Manufacturing", set title="CEO" and organization="ClarenceAI & Commodore Power Manufacturing". Never drop the organization.
+- If you can't determine a category for skills, use "General" as the category name
+- For the professional title, include ALL titles/subtitles shown under the name (e.g. "BSc Property Studies | Entrepreneur | Business Development Manager")
+
+Resume text:
+${rawText.substring(0, charLimit)}`;
+
+            try {
+                let response = await callOpenAI(prompt, 4000, selectedModel, {
+                    systemMessage,
+                    temperature: 0
+                });
+                // Strip markdown code fences if the AI wraps it
+                response = response.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+                return JSON.parse(response);
+            } catch (e) {
+                console.error('AI parse failed:', e);
+                return null;
+            }
+        }
+
+        // =============================================
+        // FALLBACK: Parse resume from plain text using patterns
+        // (No AI needed — works offline)
+        // =============================================
+        function parseResumeFromText(text) {
+            // Handle column break marker from layout-aware PDF extraction
+            text = text.replace(/---COLUMN_BREAK---/g, '\n\n');
+
+            const lines = text.split(/\n/).map(l => l.trim()).filter(l => l.length > 0);
+            const result = {
+                name: '',
+                title: '',
+                summary: '',
+                contact: { email: '', phone: '', location: '', linkedin: '', website: '', portfolio: '' },
+                skills: { categories: [] },
+                experience: [],
+                education: [],
+                achievements: [],
+                projects: [],
+                languages: [],
+                references: [],
+                certifications: []
+            };
+
+            // Extract contact info with regex
+            const emailMatch = text.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+            if (emailMatch) result.contact.email = emailMatch[0];
+
+            const phoneMatch = text.match(/(?:\+?\d{1,3}[\s-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}/);
+            if (phoneMatch) result.contact.phone = phoneMatch[0];
+
+            const linkedinMatch = text.match(/linkedin\.com\/in\/[\w-]+/i);
+            if (linkedinMatch) result.contact.linkedin = linkedinMatch[0];
+
+            // Name is typically the first substantial non-email, non-phone line
+            for (const line of lines.slice(0, 5)) {
+                if (line.length > 2 && line.length < 60 && !line.includes('@') && !line.match(/^\+?\d/) && !line.match(/linkedin/i)) {
+                    if (!result.name) { result.name = line; continue; }
+                    if (!result.title && line.length > 3) { result.title = line; break; }
+                }
+            }
+
+            // Section detection — find sections by common headings
+            const sectionPatterns = {
+                summary: /^(?:professional\s+)?summary|^profile|^about|^objective/i,
+                experience: /^(?:professional\s+)?experience|^work\s+(?:experience|history)|^employment/i,
+                education: /^education|^academic|^qualifications/i,
+                skills: /^(?:technical\s+)?skills|^competenc|^expertise|^proficienc/i,
+                languages: /^languages?$/i,
+                references: /^references?$/i,
+                certifications: /^certifications?|^licenses?|^credentials?/i,
+                achievements: /^(?:achievements?|awards?|honours?|honors?|accomplishments?|recognition)/i,
+                projects: /^(?:key\s+)?projects?$/i
+            };
+
+            // Build section map
+            const sections = [];
+            lines.forEach((line, idx) => {
+                for (const [type, pattern] of Object.entries(sectionPatterns)) {
+                    if (pattern.test(line)) {
+                        sections.push({ type, startIdx: idx + 1 });
+                        break;
+                    }
+                }
+            });
+
+            // Extract content for each section
+            sections.forEach((sec, i) => {
+                const endIdx = (i + 1 < sections.length) ? sections[i + 1].startIdx - 1 : lines.length;
+                const sectionLines = lines.slice(sec.startIdx, endIdx);
+
+                switch (sec.type) {
+                    case 'summary':
+                        result.summary = sectionLines.join(' ');
+                        break;
+
+                    case 'experience':
+                        parseExperienceLines(sectionLines, result.experience);
+                        break;
+
+                    case 'education':
+                        parseEducationLines(sectionLines, result.education);
+                        break;
+
+                    case 'skills':
+                        const allSkills = sectionLines
+                            .join(', ')
+                            .split(/[,;|•·\u2022\u2023\u25E6\u2043]/)
+                            .map(s => s.trim())
+                            .filter(s => s.length > 1 && s.length < 50);
+                        if (allSkills.length > 0) {
+                            result.skills.categories.push({ name: 'Skills', items: allSkills });
+                        }
+                        break;
+
+                    case 'languages':
+                        result.languages = sectionLines.filter(l => l.length > 1 && l.length < 60);
+                        break;
+
+                    case 'references':
+                        // Simple: each reference is a few lines
+                        let currentRef = null;
+                        sectionLines.forEach(line => {
+                            const refEmail = line.match(/[\w.+-]+@[\w-]+\.[\w.]+/);
+                            const refPhone = line.match(/(?:\+?\d{1,3}[\s-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}/);
+                            if (!currentRef || (!refEmail && !refPhone && !line.match(/^\s/) && line.length > 3 && line.length < 50 && !line.includes(','))) {
+                                if (currentRef) result.references.push(currentRef);
+                                currentRef = { name: line, title: '', organization: '', email: '', phone: '' };
+                            } else if (refEmail) {
+                                currentRef.email = refEmail[0];
+                            } else if (refPhone) {
+                                currentRef.phone = refPhone[0];
+                            } else if (!currentRef.title) {
+                                // Check if line contains @ or common org separators
+                                const orgMatch = line.match(/^(.+?)\s*[@|]\s*(.+)$/);
+                                if (orgMatch) {
+                                    currentRef.title = orgMatch[1].trim();
+                                    currentRef.organization = orgMatch[2].trim();
+                                } else {
+                                    currentRef.title = line;
+                                }
+                            } else if (!currentRef.organization) {
+                                currentRef.organization = line;
+                            }
+                        });
+                        if (currentRef) result.references.push(currentRef);
+                        break;
+
+                    case 'certifications':
+                        sectionLines.forEach(line => {
+                            if (line.length > 3) {
+                                result.certifications.push({ name: line, issuer: '', date: '' });
+                            }
+                        });
+                        break;
+
+                    case 'achievements':
+                        result.achievements = sectionLines
+                            .map(l => l.replace(/^\s*[-\u2022\u2023\u25E6\u2043•·*>\u00d8]\s+/i, '').trim())
+                            .filter(l => l.length > 3);
+                        break;
+
+                    case 'projects':
+                        parseProjectLines(sectionLines, result.projects);
+                        break;
+                }
+            });
+
+            // If no summary was found in sections, use first paragraph-like text
+            if (!result.summary && lines.length > 3) {
+                const candidateLines = lines.slice(2, 8).filter(l => l.length > 80);
+                if (candidateLines.length > 0) result.summary = candidateLines.join(' ');
+            }
+
+            return result;
+        }
+
+        function parseExperienceLines(lines, experienceArr) {
+            const datePattern = /\b(?:19|20)\d{2}\b.*?(?:[-–—to]+\s*(?:(?:19|20)\d{2}|present|current|now))?/i;
+            let currentJob = null;
+
+            lines.forEach(line => {
+                const hasDate = datePattern.test(line);
+                const isBullet = /^\s*[-•·\u2022\u2023\u25E6\u2043*]\s+/.test(line) || /^\s*\d+[.)]\s+/.test(line);
+
+                if (hasDate && !isBullet) {
+                    // This is likely a job header line
+                    if (currentJob) experienceArr.push(currentJob);
+                    const dateMatch = line.match(datePattern);
+                    const dateStr = dateMatch ? dateMatch[0].trim() : '';
+                    const titleCompany = line.replace(datePattern, '').replace(/[|,]?\s*$/, '').trim();
+                    const parts = titleCompany.split(/\s*[|@–—]\s*|\s+at\s+/i);
+                    currentJob = {
+                        title: parts[0] || titleCompany,
+                        company: parts[1] || '',
+                        date: dateStr,
+                        bullets: []
+                    };
+                } else if (isBullet && currentJob) {
+                    currentJob.bullets.push(line.replace(/^\s*[-•·\u2022\u2023\u25E6\u2043*]\s+/, '').replace(/^\s*\d+[.)]\s+/, ''));
+                } else if (currentJob && line.length > 20 && !hasDate) {
+                    // Could be a continuation bullet without a bullet char
+                    currentJob.bullets.push(line);
+                } else if (!currentJob && line.length > 5) {
+                    // Might be first job title without a date on same line
+                    currentJob = { title: line, company: '', date: '', bullets: [] };
+                }
+            });
+            if (currentJob) experienceArr.push(currentJob);
+        }
+
+        function parseEducationLines(lines, educationArr) {
+            const datePattern = /\b(?:19|20)\d{2}\b/;
+            let currentEdu = null;
+
+            lines.forEach(line => {
+                const hasDate = datePattern.test(line);
+                const isBullet = /^\s*[-•·\u2022*]\s+/.test(line);
+
+                if ((hasDate || line.length > 10) && !isBullet && !currentEdu) {
+                    const dateMatch = line.match(/\b(?:19|20)\d{2}\b.*?(?:[-–—to]+\s*(?:(?:19|20)\d{2}|present|current))?/i);
+                    const dateStr = dateMatch ? dateMatch[0].trim() : '';
+                    const rest = line.replace(/\b(?:19|20)\d{2}\b.*?(?:[-–—to]+\s*(?:(?:19|20)\d{2}|present|current))?/i, '').trim();
+                    const parts = rest.split(/\s*[|@–—,]\s*|\s+at\s+/i);
+                    currentEdu = { degree: parts[0] || rest, institution: parts[1] || '', date: dateStr, details: [] };
+                } else if (hasDate && !isBullet && currentEdu) {
+                    educationArr.push(currentEdu);
+                    const dateMatch = line.match(/\b(?:19|20)\d{2}\b.*?(?:[-–—to]+\s*(?:(?:19|20)\d{2}|present|current))?/i);
+                    const dateStr = dateMatch ? dateMatch[0].trim() : '';
+                    const rest = line.replace(/\b(?:19|20)\d{2}\b.*?(?:[-–—to]+\s*(?:(?:19|20)\d{2}|present|current))?/i, '').trim();
+                    const parts = rest.split(/\s*[|@–—,]\s*|\s+at\s+/i);
+                    currentEdu = { degree: parts[0] || rest, institution: parts[1] || '', date: dateStr, details: [] };
+                } else if (currentEdu && line.length > 3) {
+                    currentEdu.details.push(line.replace(/^\s*[-•·\u2022*]\s+/, ''));
+                }
+            });
+            if (currentEdu) educationArr.push(currentEdu);
+        }
+
+        function parseProjectLines(lines, projectsArr) {
+            let currentProj = null;
+            lines.forEach(line => {
+                const isBullet = /^\s*[-•·\u2022\u2023\u25E6\u2043*]\s+/.test(line);
+                if (!isBullet && line.length > 5 && line.length < 100) {
+                    if (currentProj) projectsArr.push(currentProj);
+                    currentProj = { name: line, description: '', bullets: [] };
+                } else if (isBullet && currentProj) {
+                    currentProj.bullets.push(line.replace(/^\s*[-•·\u2022\u2023\u25E6\u2043*]\s+/, ''));
+                } else if (currentProj && line.length > 10) {
+                    if (!currentProj.description) currentProj.description = line;
+                    else currentProj.bullets.push(line);
+                }
+            });
+            if (currentProj) projectsArr.push(currentProj);
+        }
+
+        // =============================================
+        // AUTO-FIT SYSTEM — measure after render, compress to fit A4
+        // =============================================
+        const A4_PAGE_HEIGHT = 1122; // A4 at 96dpi in pixels
+
+        function hideEmptySections() {
+            // Hide sections with no meaningful content (empty headings)
+            const container = document.getElementById('resume-content');
+            if (!container) return;
+
+            // Check experience section
+            const expSection = container.querySelector('.experience');
+            if (expSection) {
+                const items = expSection.querySelectorAll('.experience-item');
+                expSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check education section
+            const eduSection = container.querySelector('.education');
+            if (eduSection) {
+                const items = eduSection.querySelectorAll('.education-item');
+                eduSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check skills section
+            const skillsSection = container.querySelector('.skills');
+            if (skillsSection) {
+                const tags = skillsSection.querySelectorAll('.skill-tag');
+                skillsSection.classList.toggle('section-hidden', tags.length === 0);
+            }
+
+            // Check languages section
+            const langSection = container.querySelector('.languages');
+            if (langSection) {
+                const items = langSection.querySelectorAll('.language-item');
+                langSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check references section
+            const refSection = container.querySelector('.references');
+            if (refSection) {
+                const items = refSection.querySelectorAll('.reference-item');
+                refSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check profile summary
+            const summarySection = container.querySelector('.profile-summary');
+            if (summarySection) {
+                const text = (summarySection.querySelector('#summary-text') || summarySection.querySelector('p'));
+                const isEmpty = !text || !text.textContent.trim();
+                summarySection.classList.toggle('section-hidden', isEmpty);
+            }
+
+            // Check contact section
+            const contactSection = container.querySelector('.contact-info');
+            if (contactSection) {
+                const items = contactSection.querySelectorAll('.contact-item');
+                contactSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check achievements section
+            const achieveSection = container.querySelector('.achievements');
+            if (achieveSection) {
+                const items = achieveSection.querySelectorAll('li');
+                achieveSection.classList.toggle('section-hidden', items.length === 0);
+            }
+
+            // Check projects section
+            const projSection = container.querySelector('.projects');
+            if (projSection) {
+                const items = projSection.querySelectorAll('.project-item');
+                projSection.classList.toggle('section-hidden', items.length === 0);
+            }
+        }
+
+        /**
+         * autoFitResume() — Measure-after-render auto-fit system.
+         * Guarantees content fits within A4 page height (1122px at 96dpi).
+         * Idempotent: resets all compression before re-measuring.
+         * Only runs for uploaded/imported resumes or when content overflows.
+         */
+        function autoFitResume() {
+            const container = document.getElementById('resume-content');
+            if (!container) return;
+
+            // Step 0: Reset all previous compression (idempotent)
+            container.classList.remove('compact-spacing', 'compact-fonts', 'compact-content');
+            container.style.transform = '';
+            container.style.transformOrigin = '';
+
+            // Restore any previously trimmed bullets
+            container.querySelectorAll('[data-autofit-hidden]').forEach(el => {
+                el.style.display = '';
+                el.removeAttribute('data-autofit-hidden');
+            });
+            // Restore any truncated summary
+            const summaryEl = container.querySelector('#summary-text');
+            if (summaryEl && summaryEl.dataset.autofitOriginal) {
+                summaryEl.textContent = summaryEl.dataset.autofitOriginal;
+                delete summaryEl.dataset.autofitOriginal;
+            }
+
+            // Hide empty sections first
+            hideEmptySections();
+
+            // Only apply compression for uploaded resumes or if content actually overflows
+            // The original hardcoded resume should not be affected
+            if (!usingUploadedResume && container.scrollHeight <= A4_PAGE_HEIGHT) {
+                return;
+            }
+
+            // Measure initial height
+            let currentHeight = container.scrollHeight;
+            if (currentHeight <= A4_PAGE_HEIGHT) return; // Already fits
+
+            // Phase 1: Reduce spacing
+            container.classList.add('compact-spacing');
+            currentHeight = container.scrollHeight;
+            if (currentHeight <= A4_PAGE_HEIGHT) return;
+
+            // Phase 2: Reduce font sizes
+            container.classList.add('compact-fonts');
+            currentHeight = container.scrollHeight;
+            if (currentHeight <= A4_PAGE_HEIGHT) return;
+
+            // Phase 3: Trim content
+            container.classList.add('compact-content');
+
+            // Phase 3a: Trim achievements and projects first (less critical than experience)
+            const achievementItems = container.querySelectorAll('.achievements li');
+            for (let i = achievementItems.length - 1; i >= 0; i--) {
+                achievementItems[i].style.display = 'none';
+                achievementItems[i].setAttribute('data-autofit-hidden', 'true');
+                currentHeight = container.scrollHeight;
+                if (currentHeight <= A4_PAGE_HEIGHT) return;
+            }
+            const projectItems = container.querySelectorAll('.projects .project-item');
+            for (let i = projectItems.length - 1; i >= 0; i--) {
+                projectItems[i].style.display = 'none';
+                projectItems[i].setAttribute('data-autofit-hidden', 'true');
+                currentHeight = container.scrollHeight;
+                if (currentHeight <= A4_PAGE_HEIGHT) return;
+            }
+
+            // Phase 3b: Remove experience bullets from oldest jobs first, protect recent ones
+            const experienceItems = container.querySelectorAll('.experience-item');
+            if (experienceItems.length > 0) {
+                // Start from the last (oldest) experience and remove bullets
+                for (let i = experienceItems.length - 1; i >= 0; i--) {
+                    const bullets = experienceItems[i].querySelectorAll('li');
+                    // Remove bullets from the end of each job (least important first)
+                    for (let j = bullets.length - 1; j >= 0; j--) {
+                        // Keep at least 2 bullets for the most recent job, 1 for others
+                        const minBullets = (i === 0) ? 2 : 1;
+                        if (j < minBullets) break;
+                        bullets[j].style.display = 'none';
+                        bullets[j].setAttribute('data-autofit-hidden', 'true');
+                        currentHeight = container.scrollHeight;
+                        if (currentHeight <= A4_PAGE_HEIGHT) return;
+                    }
+                    // If we've trimmed bullets and still need space,
+                    // hide entire oldest job entries (never hide the 2 most recent)
+                    if (i >= 2 && experienceItems.length > 2) {
+                        experienceItems[i].style.display = 'none';
+                        experienceItems[i].setAttribute('data-autofit-hidden', 'true');
+                        currentHeight = container.scrollHeight;
+                        if (currentHeight <= A4_PAGE_HEIGHT) return;
+                    }
+                }
+
+                // Collapse skill categories — hide overflow skill tags
+                const skillCategories = container.querySelectorAll('.skill-category');
+                skillCategories.forEach(cat => {
+                    const tags = cat.querySelectorAll('.skill-tag');
+                    for (let t = tags.length - 1; t >= 6; t--) {
+                        tags[t].style.display = 'none';
+                        tags[t].setAttribute('data-autofit-hidden', 'true');
+                    }
+                });
+                currentHeight = container.scrollHeight;
+                if (currentHeight <= A4_PAGE_HEIGHT) return;
+
+                // Truncate summary
+                if (summaryEl && summaryEl.textContent.length > 150) {
+                    summaryEl.dataset.autofitOriginal = summaryEl.textContent;
+                    const words = summaryEl.textContent.split(/\s+/);
+                    // Binary search for the right length
+                    let lo = 10, hi = words.length;
+                    while (lo < hi) {
+                        const mid = Math.floor((lo + hi + 1) / 2);
+                        summaryEl.textContent = words.slice(0, mid).join(' ') + '...';
+                        if (container.scrollHeight <= A4_PAGE_HEIGHT) {
+                            lo = mid;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    summaryEl.textContent = words.slice(0, lo).join(' ') + '...';
+                    currentHeight = container.scrollHeight;
+                    if (currentHeight <= A4_PAGE_HEIGHT) return;
+                }
+            }
+
+            // Phase 4: Scale transform as absolute last resort (minimum 0.8)
+            currentHeight = container.scrollHeight;
+            if (currentHeight > A4_PAGE_HEIGHT) {
+                let scale = A4_PAGE_HEIGHT / currentHeight;
+                if (scale < 0.8) scale = 0.8;
+                container.style.transform = `scale(${scale})`;
+                container.style.transformOrigin = 'top center';
+            }
+        }
+
+        // =============================================
+        // APPLY PARSED RESUME TO UI
+        // Completely replaces ALL content — no original data leaks through
+        // =============================================
+        function applyParsedResumeToUI(resume) {
+            lastAppliedResume = resume;
+            // --- SIDEBAR ---
+            // Name & Title
+            const nameEl = document.querySelector('.profile h1');
+            const titleEl = document.querySelector('.profile h3');
+            if (nameEl) nameEl.textContent = resume.name || 'Name Not Found';
+            if (titleEl) titleEl.textContent = resume.title || '';
+
+            // Profile image initials
+            const initialsSpan = document.querySelector('.profile-img span');
+            if (initialsSpan && resume.name) {
+                const parts = resume.name.trim().split(/\s+/);
+                initialsSpan.textContent = parts.map(p => p[0]).join('').substring(0, 2).toUpperCase();
+            }
+            // Hide any previously uploaded profile picture
+            const profilePic = document.getElementById('profile-picture');
+            if (profilePic) { profilePic.style.display = 'none'; profilePic.src = ''; }
+            if (initialsSpan) initialsSpan.style.display = '';
+
+            // Contact
+            updateContactSection(resume.contact || {});
+
+            // Skills — support both old format {technical:[], marketing:[]} and new {categories:[{name, items}]}
+            if (resume.skills) updateSkillsSection(resume.skills);
+
+            // Languages
+            updateLanguagesSection(resume.languages || []);
+
+            // References
+            updateReferencesSection(resume.references || []);
+
+            // --- MAIN CONTENT ---
+            // Summary
+            const summaryEl = document.getElementById('summary-text');
+            if (summaryEl) summaryEl.textContent = resume.summary || '';
+
+            // Experience — fully dynamic, replaces all experience items
+            updateExperienceSection(resume.experience || []);
+
+            // Education + Certifications — fully dynamic
+            updateEducationSection(resume.education || [], resume.certifications || []);
+
+            // Achievements
+            updateAchievementsSection(resume.achievements || []);
+
+            // Projects
+            updateProjectsSection(resume.projects || []);
+        }
+
+        // =============================================
+        // SECTION UPDATERS (all fully replace their content)
+        // =============================================
+        function updateSkillsSection(skills) {
+            const container = document.querySelector('.skills .skills-container');
+            if (!container) return;
+            container.innerHTML = '';
+
+            let categories = [];
+
+            // Handle new format: { categories: [{name, items}] }
+            if (skills.categories && Array.isArray(skills.categories)) {
+                categories = skills.categories;
+            } else {
+                // Handle old/flat format: { technical: [], marketing: [], ... }
+                for (const [key, val] of Object.entries(skills)) {
+                    if (key === 'categories') continue;
+                    const items = ensureArray(val);
+                    if (items.length > 0) {
+                        // Convert key to readable name
+                        const name = key.replace(/([A-Z])/g, ' $1').replace(/^./, s => s.toUpperCase()).trim();
+                        categories.push({ name, items });
+                    }
+                }
+            }
+
+            categories.forEach(cat => {
+                const items = ensureArray(cat.items);
+                if (items.length === 0) return;
+                const div = document.createElement('div');
+                div.className = 'skill-category';
+                div.innerHTML = `<h4>${escapeHTML(cat.name || 'Skills')}</h4>`;
+                items.forEach(s => {
+                    const tag = document.createElement('div');
+                    tag.className = 'skill-tag';
+                    tag.textContent = s;
+                    div.appendChild(tag);
+                });
+                container.appendChild(div);
+            });
+        }
+
+        function updateExperienceSection(experiences) {
+            const expContainer = document.querySelector('.experience');
+            if (!expContainer) return;
+            // Remove all existing experience items but keep the H2
+            expContainer.querySelectorAll('.experience-item').forEach(e => e.remove());
+
+            const expArray = ensureArray(experiences);
+            expArray.forEach((exp, idx) => {
+                if (!exp || typeof exp !== 'object') return;
+                const bullets = ensureArray(exp.bullets);
+                const div = document.createElement('div');
+                div.className = 'experience-item';
+                div.innerHTML = `<div class="job-header"><div><span class="job-title">${escapeHTML(exp.title || '')}</span><span class="company"> | ${escapeHTML(exp.company || '')}</span></div><div class="date">${escapeHTML(exp.date || '')}</div></div><ul id="exp-${idx}" class="editable-list">${bullets.map(b => `<li>${escapeHTML(b)}</li>`).join('')}</ul>`;
+                expContainer.appendChild(div);
+            });
+        }
+
+        function updateEducationSection(educations, certifications) {
+            const eduContainer = document.querySelector('.education');
+            if (!eduContainer) return;
+            eduContainer.querySelectorAll('.education-item').forEach(e => e.remove());
+
+            const eduArray = ensureArray(educations);
+            eduArray.forEach((edu, idx) => {
+                if (!edu || typeof edu !== 'object') return;
+                const details = ensureArray(edu.details);
+                const div = document.createElement('div');
+                div.className = 'education-item';
+                div.innerHTML = `<div class="education-header"><div><span class="degree">${escapeHTML(edu.degree || '')}</span><span class="company"> | ${escapeHTML(edu.institution || '')}</span></div><div class="date">${escapeHTML(edu.date || '')}</div></div>${details.length ? `<ul>${details.map(d => `<li>${escapeHTML(d)}</li>`).join('')}</ul>` : ''}`;
+                eduContainer.appendChild(div);
+            });
+
+            // Append certifications as education items
+            const certArray = ensureArray(certifications);
+            certArray.forEach(cert => {
+                if (!cert || typeof cert !== 'object') return;
+                const div = document.createElement('div');
+                div.className = 'education-item';
+                div.innerHTML = `<div class="education-header"><div><span class="degree">${escapeHTML(cert.name || '')}</span><span class="company"> | ${escapeHTML(cert.issuer || '')}</span></div><div class="date">${escapeHTML(cert.date || '')}</div></div>`;
+                eduContainer.appendChild(div);
+            });
+        }
+
+        function updateLanguagesSection(languages) {
+            const langContainer = document.querySelector('.languages');
+            if (!langContainer) return;
+            langContainer.querySelectorAll('.language-item').forEach(e => e.remove());
+            const langArray = ensureArray(languages);
+            if (langArray.length === 0) {
+                // Hide the section if no languages
+                langContainer.style.display = 'none';
+                return;
+            }
+            langContainer.style.display = '';
+            langArray.forEach(l => {
+                const div = document.createElement('div');
+                div.className = 'language-item';
+                div.innerHTML = `<div>${escapeHTML(typeof l === 'string' ? l : JSON.stringify(l))}</div>`;
+                langContainer.appendChild(div);
+            });
+        }
+
+        function updateReferencesSection(references) {
+            const refContainer = document.querySelector('.references');
+            if (!refContainer) return;
+            refContainer.querySelectorAll('.reference-item').forEach(e => e.remove());
+            const refArray = ensureArray(references);
+            if (refArray.length === 0) {
+                // Show "Available upon request" instead of nothing
+                const div = document.createElement('div');
+                div.className = 'reference-item';
+                div.innerHTML = `<div style="font-size: 10px; color: rgba(255,255,255,0.7);">Available upon request</div>`;
+                refContainer.appendChild(div);
+                return;
+            }
+            refArray.forEach(ref => {
+                if (!ref || typeof ref !== 'object') return;
+                const div = document.createElement('div');
+                div.className = 'reference-item';
+                let html = `<div class="reference-name">${escapeHTML(ref.name || '')}</div>`;
+                if (ref.title && ref.organization) {
+                    html += `<div class="reference-title">${escapeHTML(ref.title)} @ ${escapeHTML(ref.organization)}</div>`;
+                } else if (ref.title) {
+                    html += `<div class="reference-title">${escapeHTML(ref.title)}</div>`;
+                } else if (ref.organization) {
+                    html += `<div class="reference-title">${escapeHTML(ref.organization)}</div>`;
+                }
+                if (ref.email) html += `<div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>${escapeHTML(ref.email)}</span></div>`;
+                if (ref.phone) html += `<div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>${escapeHTML(ref.phone)}</span></div>`;
+                div.innerHTML = html;
+                refContainer.appendChild(div);
+            });
+        }
+
+        function updateContactSection(contact) {
+            const contactContainer = document.querySelector('.contact-info');
+            if (!contactContainer) return;
+            contactContainer.querySelectorAll('.contact-item').forEach(i => i.remove());
+
+            const fields = [
+                { icon: 'fas fa-envelope', val: contact.email },
+                { icon: 'fas fa-phone', val: contact.phone },
+                { icon: 'fas fa-map-marker-alt', val: contact.location },
+                { icon: 'fab fa-linkedin', val: contact.linkedin, isLink: true },
+                { icon: 'fas fa-globe', val: contact.website, isLink: true },
+                { icon: 'fas fa-folder-open', val: contact.portfolio, isLink: true }
+            ];
+
+            fields.forEach(f => {
+                if (!f.val) return;
+                const div = document.createElement('div');
+                div.className = 'contact-item';
+                if (f.isLink) {
+                    const href = f.val.startsWith('http') ? f.val : 'https://' + f.val;
+                    div.innerHTML = `<span class="contact-icon"><i class="${f.icon}"></i></span><a href="${escapeHTML(href)}" target="_blank" class="contact-link">${escapeHTML(f.val)}</a>`;
+                } else {
+                    div.innerHTML = `<span class="contact-icon"><i class="${f.icon}"></i></span><span>${escapeHTML(f.val)}</span>`;
+                }
+                contactContainer.appendChild(div);
+            });
+        }
+
+        function updateAchievementsSection(achievements) {
+            const container = document.querySelector('.achievements');
+            if (!container) return;
+            container.querySelectorAll('ul, li').forEach(e => e.remove());
+            const arr = ensureArray(achievements);
+            if (arr.length === 0) return;
+            const ul = document.createElement('ul');
+            arr.forEach(a => {
+                const li = document.createElement('li');
+                li.textContent = typeof a === 'string' ? a : JSON.stringify(a);
+                ul.appendChild(li);
+            });
+            container.appendChild(ul);
+        }
+
+        function updateProjectsSection(projects) {
+            const container = document.querySelector('.projects');
+            if (!container) return;
+            container.querySelectorAll('.project-item').forEach(e => e.remove());
+            const arr = ensureArray(projects);
+            if (arr.length === 0) return;
+            arr.forEach((proj, idx) => {
+                if (!proj || typeof proj !== 'object') return;
+                const bullets = ensureArray(proj.bullets);
+                const div = document.createElement('div');
+                div.className = 'project-item experience-item';
+                let html = `<div class="job-header"><div><span class="job-title">${escapeHTML(proj.name || '')}</span></div></div>`;
+                if (proj.description) html += `<p style="font-size:10px;margin-bottom:4px;">${escapeHTML(proj.description)}</p>`;
+                if (bullets.length > 0) html += `<ul class="editable-list">${bullets.map(b => `<li>${escapeHTML(b)}</li>`).join('')}</ul>`;
+                div.innerHTML = html;
+                container.appendChild(div);
+            });
+        }
+
+        // =============================================
+        // PROFILE PICTURE HANDLER
+        // =============================================
+        function handleProfilePicChange(e) {
+            if (e.target.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(ev) {
+                    const img = document.getElementById('profile-picture');
+                    img.src = ev.target.result;
+                    img.style.display = 'block';
+                    document.querySelector('.profile-img span').style.display = 'none';
+                };
+                reader.readAsDataURL(e.target.files[0]);
+            }
+        }
+
+        document.querySelector('.profile-img').addEventListener('click', () => document.getElementById('file-input').click());
+        document.getElementById('file-input').addEventListener('change', handleProfilePicChange);
+        hideHighlights();
+
+        // =============================================
+        // SECRET REVERT: Cmd+Shift+Z (Mac) / Ctrl+Shift+Z (Win/Linux)
+        // =============================================
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key === 'Z') {
+                e.preventDefault();
+                revertToHardcodedDefault();
+            }
+        });
+
+        // =============================================
+        // STARTUP: load saved default if present
+        // =============================================
+        function loadDefaultOnStartup() {
+            const raw = localStorage.getItem(SAVED_DEFAULT_KEY);
+            if (!raw) return;
+            let parsed;
+            try {
+                parsed = JSON.parse(raw);
+            } catch (e) {
+                console.warn('resumeDefault in localStorage was corrupted — clearing.', e);
+                localStorage.removeItem(SAVED_DEFAULT_KEY);
+                return;
+            }
+            if (!parsed || parsed.version !== SAVED_DEFAULT_VERSION || !parsed.data) {
+                console.warn('resumeDefault version mismatch or missing data — clearing.');
+                localStorage.removeItem(SAVED_DEFAULT_KEY);
+                return;
+            }
+            applyParsedResumeToUI(parsed.data);
+            usingUploadedResume = true;
+            document.getElementById('upload-status').innerHTML = '<span style="color:#27ae60;">✓ Loaded your saved default resume</span>';
+            requestAnimationFrame(async () => {
+                await document.fonts.ready;
+                autoFitResume();
+            });
+        }
+        loadDefaultOnStartup();
+    </script>
+</body>
+</html>
