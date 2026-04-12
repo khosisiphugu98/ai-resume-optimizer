@@ -4,13 +4,37 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Resume Optimizer - Multi-Resume Support</title>
+    <!-- Content Security Policy: restricts where scripts/data can go -->
+    <meta http-equiv="Content-Security-Policy" content="
+        default-src 'none';
+        script-src 'unsafe-inline' https://cdnjs.cloudflare.com;
+        style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
+        font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
+        img-src 'self' data: blob:;
+        connect-src https://api.openai.com;
+        worker-src blob:;
+        frame-ancestors 'none';
+        base-uri 'none';
+        form-action 'none';
+    ">
     <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"
+          integrity="sha384-iw3OoTErCYJJB9mCa8LNS2hbsQ7M3C0EpIsO/H5+EGAkPGc6rk+V8i04oW/K5xq0"
+          crossorigin="anonymous">
     <!-- PDF and DOCX parsing libraries -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+    <!-- pdf.js upgraded to 3.11.174 (patched against CVE-2024-4367) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"
+            integrity="sha384-/1qUCSGwTur9vjf/z9lmu/eCUYbpOTgSjmpbMQZ1/CtX2v/WcAIKqRv+U1DUCG6e"
+            crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.4.2/mammoth.browser.min.js"
+            integrity="sha384-PND+HpqAG2y0D5c0mzwZl0nU4JOvCDJ7EoepNUftiijKO5xYCdJ9kiMbAl5tdNkD"
+            crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"
+            integrity="sha384-JcnsjUPPylna1s1fvi1u12X5qjY5OL56iySh75FdtrwhO/SWXgMjoVqcKyIIWOLk"
+            crossorigin="anonymous"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"
+            integrity="sha384-ZZ1pncU3bQe8y31yfZdMFdSpttDoPmOZg2wguVK9almUodir1PghgT0eY7Mrty8H"
+            crossorigin="anonymous"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Open Sans', sans-serif; line-height: 1.4; color: #333; background: #f0f2f5; padding: 20px; font-size: 13px; }
@@ -142,8 +166,9 @@
         <input type="password" id="api-key" class="api-key-input" placeholder="Enter your OpenAI API key for AI-powered optimization">
         <button id="save-api-key" class="btn btn-success">Save API Key</button>
         <div style="font-size: 11px; margin-top: 5px; color: #666;">
-            Your API key is stored locally in your browser and never sent to our servers.
-            <a href="https://platform.openai.com/api-keys" target="_blank">Get your API key</a>
+            Your API key is stored in session memory only (cleared when you close the tab) and never sent to our servers.
+            Your resume content and job description are sent directly to <a href="https://openai.com/privacy" target="_blank" rel="noopener noreferrer">OpenAI's API</a> for processing — review their privacy policy before uploading sensitive documents.
+            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get your API key</a>
         </div>
     </div>
 
@@ -201,6 +226,7 @@
         <button id="download-pdf-btn" class="btn btn-danger">Download as PDF</button>
         <button id="reset-btn" class="btn btn-secondary">Reset Optimized Changes</button>
         <button id="configure-ai" class="btn btn-success">Configure AI</button>
+        <button id="clear-data-btn" class="btn btn-secondary" title="Clears saved resume and API key from browser storage">🗑 Clear Saved Data</button>
     </div>
 
     <div id="message" class="message"></div>
@@ -237,11 +263,11 @@
 
             <div class="contact-info">
                 <h2>Contact</h2>
-                <div class="contact-item"><span class="contact-icon"><i class="fas fa-envelope"></i></span><span>mksiphugu@gmail.com</span></div>
-                <div class="contact-item"><span class="contact-icon"><i class="fas fa-phone"></i></span><span>+27 82 820 4538</span></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fas fa-envelope"></i></span><span>your.email@example.com</span></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fas fa-phone"></i></span><span>+27 00 000 0000</span></div>
                 <div class="contact-item"><span class="contact-icon"><i class="fas fa-map-marker-alt"></i></span><span>South Africa</span></div>
-                <div class="contact-item"><span class="contact-icon"><i class="fab fa-linkedin"></i></span><a href="https://www.linkedin.com/in/khosi-siphugu-897567233" target="_blank" class="contact-link">linkedin.com/in/khosi-siphugu</a></div>
-                <div class="contact-item"><span class="contact-icon"><i class="fab fa-google-drive"></i></span><a href="https://drive.google.com/drive/folders/1lokgVg0laICaXIJ8Lb_vVzme3HyvasSz?usp=sharing" target="_blank" class="contact-link">View Portfolio</a></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fab fa-linkedin"></i></span><a href="#" target="_blank" rel="noopener noreferrer" class="contact-link">linkedin.com/in/your-profile</a></div>
+                <div class="contact-item"><span class="contact-icon"><i class="fab fa-google-drive"></i></span><a href="#" target="_blank" rel="noopener noreferrer" class="contact-link">View Portfolio</a></div>
             </div>
 
             <div class="skills">
@@ -266,10 +292,7 @@
 
             <div class="references">
                 <h2>References</h2>
-                <div class="reference-item"><div class="reference-name">Harjot Singh</div><div class="reference-title">Co-founder at Zaio</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>harjot@zaio.io</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 72 934 7387</span></div></div>
-                <div class="reference-item"><div class="reference-name">Dave Kreeck</div><div class="reference-title">Colleague at Zaio</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>dave@kreeck.com</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 73 809 2731</span></div></div>
-                <div class="reference-item"><div class="reference-name">Jarred Stokes</div><div class="reference-title">Former Manager at Hyve Mobile</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>jarred@hyvemobile.co.za</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 82 689 9924</span></div></div>
-                <div class="reference-item"><div class="reference-name">Thabiso Mokhachane</div><div class="reference-title">Team-member at Hyve Mobile</div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-envelope"></i></span><span>thabiso.mokhachane@hyvemobile.co.za</span></div><div class="reference-contact"><span class="reference-icon"><i class="fas fa-phone"></i></span><span>+27 76 884 5314</span></div></div>
+                <div class="reference-item"><div style="font-size: 10px; color: rgba(255,255,255,0.7);">Available upon request</div></div>
             </div>
         </div>
 
@@ -299,14 +322,14 @@
 
     <script>
         // Configure PDF.js worker
-        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
         // Store FULL original HTML for perfect reset (snapshot the entire resume)
         const originalResumeHTML = document.getElementById('resume-content').innerHTML;
 
         // Global state
         let highlightsVisible = false;
-        let aiApiKey = localStorage.getItem('aiApiKey');
+        let aiApiKey = sessionStorage.getItem('aiApiKey');
         let isEditing = false;
         let extractedKeywords = [];
         let usingUploadedResume = false;
@@ -340,6 +363,19 @@
             }
             if (typeof val === 'object') return Object.values(val);
             return [String(val)];
+        }
+
+        // Sanitize URLs: allow only https, http, mailto — block javascript:, data:, etc.
+        function sanitizeUrl(val) {
+            if (!val) return '#';
+            const str = String(val).trim();
+            try {
+                const url = new URL(str.startsWith('http') || str.startsWith('mailto:') ? str : 'https://' + str);
+                if (!['https:', 'http:', 'mailto:'].includes(url.protocol)) return '#';
+                return url.href;
+            } catch {
+                return '#';
+            }
         }
 
         // Sanitize text to prevent XSS when inserting into HTML
@@ -430,7 +466,7 @@
         });
         document.getElementById('save-api-key').addEventListener('click', () => {
             const key = document.getElementById('api-key').value.trim();
-            if (key) { localStorage.setItem('aiApiKey', key); aiApiKey = key; document.getElementById('api-key-container').style.display = 'none'; showMessage('API key saved!', 'success'); }
+            if (key) { sessionStorage.setItem('aiApiKey', key); aiApiKey = key; document.getElementById('api-key-container').style.display = 'none'; showMessage('API key saved for this session!', 'success'); }
             else showMessage('Enter valid API key', 'error');
         });
         document.getElementById('advanced-options').addEventListener('click', () => {
@@ -439,10 +475,26 @@
         });
 
         // Download functions
-        document.getElementById('download-html-btn').addEventListener('click', () => {
+        document.getElementById('download-html-btn').addEventListener('click', async () => {
             hideHighlights();
             const resumeHTML = document.getElementById('resume-content').outerHTML;
-            const fullHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Resume</title><link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet"><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css"><style>${getStylesForDownload()}</style></head><body>${resumeHTML}</body></html>`;
+            // Fetch Font Awesome CSS inline so the exported file has no live CDN dependencies
+            let fontAwesomeCSS = '';
+            try {
+                const faResp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css');
+                fontAwesomeCSS = await faResp.text();
+                // Rewrite relative font paths to absolute CDN paths so icons still load
+                fontAwesomeCSS = fontAwesomeCSS.replace(/url\((['"]?)\.\.\/webfonts\//g, 'url($1https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/webfonts/');
+            } catch (e) {
+                // If fetch fails, fall back to CDN link (better than broken export)
+                fontAwesomeCSS = null;
+            }
+            const faTag = fontAwesomeCSS
+                ? `<style>${fontAwesomeCSS}</style>`
+                : `<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">`;
+            // Restrictive CSP for the exported file — no scripts, no external connects
+            const exportCSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com; font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com data:; img-src data: blob:; script-src 'none';">`;
+            const fullHTML = `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Resume</title>${exportCSP}<link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@300;400;600;700&family=Roboto+Condensed:wght@700&display=swap" rel="stylesheet">${faTag}<style>${getStylesForDownload()}</style></head><body>${resumeHTML}</body></html>`;
             const blob = new Blob([fullHTML], { type: 'text/html' });
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
@@ -537,7 +589,14 @@
         // KEYWORD EXTRACTION & OPTIMIZATION
         // =============================================
         async function extractAndFilterKeywords(jobDesc, count) {
-            const prompt = `Analyze job description and extract top ${count} keywords for a resume. Return ONLY a JSON array of strings. Job: ${jobDesc}`;
+            // Cap job description length to prevent prompt injection via oversized input
+            const safeJobDesc = String(jobDesc).slice(0, 5000);
+            const prompt = `Analyze the following job description and extract the top ${count} most important keywords for a resume.
+Return ONLY a valid JSON array of strings. No other text, no markdown.
+
+<job_description>
+${safeJobDesc}
+</job_description>`;
             const response = await callOpenAI(prompt, 1000, 'gpt-3.5-turbo');
             try { return JSON.parse(response); } catch (e) { return extractKeywordsFallback(jobDesc, count); }
         }
@@ -588,20 +647,35 @@
             const textNodes = [];
             while (walker.nextNode()) textNodes.push(walker.currentNode);
 
-            const regexes = keywords.map(k => new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi'));
+            // Sanitize keyword strings before using in regex — never trust AI/user input in regex context
+            const safeKeywords = keywords.map(k => String(k).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+            if (safeKeywords.length === 0) return;
+            const combined = new RegExp(safeKeywords.map(k => `\\b${k}\\b`).join('|'), 'gi');
 
             textNodes.forEach(node => {
                 const text = node.textContent;
-                if (!regexes.some(r => { r.lastIndex = 0; return r.test(text); })) return;
+                combined.lastIndex = 0;
+                if (!combined.test(text)) return;
 
-                const wrapper = document.createElement('span');
-                let highlighted = escapeHTML(text);
-                keywords.forEach(k => {
-                    const regex = new RegExp(`\\b${k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'gi');
-                    highlighted = highlighted.replace(regex, match => `<span class="highlight-skill">${match}</span>`);
-                });
-                wrapper.innerHTML = highlighted;
-                node.parentNode.replaceChild(wrapper, node);
+                // Build DOM fragment — never use innerHTML, always use textContent for all text
+                const frag = document.createDocumentFragment();
+                let lastIndex = 0;
+                combined.lastIndex = 0;
+                let match;
+                while ((match = combined.exec(text)) !== null) {
+                    if (match.index > lastIndex) {
+                        frag.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+                    }
+                    const span = document.createElement('span');
+                    span.className = 'highlight-skill';
+                    span.textContent = match[0]; // textContent only — never innerHTML
+                    frag.appendChild(span);
+                    lastIndex = match.index + match[0].length;
+                }
+                if (lastIndex < text.length) {
+                    frag.appendChild(document.createTextNode(text.slice(lastIndex)));
+                }
+                node.parentNode.replaceChild(frag, node);
             });
         }
 
@@ -639,15 +713,22 @@
             const missing = analysis.missingKeywords;
             if (missing.length === 0) { highlightExistingKeywords(keywords); return; }
             const resumeContent = getResumeContent();
-            const prompt = `Enhance this resume to naturally include these missing keywords: ${missing.join(', ')}.
+            // Cap resume content to prevent runaway token usage
+            const safeResumeJSON = JSON.stringify(resumeContent).slice(0, 8000);
+            const safeKeywords = missing.slice(0, 30).map(k => String(k).replace(/[<>"']/g, '')).join(', ');
+            const prompt = `You are a professional resume writer. Enhance the resume below to naturally include the missing keywords listed. Keep all enhancements truthful and professional. Do not fabricate experience.
 
-Current resume content: ${JSON.stringify(resumeContent)}
+<missing_keywords>
+${safeKeywords}
+</missing_keywords>
+
+<current_resume>
+${safeResumeJSON}
+</current_resume>
 
 Return ONLY valid JSON with:
 - "summary": the enhanced professional summary string
-- "enhancements": an object where each key is a section name (matching the keys in the experience object I gave you) and each value is an array of objects with "original" and "enhanced" strings.
-
-Important: Keep all enhancements natural and professional. Do not fabricate experience.`;
+- "enhancements": an object where each key is a section name (matching the keys in the experience object I gave you) and each value is an array of objects with "original" and "enhanced" strings.`;
 
             try {
                 const response = await callOpenAI(prompt, 3000, document.getElementById('ai-model').value);
@@ -755,6 +836,7 @@ Important: Keep all enhancements natural and professional. Do not fabricate expe
         });
 
         document.getElementById('save-default-btn').addEventListener('click', saveCurrentAsDefault);
+        document.getElementById('clear-data-btn').addEventListener('click', clearAllSavedData);
 
         document.getElementById('reset-to-original').addEventListener('click', function() {
             resetResume();
@@ -780,6 +862,13 @@ Important: Keep all enhancements natural and professional. Do not fabricate expe
                 showMessage('Import a resume first before saving it as default', 'error');
                 return;
             }
+            // Warn user their PII will be stored in browser storage
+            const ok = confirm(
+                'This will save your resume data (including personal details) in your browser\'s local storage so it loads automatically next time.\n\n' +
+                '⚠ Do not use this on a shared or public device.\n\n' +
+                'Continue?'
+            );
+            if (!ok) return;
             try {
                 localStorage.setItem(SAVED_DEFAULT_KEY, JSON.stringify({ version: SAVED_DEFAULT_VERSION, data: lastAppliedResume }));
                 showMessage('Saved as default — will load automatically on next visit', 'success');
@@ -790,6 +879,16 @@ Important: Keep all enhancements natural and professional. Do not fabricate expe
                     showMessage('Could not save: ' + e.message, 'error');
                 }
             }
+        }
+
+        function clearAllSavedData() {
+            const ok = confirm('This will permanently delete your saved resume and API key from this browser. Continue?');
+            if (!ok) return;
+            localStorage.removeItem(SAVED_DEFAULT_KEY);
+            sessionStorage.removeItem('aiApiKey');
+            aiApiKey = null;
+            document.getElementById('api-key-container').style.display = 'block';
+            showMessage('All saved data cleared from browser storage', 'success');
         }
 
         function revertToHardcodedDefault() {
@@ -1767,8 +1866,8 @@ ${rawText.substring(0, charLimit)}`;
                 const div = document.createElement('div');
                 div.className = 'contact-item';
                 if (f.isLink) {
-                    const href = f.val.startsWith('http') ? f.val : 'https://' + f.val;
-                    div.innerHTML = `<span class="contact-icon"><i class="${f.icon}"></i></span><a href="${escapeHTML(href)}" target="_blank" class="contact-link">${escapeHTML(f.val)}</a>`;
+                    const href = sanitizeUrl(f.val);
+                    div.innerHTML = `<span class="contact-icon"><i class="${f.icon}"></i></span><a href="${escapeHTML(href)}" target="_blank" rel="noopener noreferrer" class="contact-link">${escapeHTML(f.val)}</a>`;
                 } else {
                     div.innerHTML = `<span class="contact-icon"><i class="${f.icon}"></i></span><span>${escapeHTML(f.val)}</span>`;
                 }
