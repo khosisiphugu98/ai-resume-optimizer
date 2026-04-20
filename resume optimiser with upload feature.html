@@ -642,25 +642,32 @@
         }
 
         // Scan canvas pixel rows from the bottom upward and return the y-coordinate of
-        // the last row that contains any non-white, non-transparent pixel.
-        // This detects the true content boundary regardless of DOM layout.
+        // the last row that contains any non-white pixel in the MAIN CONTENT column.
+        //
+        // Critical: we skip the left sidebar (≈35% of width) because its dark background
+        // (#2c3e50) fills the full container height — scanning it would always return
+        // the bottom of the canvas, preventing any cropping.
+        // We scan only x ≥ 38% of canvas width (the white main content area).
         function detectContentBottom(canvas) {
             const ctx = canvas.getContext('2d');
             const { width, height } = canvas;
-            const data = ctx.getImageData(0, 0, width, height).data;
+            // Read only the main content column to avoid the always-filled sidebar
+            const xStart = Math.floor(width * 0.38);
+            const scanWidth = width - xStart;
+            const data = ctx.getImageData(xStart, 0, scanWidth, height).data;
             // Walk rows from bottom to top
             for (let y = height - 1; y >= 0; y--) {
-                const rowStart = y * width * 4;
-                for (let x = 0; x < width; x++) {
+                const rowStart = y * scanWidth * 4;
+                for (let x = 0; x < scanWidth; x++) {
                     const i = rowStart + x * 4;
                     const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-                    // Non-transparent AND not pure white
+                    // Non-transparent AND not pure/near-white
                     if (a > 10 && !(r > 245 && g > 245 && b > 245)) {
-                        return y; // last content row found
+                        return y;
                     }
                 }
             }
-            return height; // fallback: no blank rows found
+            return height; // fallback: no blank rows detected
         }
 
         // Return a new canvas cropped to contentHeight + paddingPx
