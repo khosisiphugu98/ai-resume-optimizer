@@ -641,41 +641,29 @@
             return css;
         }
 
-        // Scan canvas pixel rows from the bottom upward and return the y-coordinate of
-        // the last row that contains any non-white pixel in the MAIN CONTENT column.
-        //
-        // Critical: we skip the left sidebar (≈35% of width) because its dark background
-        // (#2c3e50) fills the full container height — scanning it would always return
-        // the bottom of the canvas, preventing any cropping.
-        // We scan only x ≥ 38% of canvas width (the white main content area).
-        function detectContentBottom(canvas) {
-            const ctx = canvas.getContext('2d');
-            const { width, height } = canvas;
-            // Read only the main content column to avoid the always-filled sidebar
-            const xStart = Math.floor(width * 0.38);
-            const scanWidth = width - xStart;
-            const data = ctx.getImageData(xStart, 0, scanWidth, height).data;
-            // Walk rows from bottom to top
-            for (let y = height - 1; y >= 0; y--) {
-                const rowStart = y * scanWidth * 4;
-                for (let x = 0; x < scanWidth; x++) {
-                    const i = rowStart + x * 4;
-                    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-                    // Non-transparent AND not pure/near-white
-                    if (a > 10 && !(r > 245 && g > 245 && b > 245)) {
-                        return y;
-                    }
-                }
-            }
-            return height; // fallback: no blank rows detected
+        // Measure the lowest content edge by walking every DOM element inside the container.
+        // Returns the bottom position in CSS pixels relative to the container top.
+        // This is reliable regardless of background colors — it measures layout, not pixels.
+        function measureContentBottomDOM(container) {
+            const containerTop = container.getBoundingClientRect().top;
+            let maxBottom = 0;
+            container.querySelectorAll('*').forEach(el => {
+                // Skip elements that are hidden by auto-fit or have no size
+                if (el.dataset.autofitHidden) return;
+                const rect = el.getBoundingClientRect();
+                if (rect.width === 0 && rect.height === 0) return;
+                const bottom = rect.bottom - containerTop;
+                if (bottom > maxBottom) maxBottom = bottom;
+            });
+            return maxBottom;
         }
 
-        // Return a new canvas cropped to contentHeight + paddingPx
-        function cropCanvas(source, contentBottom, paddingPx = 20) {
-            const croppedHeight = Math.min(contentBottom + paddingPx, source.height);
+        // Return a new canvas cropped to croppedHeight pixels
+        function cropCanvas(source, croppedHeight) {
+            const h = Math.min(Math.ceil(croppedHeight), source.height);
             const cropped = document.createElement('canvas');
             cropped.width = source.width;
-            cropped.height = croppedHeight;
+            cropped.height = h;
             cropped.getContext('2d').drawImage(source, 0, 0);
             return cropped;
         }
@@ -694,8 +682,17 @@
 
             try {
                 const element = resumeEl;
+                const scale = 2;
+
+                // Measure content boundary from the DOM BEFORE rendering the canvas.
+                // This gives us the exact bottom of the last real element in CSS pixels.
+                const contentBottomCSS = measureContentBottomDOM(element);
+                // Convert to canvas pixels and add 20px real-CSS-pixel bottom margin
+                const bottomMarginCSS = 20;
+                const cropHeightCanvas = (contentBottomCSS + bottomMarginCSS) * scale;
+
                 const rawCanvas = await html2canvas(element, {
-                    scale: 2,
+                    scale,
                     backgroundColor: '#ffffff',
                     width: element.scrollWidth,
                     height: element.scrollHeight,
@@ -703,9 +700,7 @@
                     windowHeight: element.scrollHeight
                 });
 
-                // Detect the actual content boundary and crop out blank bottom space
-                const contentBottom = detectContentBottom(rawCanvas);
-                const canvas = cropCanvas(rawCanvas, contentBottom, 60); // 60px padding — enough breathing room without blank space
+                const canvas = cropCanvas(rawCanvas, cropHeightCanvas);
 
                 const imgData = canvas.toDataURL('image/png');
                 const { jsPDF } = window.jspdf;
