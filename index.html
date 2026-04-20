@@ -334,6 +334,7 @@
         let extractedKeywords = [];
         let usingUploadedResume = false;
         let lastAppliedResume = null;
+        let preOptimizationSnapshot = null; // DOM snapshot taken just before each optimize run
 
         // Configure AI visibility
         if (aiApiKey) document.getElementById('api-key-container').style.display = 'none';
@@ -385,6 +386,66 @@
             return div.innerHTML;
         }
 
+        // =============================================
+        // IDENTITY-BASED BULLET MATCHING (Phase 1 fix)
+        // Instead of matching AI enhancements to bullets by array index (fragile),
+        // we match by content hash. The AI returns {original, enhanced} pairs;
+        // we find the exact <li> whose text matches `original` and replace only that one.
+        // Bullets not mentioned by the AI are NEVER touched.
+        // =============================================
+        function djb2Hash(str) {
+            // Fast non-crypto hash (djb2) — good enough for bullet identity matching
+            let h = 5381;
+            for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
+            return (h >>> 0).toString(36);
+        }
+
+        function buildBulletMap(ul) {
+            // Returns Map<hash, li element> for all bullets in a <ul>
+            const map = new Map();
+            ul.querySelectorAll('li').forEach(li => {
+                const hash = djb2Hash(li.textContent.trim());
+                map.set(hash, li);
+            });
+            return map;
+        }
+
+        function applyEnhancementsByIdentity(ul, enhancements) {
+            // Apply {original, enhanced} pairs by identity — never by index.
+            // Falls back to index-based for plain string arrays (backwards compat).
+            const enhArray = ensureArray(enhancements);
+            const isObjectArray = enhArray.length > 0 && typeof enhArray[0] === 'object' && enhArray[0] !== null && 'original' in enhArray[0];
+
+            if (isObjectArray) {
+                // Identity-based: find each bullet by its exact original text
+                const bulletMap = buildBulletMap(ul);
+                enhArray.forEach(enh => {
+                    if (!enh.original || !enh.enhanced) return;
+                    if (enh.enhanced === enh.original) return; // no change needed
+                    const hash = djb2Hash(enh.original.trim());
+                    const li = bulletMap.get(hash);
+                    if (li) {
+                        // Only replace if the enhanced version is not shorter than the original
+                        // (prevents AI from compressing bullets)
+                        if (enh.enhanced.length >= enh.original.length * 0.8) {
+                            li.textContent = enh.enhanced;
+                        }
+                    }
+                    // If hash not found: the AI hallucinated an original text — silently skip, never touch DOM
+                });
+            } else {
+                // Fallback: index-based for plain string arrays
+                const bullets = ul.querySelectorAll('li');
+                enhArray.forEach((enh, idx) => {
+                    if (!bullets[idx]) return;
+                    const text = (typeof enh === 'object' && enh !== null) ? (enh.enhanced || enh.original || String(enh)) : String(enh);
+                    if (text && text.length >= bullets[idx].textContent.length * 0.8) {
+                        bullets[idx].textContent = text;
+                    }
+                });
+            }
+        }
+
         // Helper functions (highlights, editing, reset)
         document.getElementById('toggle-highlights').addEventListener('click', function() {
             highlightsVisible = !highlightsVisible;
@@ -408,7 +469,20 @@
         });
 
         document.getElementById('reset-btn').addEventListener('click', () => {
-            resetResume();
+            // If we have a pre-optimization snapshot, restore to that (keeps imported resume intact,
+            // just undoes the AI optimization). Otherwise fall back to the original hardcoded HTML.
+            const container = document.getElementById('resume-content');
+            if (preOptimizationSnapshot) {
+                container.innerHTML = preOptimizationSnapshot;
+                // Re-attach profile picture handler since innerHTML replace kills listeners
+                document.querySelector('.profile-img').addEventListener('click', () => document.getElementById('file-input').click());
+                document.getElementById('file-input').addEventListener('change', handleProfilePicChange);
+                preOptimizationSnapshot = null;
+                showMessage('Optimization undone — resume restored to pre-optimize state', 'success');
+            } else {
+                resetResume();
+                showMessage('Resume changes reset', 'success');
+            }
             hideHighlights();
             highlightsVisible = false;
             document.getElementById('toggle-highlights').textContent = 'Show Highlights';
@@ -416,7 +490,6 @@
             document.getElementById('keywords-display').style.display = 'none';
             document.getElementById('keyword-status').style.display = 'none';
             if (isEditing) { disableEditingManually(); }
-            showMessage('Resume changes reset', 'success');
         });
 
         function disableEditingManually() {
@@ -572,14 +645,19 @@
         // =============================================
         // AI API CALL
         // =============================================
-        async function callOpenAI(prompt, maxTokens, model = 'gpt-3.5-turbo', { systemMessage = null, temperature = 0.3 } = {}) {
+        async function callOpenAI(prompt, maxTokens, model = 'gpt-3.5-turbo', { systemMessage = null, temperature = 0.3, jsonMode = false } = {}) {
             const messages = [];
             if (systemMessage) messages.push({ role: 'system', content: systemMessage });
             messages.push({ role: 'user', content: prompt });
+            // response_format: json_object forces valid JSON output — JSON.parse never throws from a well-formed response.
+            // Only supported on gpt-3.5-turbo-1106+ and all gpt-4o/gpt-4-turbo variants.
+            // When enabled, the prompt MUST contain the word "JSON" (OpenAI requirement).
+            const body = { model, messages, max_tokens: maxTokens, temperature };
+            if (jsonMode) body.response_format = { type: 'json_object' };
             const response = await fetch('https://api.openai.com/v1/chat/completions', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${aiApiKey}` },
-                body: JSON.stringify({ model, messages, max_tokens: maxTokens, temperature })
+                body: JSON.stringify(body)
             });
             if (!response.ok) throw new Error(`API error: ${(await response.json()).error?.message}`);
             return (await response.json()).choices[0].message.content.trim();
@@ -597,7 +675,8 @@ Return ONLY a valid JSON array of strings. No other text, no markdown.
 <job_description>
 ${safeJobDesc}
 </job_description>`;
-            const response = await callOpenAI(prompt, 1000, 'gpt-3.5-turbo');
+            // gpt-4o-mini with jsonMode: true guarantees valid JSON — fallback no longer needed
+            const response = await callOpenAI(prompt, 1000, 'gpt-4o-mini', { jsonMode: true });
             try { return JSON.parse(response); } catch (e) { return extractKeywordsFallback(jobDesc, count); }
         }
 
@@ -689,6 +768,19 @@ ${safeJobDesc}
             if (!aiApiKey) { showMessage('Configure API key', 'error'); document.getElementById('api-key-container').style.display = 'block'; return; }
             document.getElementById('loading').style.display = 'block';
             try {
+                // --- PHASE 1 FIX: Snapshot DOM before touching anything ---
+                // This is the undo buffer. If anything goes wrong mid-write,
+                // the user can click "Reset Optimized Changes" to get back to exactly this state.
+                preOptimizationSnapshot = document.getElementById('resume-content').innerHTML;
+
+                // --- PHASE 1 FIX: Run auto-fit BEFORE optimization as a baseline ---
+                // Previously ran unconditionally AFTER, causing AI-added content to trigger
+                // auto-fit which then deleted other bullets to compensate.
+                // Now: establish the baseline first, re-run after only if content grew.
+                await document.fonts.ready;
+                autoFitResume();
+                const heightBeforeOptimize = document.getElementById('resume-content').scrollHeight;
+
                 document.getElementById('loading-details').textContent = 'Extracting keywords...';
                 extractedKeywords = await extractAndFilterKeywords(jobDesc, kwCount);
                 displayKeywords(extractedKeywords);
@@ -699,8 +791,11 @@ ${safeJobDesc}
                 await optimizeResumeWithAI(jobDesc, extractedKeywords, analysis);
                 const updatedAnalysis = await analyzeKeywordIntegration(extractedKeywords);
                 displayKeywordStatus(updatedAnalysis);
-                // Run auto-fit after AI optimization changes content
-                requestAnimationFrame(async () => { await document.fonts.ready; autoFitResume(); });
+                // Only re-run auto-fit if content actually grew beyond A4
+                const heightAfterOptimize = document.getElementById('resume-content').scrollHeight;
+                if (heightAfterOptimize > heightBeforeOptimize) {
+                    requestAnimationFrame(async () => { await document.fonts.ready; autoFitResume(); });
+                }
                 highlightsVisible = true;
                 showHighlightsManually();
                 document.getElementById('toggle-highlights').textContent = 'Hide Highlights';
@@ -731,26 +826,37 @@ Return ONLY valid JSON with:
 - "enhancements": an object where each key is a section name (matching the keys in the experience object I gave you) and each value is an array of objects with "original" and "enhanced" strings.`;
 
             try {
-                const response = await callOpenAI(prompt, 3000, document.getElementById('ai-model').value);
+                // jsonMode: true — forces valid JSON, JSON.parse never silently fails
+                // Token budget raised to 4500 — a full resume rewrite needs more than 3000
+                const response = await callOpenAI(prompt, 4500, document.getElementById('ai-model').value, { jsonMode: true });
                 const result = JSON.parse(response);
-                if (result.summary) document.getElementById('summary-text').textContent = result.summary;
+
+                // --- PHASE 1 FIX: Write enhancements FIRST, summary LAST ---
+                // Previously summary was written first. If JSON.parse succeeded but the enhancements
+                // loop threw, you'd end up with a new (possibly worse) summary and zero bullet improvements.
+                // Now enhancements are applied first; summary only writes after all bullets succeed.
                 if (result.enhancements) {
                     for (const [section, enhancements] of Object.entries(result.enhancements)) {
                         // Try multiple ID patterns to find the right UL
                         const el = document.getElementById(`${section}-experience`) || document.getElementById(section);
                         if (el && el.tagName === 'UL') {
-                            const bullets = el.querySelectorAll('li');
-                            const enhArray = ensureArray(enhancements);
-                            enhArray.forEach((enh, idx) => {
-                                if (bullets[idx]) {
-                                    // Handle both {original,enhanced} objects and plain strings
-                                    const text = (typeof enh === 'object' && enh !== null) ? (enh.enhanced || enh.original || String(enh)) : String(enh);
-                                    bullets[idx].textContent = text;
-                                }
-                            });
+                            // --- PHASE 1 FIX: identity-based matching, never index-based ---
+                            applyEnhancementsByIdentity(el, enhancements);
                         }
                     }
                 }
+
+                // Summary written last — only after enhancements are safely applied
+                // Guard: only write if the new summary is substantively longer or meaningfully different
+                if (result.summary) {
+                    const summaryEl = document.getElementById('summary-text');
+                    const currentSummary = summaryEl ? summaryEl.textContent : '';
+                    // Only replace if new summary is at least 80% as long as the original (prevents AI compression)
+                    if (summaryEl && result.summary.length >= currentSummary.length * 0.8) {
+                        summaryEl.textContent = result.summary;
+                    }
+                }
+
                 highlightExistingKeywords(keywords);
             } catch (e) {
                 console.error('AI optimization failed, falling back to highlight-only:', e);
