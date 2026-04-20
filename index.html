@@ -245,6 +245,7 @@
         <button id="optimize-btn" class="btn">AI-Optimized Resume</button>
         <button id="toggle-highlights" class="btn btn-secondary">Show Highlights</button>
         <button id="toggle-edit" class="btn btn-warning">Enable Editing</button>
+        <button id="print-btn" class="btn btn-secondary">Print</button>
         <button id="download-html-btn" class="btn">Download as HTML</button>
         <button id="download-pdf-btn" class="btn btn-danger">Download as PDF</button>
         <button id="reset-btn" class="btn btn-secondary">Reset Optimized Changes</button>
@@ -587,6 +588,12 @@
         document.getElementById('advanced-options').addEventListener('click', () => {
             const cont = document.getElementById('advanced-options-container');
             cont.style.display = cont.style.display === 'none' ? 'block' : 'none';
+        });
+
+        // Print
+        document.getElementById('print-btn').addEventListener('click', () => {
+            hideHighlights();
+            window.print();
         });
 
         // Download functions
@@ -1149,7 +1156,9 @@ If the summary is already strong and keywords are not naturally applicable, retu
             // Warn user their PII will be stored in browser storage
             const ok = confirm(
                 'This will save your resume data (including personal details) in your browser\'s local storage so it loads automatically next time.\n\n' +
+                '⚠ This data persists across browser sessions until you clear it.\n' +
                 '⚠ Do not use this on a shared or public device.\n\n' +
+                'To remove saved data later: open browser DevTools → Application → Local Storage → delete the "resumeDefault" key.\n\n' +
                 'Continue?'
             );
             if (!ok) return;
@@ -1378,7 +1387,25 @@ CRITICAL RULES:
                     const parser = new DOMParser();
                     const doc = parser.parseFromString(e.target.result, 'text/html');
                     doc.querySelectorAll('script,style,iframe,object,embed,link[rel="import"]').forEach(el => el.remove());
-                    res(doc.body.textContent || doc.body.innerText || '');
+                    // Walk the DOM and insert newlines between block-level elements so
+                    // the text parser can identify section boundaries correctly.
+                    // Without this, all node text concatenates without whitespace separators.
+                    const BLOCK_TAGS = new Set(['P','DIV','H1','H2','H3','H4','H5','H6','LI','BR','TR','SECTION','ARTICLE','HEADER','FOOTER','BLOCKQUOTE','PRE']);
+                    const parts = [];
+                    const walk = node => {
+                        if (node.nodeType === Node.TEXT_NODE) {
+                            const t = node.textContent.trim();
+                            if (t) parts.push(t);
+                        } else if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (BLOCK_TAGS.has(node.tagName)) parts.push('\n');
+                            node.childNodes.forEach(walk);
+                            if (BLOCK_TAGS.has(node.tagName)) parts.push('\n');
+                        }
+                    };
+                    walk(doc.body);
+                    // Collapse multiple blank lines into a single blank line
+                    const text = parts.join('').replace(/\n{3,}/g, '\n\n').trim();
+                    res(text || doc.body.textContent || '');
                 };
                 r.onerror = rej;
                 r.readAsText(file);
@@ -1537,6 +1564,7 @@ ${rawText.substring(0, charLimit)}`;
             // Section detection — find sections by common headings
             const sectionPatterns = {
                 summary: /^(?:professional\s+)?summary|^profile|^about|^objective/i,
+                contact: /^contact(?:\s+info(?:rmation)?)?$/i,
                 experience: /^(?:professional\s+)?experience|^work\s+(?:experience|history)|^employment/i,
                 education: /^education|^academic|^qualifications/i,
                 skills: /^(?:technical\s+)?skills|^competenc|^expertise|^proficienc/i,
@@ -1568,6 +1596,24 @@ ${rawText.substring(0, charLimit)}`;
                         result.summary = sectionLines.join(' ');
                         break;
 
+                    case 'contact':
+                        // Re-run regex extractors against just this section's text
+                        // (global extraction above may have already found these, but this
+                        //  ensures the section boundary stops summary from absorbing contact lines)
+                        sectionLines.forEach(line => {
+                            if (!result.contact.email) { const m = line.match(/[\w.+-]+@[\w-]+\.[\w.]+/); if (m) result.contact.email = m[0]; }
+                            if (!result.contact.phone) { const m = line.match(/(?:\+?\d{1,3}[\s-]?)?\(?\d{2,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{3,4}/); if (m) result.contact.phone = m[0]; }
+                            if (!result.contact.linkedin) { const m = line.match(/linkedin\.com\/in\/[\w-]+/i); if (m) result.contact.linkedin = m[0]; }
+                            if (!result.contact.location) {
+                                // Lines like "Location: New York, NY" or just "New York, NY"
+                                const locMatch = line.match(/^(?:location[:\s]+)?([A-Z][a-z]+(?: [A-Z][a-z]+)*(?:,\s*[A-Z]{2})?)/);
+                                if (locMatch && !line.includes('@') && !line.match(/\d{3}/) && !line.match(/linkedin/i)) {
+                                    result.contact.location = locMatch[1];
+                                }
+                            }
+                        });
+                        break;
+
                     case 'experience':
                         parseExperienceLines(sectionLines, result.experience);
                         break;
@@ -1577,13 +1623,33 @@ ${rawText.substring(0, charLimit)}`;
                         break;
 
                     case 'skills':
-                        const allSkills = sectionLines
-                            .join(', ')
-                            .split(/[,;|•·\u2022\u2023\u25E6\u2043]/)
-                            .map(s => s.trim())
-                            .filter(s => s.length > 1 && s.length < 50);
-                        if (allSkills.length > 0) {
-                            result.skills.categories.push({ name: 'Skills', items: allSkills });
+                        // Try to detect "Category Name: item1, item2, item3" format first
+                        const categoryLinePattern = /^(.{2,40}):\s+(.{3,})$/;
+                        let usedCategoryFormat = false;
+                        sectionLines.forEach(line => {
+                            const catMatch = line.match(categoryLinePattern);
+                            if (catMatch) {
+                                const catName = catMatch[1].trim();
+                                const items = catMatch[2]
+                                    .split(/[,;|•·\u2022\u2023\u25E6\u2043]/)
+                                    .map(s => s.trim())
+                                    .filter(s => s.length > 1 && s.length < 60);
+                                if (items.length > 0) {
+                                    result.skills.categories.push({ name: catName, items });
+                                    usedCategoryFormat = true;
+                                }
+                            }
+                        });
+                        // Fallback: flat list (no "Category:" prefix found)
+                        if (!usedCategoryFormat) {
+                            const allSkills = sectionLines
+                                .join(', ')
+                                .split(/[,;|•·\u2022\u2023\u25E6\u2043]/)
+                                .map(s => s.trim())
+                                .filter(s => s.length > 1 && s.length < 50);
+                            if (allSkills.length > 0) {
+                                result.skills.categories.push({ name: 'Skills', items: allSkills });
+                            }
                         }
                         break;
 
