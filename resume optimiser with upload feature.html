@@ -159,6 +159,8 @@
         .diff-reject { background: #e74c3c; color: white; }
         .diff-item.accepted { opacity: 0.5; pointer-events: none; border-color: #27ae60; }
         .diff-item.rejected { opacity: 0.5; pointer-events: none; border-color: #e74c3c; }
+        .diff-view { transition: opacity 0.3s ease, max-height 0.4s ease; overflow: hidden; max-height: 2000px; }
+        .diff-view.collapsing { opacity: 0; max-height: 0; padding: 0; margin: 0; border: none; }
         .match-score-panel { margin-top: 15px; padding: 12px; background: #fff; border: 1px solid #ddd; border-radius: 6px; }
         .match-score-panel h3 { font-size: 13px; color: #2c3e50; margin-bottom: 8px; }
         .match-score-bar-wrap { background: #eee; border-radius: 20px; height: 16px; position: relative; overflow: hidden; margin-bottom: 6px; }
@@ -2216,6 +2218,33 @@ ${rawText.substring(0, charLimit)}`;
             return false;
         }
 
+        // Collapse diff panel and re-highlight all integrated keywords
+        async function finaliseDiffs() {
+            const panel = document.getElementById('diff-view-panel');
+
+            // Re-run highlights on the updated resume DOM (applied bullets now have new text)
+            hideHighlights(); // clear any old spans' inline styles first
+            if (extractedKeywords.length > 0) {
+                highlightExistingKeywords(extractedKeywords);
+                showHighlightsManually();
+                highlightsVisible = true;
+                document.getElementById('toggle-highlights').textContent = 'Hide Highlights';
+            }
+
+            // Collapse the diff panel with CSS transition
+            panel.classList.add('collapsing');
+            await new Promise(resolve => setTimeout(resolve, 420)); // wait for transition
+            panel.style.display = 'none';
+            panel.classList.remove('collapsing');
+
+            // Update keyword status + match score
+            if (extractedKeywords.length > 0) {
+                const updated = await analyzeKeywordIntegration(extractedKeywords);
+                displayKeywordStatus(updated);
+                renderMatchScoreUI(updated);
+            }
+        }
+
         // Wire diff accept/reject click handlers (individual items)
         document.getElementById('diff-items-container').addEventListener('click', function(e) {
             const btn = e.target.closest('.diff-accept, .diff-reject');
@@ -2228,6 +2257,10 @@ ${rawText.substring(0, charLimit)}`;
             } else {
                 item.classList.add('rejected');
             }
+            // If every diff is now resolved, collapse the panel and show highlights
+            const allResolved = [...document.querySelectorAll('.diff-item')]
+                .every(el => el.classList.contains('accepted') || el.classList.contains('rejected'));
+            if (allResolved) finaliseDiffs();
         });
 
         // Accept All — async with rAF yield between batches to avoid UI freeze
@@ -2259,7 +2292,6 @@ ${rawText.substring(0, charLimit)}`;
                     }
                 });
                 btn.textContent = `Applying ${Math.min(i + BATCH, pending.length)}/${pending.length}...`;
-                // Yield to the browser so it can repaint and stay interactive
                 await new Promise(resolve => requestAnimationFrame(resolve));
             }
 
@@ -2267,18 +2299,14 @@ ${rawText.substring(0, charLimit)}`;
             btn.disabled = false;
             rejectBtn.disabled = false;
 
-            // Re-run keyword analysis and update match score to reflect applied changes
-            if (extractedKeywords.length > 0) {
-                const updated = await analyzeKeywordIntegration(extractedKeywords);
-                displayKeywordStatus(updated);
-                renderMatchScoreUI(updated);
-            }
+            await finaliseDiffs();
         });
 
-        document.getElementById('diff-reject-all').addEventListener('click', function() {
+        document.getElementById('diff-reject-all').addEventListener('click', async function() {
             document.querySelectorAll('.diff-item:not(.accepted):not(.rejected)').forEach(item => {
                 item.classList.add('rejected');
             });
+            await finaliseDiffs();
         });
 
         // Sprint 5: Job Match Score
