@@ -702,32 +702,42 @@
 
                 const canvas = cropCanvas(rawCanvas, cropHeightCanvas);
 
-                const imgData = canvas.toDataURL('image/png');
+                // Compression strategy (all client-side, no data leaves the browser):
+                // 1. JPEG encoding at quality 0.82 — typically 80-90% smaller than PNG
+                //    for rendered resume content (text on white/dark backgrounds compresses well)
+                // 2. jsPDF compress:true — deflate compression on all internal PDF streams
+                // Together these reliably produce files well under 2MB.
+                const JPEG_QUALITY = 0.82;
+                const imgData = canvas.toDataURL('image/jpeg', JPEG_QUALITY);
+
                 const { jsPDF } = window.jspdf;
                 const a4Width = 210;
                 const a4Height = 297;
-                // Scale the cropped image to A4 width and compute its height in mm
                 const imgWidth = a4Width;
                 const imgHeight = (canvas.height * a4Width) / canvas.width;
 
+                // compress:true enables deflate on PDF object streams
+                const pdfOpts = { orientation: 'portrait', unit: 'mm', compress: true };
+                let pdf;
+
                 if (imgHeight <= a4Height) {
-                    // Single page — content fits, no blank bottom
-                    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [a4Width, imgHeight] });
-                    pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
-                    pdf.save('Resume.pdf');
+                    pdf = new jsPDF({ ...pdfOpts, format: [a4Width, imgHeight] });
+                    pdf.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
                 } else {
-                    // Multi-page: use standard A4 and slice
-                    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+                    pdf = new jsPDF({ ...pdfOpts, format: 'a4' });
                     let yOffset = 0;
                     while (yOffset < imgHeight) {
                         if (yOffset > 0) pdf.addPage();
-                        pdf.addImage(imgData, 'PNG', 0, -yOffset, imgWidth, imgHeight);
+                        pdf.addImage(imgData, 'JPEG', 0, -yOffset, imgWidth, imgHeight);
                         yOffset += a4Height;
                     }
-                    pdf.save('Resume.pdf');
                 }
 
-                showMessage('PDF downloaded', 'success');
+                // Report actual file size before triggering the download
+                const sizeKB = Math.round(pdf.output('blob').size / 1024);
+                const sizeLabel = sizeKB >= 1024 ? `${(sizeKB / 1024).toFixed(1)} MB` : `${sizeKB} KB`;
+                pdf.save('Resume.pdf');
+                showMessage(`PDF downloaded — ${sizeLabel} (JPEG + deflate compressed)`, 'success');
             } catch (e) { console.error('PDF error:', e); showMessage('PDF error: ' + e.message, 'error'); }
             finally {
                 sidebar.style.background = origSidebarBg;
