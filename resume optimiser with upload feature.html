@@ -641,18 +641,29 @@
             return css;
         }
 
-        // Measure the lowest content edge by walking every DOM element inside the container.
-        // Returns the bottom position in CSS pixels relative to the container top.
-        // This is reliable regardless of background colors — it measures layout, not pixels.
+        // Measure the lowest content edge using offsetTop/offsetHeight traversal.
+        // Returns the bottom position in CSS layout pixels relative to the container.
+        //
+        // IMPORTANT: we must NOT use getBoundingClientRect() here because autoFitResume
+        // Phase 4 applies a CSS transform: scale(X) to the container. getBoundingClientRect
+        // returns visual (post-transform) coordinates, but html2canvas captures at the full
+        // layout size (pre-transform). Using visual coords causes the crop to fire too early
+        // — cutting off the bottom of the content proportionally to the scale factor.
+        //
+        // offsetTop/offsetHeight are always in layout-space (unaffected by CSS transforms),
+        // which matches the coordinate space html2canvas captures.
         function measureContentBottomDOM(container) {
-            const containerTop = container.getBoundingClientRect().top;
             let maxBottom = 0;
             container.querySelectorAll('*').forEach(el => {
-                // Skip elements that are hidden by auto-fit or have no size
                 if (el.dataset.autofitHidden) return;
-                const rect = el.getBoundingClientRect();
-                if (rect.width === 0 && rect.height === 0) return;
-                const bottom = rect.bottom - containerTop;
+                if (el.offsetWidth === 0 && el.offsetHeight === 0) return;
+                // Walk up the offsetParent chain to accumulate position relative to container
+                let bottom = el.offsetTop + el.offsetHeight;
+                let node = el.offsetParent;
+                while (node && node !== container && container.contains(node)) {
+                    bottom += node.offsetTop;
+                    node = node.offsetParent;
+                }
                 if (bottom > maxBottom) maxBottom = bottom;
             });
             return maxBottom;
