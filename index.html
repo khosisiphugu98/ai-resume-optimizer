@@ -954,6 +954,7 @@ If the summary is already strong and keywords are not naturally applicable, retu
                 // This is the undo buffer. If anything goes wrong mid-write,
                 // the user can click "Reset Optimized Changes" to get back to exactly this state.
                 preOptimizationSnapshot = document.getElementById('resume-content').innerHTML;
+                ulBulletMaps = new WeakMap(); // invalidate cached bullet maps from previous run
 
                 // --- PHASE 1 FIX: Run auto-fit BEFORE optimization as a baseline ---
                 // Previously ran unconditionally AFTER, causing AI-added content to trigger
@@ -2184,20 +2185,38 @@ ${rawText.substring(0, charLimit)}`;
             panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
         }
 
+        // ulBulletMaps: per-ul cache so Accept All doesn't rebuild the map on every diff
+        // Maps ul element → Map<hash, li>. Invalidated on each new optimization run.
+        let ulBulletMaps = new WeakMap();
+
+        function getOrBuildBulletMap(ul) {
+            if (!ulBulletMaps.has(ul)) {
+                ulBulletMaps.set(ul, buildBulletMap(ul));
+            }
+            return ulBulletMaps.get(ul);
+        }
+
         function applyDiff(idx) {
             const diff = pendingDiffs[idx];
-            if (!diff) return;
+            if (!diff) return false;
             const ul = diff.ul;
-            if (!ul) return;
-            const bulletMap = buildBulletMap(ul);
+            if (!ul) return false;
+            const bulletMap = getOrBuildBulletMap(ul);
             const hash = djb2Hash(diff.original.trim());
             const li = bulletMap.get(hash);
             if (li) {
+                // Update the DOM
                 li.textContent = diff.enhanced;
+                // Keep the map consistent: swap old hash for new so later diffs
+                // in the same ul still resolve correctly if they reference this bullet
+                bulletMap.delete(hash);
+                bulletMap.set(djb2Hash(diff.enhanced.trim()), li);
+                return true;
             }
+            return false;
         }
 
-        // Wire diff accept/reject click handlers
+        // Wire diff accept/reject click handlers (individual items)
         document.getElementById('diff-items-container').addEventListener('click', function(e) {
             const btn = e.target.closest('.diff-accept, .diff-reject');
             if (!btn) return;
@@ -2211,14 +2230,49 @@ ${rawText.substring(0, charLimit)}`;
             }
         });
 
-        document.getElementById('diff-accept-all').addEventListener('click', function() {
-            pendingDiffs.forEach((_, idx) => {
-                const item = document.querySelector(`.diff-item[data-idx="${idx}"]`);
-                if (item && !item.classList.contains('accepted') && !item.classList.contains('rejected')) {
-                    applyDiff(idx);
-                    item.classList.add('accepted');
-                }
-            });
+        // Accept All — async with rAF yield between batches to avoid UI freeze
+        document.getElementById('diff-accept-all').addEventListener('click', async function() {
+            const btn = this;
+            const rejectBtn = document.getElementById('diff-reject-all');
+            const pending = pendingDiffs
+                .map((_, idx) => idx)
+                .filter(idx => {
+                    const item = document.querySelector(`.diff-item[data-idx="${idx}"]`);
+                    return item && !item.classList.contains('accepted') && !item.classList.contains('rejected');
+                });
+
+            if (pending.length === 0) return;
+
+            // Disable buttons + show progress
+            btn.disabled = true;
+            rejectBtn.disabled = true;
+            btn.textContent = `Applying 0/${pending.length}...`;
+
+            const BATCH = 5; // process 5 diffs per frame to stay responsive
+            for (let i = 0; i < pending.length; i += BATCH) {
+                const slice = pending.slice(i, i + BATCH);
+                slice.forEach(idx => {
+                    const item = document.querySelector(`.diff-item[data-idx="${idx}"]`);
+                    if (item) {
+                        applyDiff(idx);
+                        item.classList.add('accepted');
+                    }
+                });
+                btn.textContent = `Applying ${Math.min(i + BATCH, pending.length)}/${pending.length}...`;
+                // Yield to the browser so it can repaint and stay interactive
+                await new Promise(resolve => requestAnimationFrame(resolve));
+            }
+
+            btn.textContent = `✓ All Applied`;
+            btn.disabled = false;
+            rejectBtn.disabled = false;
+
+            // Re-run keyword analysis and update match score to reflect applied changes
+            if (extractedKeywords.length > 0) {
+                const updated = await analyzeKeywordIntegration(extractedKeywords);
+                displayKeywordStatus(updated);
+                renderMatchScoreUI(updated);
+            }
         });
 
         document.getElementById('diff-reject-all').addEventListener('click', function() {
