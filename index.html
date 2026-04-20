@@ -705,7 +705,7 @@
 
                 // Detect the actual content boundary and crop out blank bottom space
                 const contentBottom = detectContentBottom(rawCanvas);
-                const canvas = cropCanvas(rawCanvas, contentBottom, 24); // 24px padding at bottom
+                const canvas = cropCanvas(rawCanvas, contentBottom, 60); // 60px padding — enough breathing room without blank space
 
                 const imgData = canvas.toDataURL('image/png');
                 const { jsPDF } = window.jspdf;
