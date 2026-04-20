@@ -641,6 +641,38 @@
             return css;
         }
 
+        // Scan canvas pixel rows from the bottom upward and return the y-coordinate of
+        // the last row that contains any non-white, non-transparent pixel.
+        // This detects the true content boundary regardless of DOM layout.
+        function detectContentBottom(canvas) {
+            const ctx = canvas.getContext('2d');
+            const { width, height } = canvas;
+            const data = ctx.getImageData(0, 0, width, height).data;
+            // Walk rows from bottom to top
+            for (let y = height - 1; y >= 0; y--) {
+                const rowStart = y * width * 4;
+                for (let x = 0; x < width; x++) {
+                    const i = rowStart + x * 4;
+                    const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
+                    // Non-transparent AND not pure white
+                    if (a > 10 && !(r > 245 && g > 245 && b > 245)) {
+                        return y; // last content row found
+                    }
+                }
+            }
+            return height; // fallback: no blank rows found
+        }
+
+        // Return a new canvas cropped to contentHeight + paddingPx
+        function cropCanvas(source, contentBottom, paddingPx = 20) {
+            const croppedHeight = Math.min(contentBottom + paddingPx, source.height);
+            const cropped = document.createElement('canvas');
+            cropped.width = source.width;
+            cropped.height = croppedHeight;
+            cropped.getContext('2d').drawImage(source, 0, 0);
+            return cropped;
+        }
+
         document.getElementById('download-pdf-btn').addEventListener('click', async () => {
             showMessage('Generating PDF...', 'info');
             const wasVisible = highlightsVisible;
@@ -655,8 +687,7 @@
 
             try {
                 const element = resumeEl;
-                // Use scrollWidth/scrollHeight to capture full content including auto-fit
-                const canvas = await html2canvas(element, {
+                const rawCanvas = await html2canvas(element, {
                     scale: 2,
                     backgroundColor: '#ffffff',
                     width: element.scrollWidth,
@@ -664,27 +695,36 @@
                     windowWidth: element.scrollWidth,
                     windowHeight: element.scrollHeight
                 });
+
+                // Detect the actual content boundary and crop out blank bottom space
+                const contentBottom = detectContentBottom(rawCanvas);
+                const canvas = cropCanvas(rawCanvas, contentBottom, 24); // 24px padding at bottom
+
                 const imgData = canvas.toDataURL('image/png');
                 const { jsPDF } = window.jspdf;
-                // A4 dimensions in mm
                 const a4Width = 210;
                 const a4Height = 297;
-                const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+                // Scale the cropped image to A4 width and compute its height in mm
                 const imgWidth = a4Width;
                 const imgHeight = (canvas.height * a4Width) / canvas.width;
-                // If content fits one page, center it; otherwise let it flow to multiple pages
+
                 if (imgHeight <= a4Height) {
+                    // Single page — content fits, no blank bottom
+                    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [a4Width, imgHeight] });
                     pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
+                    pdf.save('Resume.pdf');
                 } else {
-                    // Multi-page: split the canvas
+                    // Multi-page: use standard A4 and slice
+                    const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
                     let yOffset = 0;
                     while (yOffset < imgHeight) {
                         if (yOffset > 0) pdf.addPage();
                         pdf.addImage(imgData, 'PNG', 0, -yOffset, imgWidth, imgHeight);
                         yOffset += a4Height;
                     }
+                    pdf.save('Resume.pdf');
                 }
-                pdf.save('Resume.pdf');
+
                 showMessage('PDF downloaded', 'success');
             } catch (e) { console.error('PDF error:', e); showMessage('PDF error: ' + e.message, 'error'); }
             finally {
