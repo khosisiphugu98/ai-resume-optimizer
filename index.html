@@ -1175,7 +1175,7 @@ If the summary is already strong and keywords are not naturally applicable, retu
                     // Run auto-fit after rendering imported content
                     requestAnimationFrame(async () => { await document.fonts.ready; autoFitResume(); });
                     showMessage(`Loaded: ${file.name}`, 'success');
-                    document.getElementById('upload-status').innerHTML = `✅ Loaded: ${file.name}`;
+                    document.getElementById('upload-status').textContent = `✅ Loaded: ${file.name}`;
                 } else {
                     showMessage('Could not extract resume data', 'error');
                     document.getElementById('upload-status').innerHTML = '❌ Failed to extract data';
