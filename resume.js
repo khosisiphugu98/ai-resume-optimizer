@@ -4,15 +4,80 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs
 // Store FULL original HTML for perfect reset (snapshot the entire resume)
 const originalResumeHTML = document.getElementById('resume-content').innerHTML;
 
+// Provider configuration — all per-provider values in one place
+const PROVIDER_CONFIG = {
+    openai: {
+        baseUrl:      'https://api.openai.com/v1/chat/completions',
+        models:       [{ value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (Faster)' },
+                       { value: 'gpt-4',         label: 'GPT-4 (Better Quality)' }],
+        defaultModel: 'gpt-3.5-turbo',
+        extractModel: 'gpt-4o-mini',
+        visionModel:  'gpt-4o',
+        charLimit:    20000,
+        privacyUrl:   'https://openai.com/privacy',
+        keyUrl:       'https://platform.openai.com/api-keys',
+        keyLabel:     'OpenAI API Key',
+        placeholder:  'Enter your OpenAI API key (sk-...)'
+    },
+    deepseek: {
+        baseUrl:      'https://api.deepseek.com/v1/chat/completions',
+        models:       [{ value: 'deepseek-chat',     label: 'DeepSeek Chat (Faster)' },
+                       { value: 'deepseek-reasoner', label: 'DeepSeek R1 (Better Quality)' }],
+        defaultModel: 'deepseek-chat',
+        extractModel: 'deepseek-chat',
+        visionModel:  'deepseek-chat',
+        charLimit:    20000,
+        privacyUrl:   'https://www.deepseek.com/privacy',
+        keyUrl:       'https://platform.deepseek.com/api-keys',
+        keyLabel:     'DeepSeek API Key',
+        placeholder:  'Enter your DeepSeek API key (sk-...)'
+    }
+};
+
 // Global state
 let highlightsVisible = false;
-let aiApiKey = null;
+let apiKeys = { openai: null, deepseek: null };
+let currentProvider = 'openai';
+function activeApiKey() { return apiKeys[currentProvider]; }
 let isEditing = false;
 let extractedKeywords = [];
 let usingUploadedResume = false;
 let lastAppliedResume = null;
 let preOptimizationSnapshot = null; // DOM snapshot taken just before each optimize run
 let pendingDiffs = []; // Sprint 4: diffs awaiting user review
+
+// =============================================
+// PROVIDER UI HELPERS
+// =============================================
+function updateModelDropdown() {
+    const select = document.getElementById('ai-model');
+    const models = PROVIDER_CONFIG[currentProvider].models;
+    select.innerHTML = models.map(m => `<option value="${m.value}">${m.label}</option>`).join('');
+}
+
+function updateApiKeyUI() {
+    const cfg = PROVIDER_CONFIG[currentProvider];
+    document.getElementById('api-key-label').textContent = cfg.keyLabel + ':';
+    document.getElementById('api-key').placeholder = cfg.placeholder;
+    document.getElementById('api-privacy-link').href = cfg.privacyUrl;
+    document.getElementById('api-get-key-link').href  = cfg.keyUrl;
+    document.getElementById('api-get-key-link').textContent = 'Get your ' + cfg.keyLabel;
+    const fmt = (key, id) => {
+        const el = document.getElementById(id);
+        el.innerHTML = el.innerHTML.replace(/<strong.*<\/strong>/,
+            `<strong style="color:${key ? '#27ae60' : '#e74c3c'}">${key ? '✓ configured' : 'not set'}</strong>`);
+    };
+    fmt(apiKeys.openai,    'openai-key-status');
+    fmt(apiKeys.deepseek,  'deepseek-key-status');
+}
+
+document.getElementById('ai-provider').addEventListener('change', function() {
+    currentProvider = this.value;
+    localStorage.setItem('provider', currentProvider);
+    updateModelDropdown();
+    updateApiKeyUI();
+    document.getElementById('api-key-container').style.display = activeApiKey() ? 'none' : 'block';
+});
 
 // =============================================
 // SECURE API KEY STORAGE — AES-256-GCM + IndexedDB
@@ -95,18 +160,31 @@ async function _deleteEncryptionKey() {
 }
 
 async function initApiKey() {
+    currentProvider = localStorage.getItem('provider') || 'openai';
+    document.getElementById('ai-provider').value = currentProvider;
+    updateModelDropdown();
+
     const stored = localStorage.getItem(_LS_KEY);
     if (stored) {
         try {
-            aiApiKey = await _decryptApiKey(stored);
-            document.getElementById('api-key-container').style.display = 'none';
-            return;
+            const decrypted = await _decryptApiKey(stored);
+            const parsed = JSON.parse(decrypted);
+            // parsed is either { openai, deepseek } (new) or a plain string (old format)
+            if (parsed && typeof parsed === 'object' && ('openai' in parsed || 'deepseek' in parsed)) {
+                apiKeys = { openai: parsed.openai || null, deepseek: parsed.deepseek || null };
+            } else {
+                // One-time migration: old format was a plain encrypted string (OpenAI key)
+                apiKeys = { openai: typeof decrypted === 'string' ? decrypted : null, deepseek: null };
+                const migrated = await _encryptApiKey(JSON.stringify(apiKeys));
+                localStorage.setItem(_LS_KEY, migrated);
+            }
         } catch {
-            // Decryption failed (e.g. IDB key was wiped) — clear stale ciphertext
             localStorage.removeItem(_LS_KEY);
         }
     }
-    document.getElementById('api-key-container').style.display = 'block';
+
+    updateApiKeyUI();
+    document.getElementById('api-key-container').style.display = activeApiKey() ? 'none' : 'block';
 }
 
 function showMessage(message, type) {
@@ -310,12 +388,15 @@ document.getElementById('save-api-key').addEventListener('click', async () => {
     const key = document.getElementById('api-key').value.trim();
     if (!key) { showMessage('Enter valid API key', 'error'); return; }
     try {
-        const encrypted = await _encryptApiKey(key);
+        apiKeys[currentProvider] = key;
+        const encrypted = await _encryptApiKey(JSON.stringify(apiKeys));
         localStorage.setItem(_LS_KEY, encrypted);
-        aiApiKey = key;
+        document.getElementById('api-key').value = '';
         document.getElementById('api-key-container').style.display = 'none';
-        showMessage('API key saved — encrypted and stored permanently.', 'success');
+        updateApiKeyUI();
+        showMessage(`${PROVIDER_CONFIG[currentProvider].keyLabel} saved — encrypted and stored permanently.`, 'success');
     } catch (e) {
+        apiKeys[currentProvider] = null; // roll back on failure
         showMessage('Could not save API key: ' + e.message, 'error');
     }
 });
@@ -491,18 +572,18 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
 // =============================================
 // AI API CALL
 // =============================================
-async function callOpenAI(prompt, maxTokens, model = 'gpt-3.5-turbo', { systemMessage = null, temperature = 0.3, jsonMode = false } = {}) {
+async function callAI(prompt, maxTokens, model, { systemMessage = null, temperature = 0.3, jsonMode = false } = {}) {
+    const cfg = PROVIDER_CONFIG[currentProvider];
+    if (!model) model = cfg.defaultModel;
     const messages = [];
     if (systemMessage) messages.push({ role: 'system', content: systemMessage });
     messages.push({ role: 'user', content: prompt });
-    // response_format: json_object forces valid JSON output — JSON.parse never throws from a well-formed response.
-    // Only supported on gpt-3.5-turbo-1106+ and all gpt-4o/gpt-4-turbo variants.
-    // When enabled, the prompt MUST contain the word "JSON" (OpenAI requirement).
+    // response_format: json_object is not supported by deepseek-reasoner (R1)
     const body = { model, messages, max_tokens: maxTokens, temperature };
-    if (jsonMode) body.response_format = { type: 'json_object' };
-    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+    if (jsonMode && model !== 'deepseek-reasoner') body.response_format = { type: 'json_object' };
+    const response = await fetch(cfg.baseUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${aiApiKey}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
         body: JSON.stringify(body)
     });
     if (!response.ok) throw new Error(`API error: ${(await response.json()).error?.message}`);
@@ -554,7 +635,7 @@ Return JSON in this exact format: {"keywords": ["keyword1", "keyword2", ...]}
 <job_description>
 ${safeJobDesc}
 </job_description>`;
-    const response = await callOpenAI(prompt, 1000, 'gpt-4o-mini', { jsonMode: true });
+    const response = await callAI(prompt, 1000, PROVIDER_CONFIG[currentProvider].extractModel, { jsonMode: true });
     try {
         const parsed = JSON.parse(response);
         // Handle both {keywords: [...]} and bare arrays (backwards compat)
@@ -689,7 +770,7 @@ async function runParallelSectionCalls(queue, missingKeywords, jobDesc, model) {
     for (let i = 0; i < queue.length; i += BATCH_SIZE) {
         const batch = queue.slice(i, i + BATCH_SIZE);
         const calls = batch.map(section =>
-            callOpenAI(buildSectionPrompt(section, missingKeywords, jobDesc), 1200, model, { jsonMode: true })
+            callAI(buildSectionPrompt(section, missingKeywords, jobDesc), 1200, model, { jsonMode: true })
                 .then(r => JSON.parse(r))
                 .catch(e => { console.warn(`Section ${section.sectionId} call failed:`, e); return null; })
         );
@@ -744,7 +825,7 @@ document.getElementById('optimize-btn').addEventListener('click', async function
     const jobDesc = document.getElementById('job-description').value.trim();
     const kwCount = parseInt(document.getElementById('keyword-count').value) || 15;
     if (!jobDesc) { showMessage('Paste job description', 'error'); return; }
-    if (!aiApiKey) { showMessage('Configure API key', 'error'); document.getElementById('api-key-container').style.display = 'block'; return; }
+    if (!activeApiKey()) { showMessage('Configure API key', 'error'); document.getElementById('api-key-container').style.display = 'block'; return; }
     document.getElementById('loading').style.display = 'block';
     try {
         // --- PHASE 1 FIX: Snapshot DOM before touching anything ---
@@ -816,7 +897,7 @@ async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
         const summaryEl = document.getElementById('summary-text');
         if (summaryEl) {
             try {
-                const summaryResponse = await callOpenAI(
+                const summaryResponse = await callAI(
                     buildSummaryPrompt(summaryEl.textContent, safeMissing, jobDesc),
                     400, model, { jsonMode: true }
                 );
@@ -897,7 +978,7 @@ document.getElementById('upload-resume-btn').addEventListener('click', async fun
             }
         } else {
             // Non-PDF: use text-based parsing
-            if (aiApiKey) {
+            if (activeApiKey()) {
                 document.getElementById('upload-status').innerHTML = '🤖 AI parsing resume structure...';
                 try {
                     parsed = await parseResumeWithAI(extractedText);
@@ -986,12 +1067,13 @@ function saveCurrentAsDefault() {
 }
 
 async function clearAllSavedData() {
-    const ok = confirm('This will permanently delete your saved resume and API key from this browser. Continue?');
+    const ok = confirm('This will permanently delete your saved resume and all API keys from this browser. Continue?');
     if (!ok) return;
     localStorage.removeItem(SAVED_DEFAULT_KEY);
     localStorage.removeItem(_LS_KEY);
     await _deleteEncryptionKey();
-    aiApiKey = null;
+    apiKeys = { openai: null, deepseek: null };
+    updateApiKeyUI();
     document.getElementById('api-key-container').style.display = 'block';
     showMessage('All saved data cleared from browser storage', 'success');
 }
@@ -1024,7 +1106,7 @@ async function readTextFile(file) {
 }
 
 async function readPDFFile(file) {
-    if (!aiApiKey) {
+    if (!activeApiKey()) {
         throw new Error('AI API key required for PDF extraction');
     }
 
@@ -1145,20 +1227,15 @@ CRITICAL RULES:
     });
 
     try {
-        const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        const response = await fetch(PROVIDER_CONFIG[currentProvider].baseUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Authorization': `Bearer ${aiApiKey}`
+                'Authorization': `Bearer ${activeApiKey()}`
             },
             body: JSON.stringify({
-                model: 'gpt-4o', // Use gpt-4o for vision capability (or gpt-4-turbo)
-                messages: [
-                    {
-                        role: 'user',
-                        content: messageContent
-                    }
-                ],
+                model: PROVIDER_CONFIG[currentProvider].visionModel,
+                messages: [{ role: 'user', content: messageContent }],
                 max_tokens: 4000,
                 temperature: 0
             })
@@ -1228,10 +1305,10 @@ async function readHTMLFile(file) {
 // AI RESUME PARSING (with robust prompt for dynamic template)
 // =============================================
 async function parseResumeWithAI(rawText) {
-    if (!aiApiKey) return null;
+    if (!activeApiKey()) return null;
 
     const selectedModel = document.getElementById('ai-model').value;
-    const charLimit = selectedModel.includes('gpt-4') ? 20000 : 12000;
+    const charLimit = PROVIDER_CONFIG[currentProvider].charLimit;
 
     const systemMessage = `You are a precise resume parser. You extract structured data from resume text. You NEVER infer, guess, or fabricate information — you only use text that actually appears in the resume. If a field cannot be determined from the text, leave it as an empty string or empty array.`;
 
@@ -1318,7 +1395,7 @@ Resume text:
 ${rawText.substring(0, charLimit)}`;
 
     try {
-        let response = await callOpenAI(prompt, 4000, selectedModel, {
+        let response = await callAI(prompt, 4000, selectedModel, {
             systemMessage,
             temperature: 0
         });

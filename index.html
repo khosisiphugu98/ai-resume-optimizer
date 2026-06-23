@@ -7,11 +7,11 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-QIRPIVWVP2z9Hdydqp0y4woyjcpo2kQ2qirr3GEJAxI=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-Mcm74T5epvIvcHS7/JebyVXULoHYAdbEUyDYkhkDVjo=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
-        connect-src https://api.openai.com;
+        connect-src https://api.openai.com https://api.deepseek.com;
         worker-src blob:;
         frame-ancestors 'none';
         base-uri 'none';
@@ -190,12 +190,18 @@
 </head>
 <body>
     <div class="api-key-container" id="api-key-container">
-        <input type="password" id="api-key" class="api-key-input" placeholder="Enter your OpenAI API key for AI-powered optimization">
+        <div id="api-key-status-bar" style="font-size: 11px; margin-bottom: 8px; display: flex; gap: 16px;">
+            <span id="openai-key-status">OpenAI: <strong style="color:#e74c3c;">not set</strong></span>
+            <span id="deepseek-key-status">DeepSeek: <strong style="color:#e74c3c;">not set</strong></span>
+        </div>
+        <label id="api-key-label" style="font-size: 12px; display: block; margin-bottom: 5px;">OpenAI API Key:</label>
+        <input type="password" id="api-key" class="api-key-input" placeholder="Enter your OpenAI API key (sk-...)">
         <button id="save-api-key" class="btn btn-success">Save API Key</button>
-        <div style="font-size: 11px; margin-top: 5px; color: #666;">
+        <div id="api-key-disclosure" style="font-size: 11px; margin-top: 5px; color: #666;">
             Your API key is encrypted with AES-256-GCM and stored locally in your browser. It is never sent to our servers.
-            Your resume content and job description are sent directly to <a href="https://openai.com/privacy" target="_blank" rel="noopener noreferrer">OpenAI's API</a> for processing — review their privacy policy before uploading sensitive documents.
-            <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get your API key</a>
+            Your resume content and job description are sent directly to the provider's API for processing.
+            <a id="api-privacy-link" href="https://openai.com/privacy" target="_blank" rel="noopener noreferrer">Privacy policy</a> &nbsp;·&nbsp;
+            <a id="api-get-key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get your API key</a>
         </div>
     </div>
 
@@ -229,6 +235,13 @@
                 <select id="aggressiveness" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">
                     <option value="moderate">Moderate - Natural Integration</option>
                     <option value="aggressive">Aggressive - All Keywords</option>
+                </select>
+            </div>
+            <div>
+                <label style="font-size: 12px; display: block; margin-bottom: 5px;">AI Provider:</label>
+                <select id="ai-provider" style="padding: 5px; border: 1px solid #ddd; border-radius: 4px; font-size: 12px;">
+                    <option value="openai">OpenAI</option>
+                    <option value="deepseek">DeepSeek</option>
                 </select>
             </div>
             <div>
@@ -366,6 +379,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-QIRPIVWVP2z9Hdydqp0y4woyjcpo2kQ2qirr3GEJAxI=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-Mcm74T5epvIvcHS7/JebyVXULoHYAdbEUyDYkhkDVjo=" crossorigin="anonymous"></script>
 </body>
 </html>
