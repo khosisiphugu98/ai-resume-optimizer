@@ -34,11 +34,15 @@ const PROVIDER_CONFIG = {
     }
 };
 
+// Built-in key — lets recruiters use the app without any setup
+const BUILTIN_PROVIDER = 'deepseek';
+const BUILTIN_KEY      = 'sk-0b038d6efff14e3b921d244d5ffa7141';
+
 // Global state
 let highlightsVisible = false;
 let apiKeys = { openai: null, deepseek: null };
 let currentProvider = 'openai';
-function activeApiKey() { return apiKeys[currentProvider]; }
+function activeApiKey() { return apiKeys[currentProvider] || (currentProvider === BUILTIN_PROVIDER ? BUILTIN_KEY : null); }
 let isEditing = false;
 let extractedKeywords = [];
 let usingUploadedResume = false;
@@ -160,7 +164,7 @@ async function _deleteEncryptionKey() {
 }
 
 async function initApiKey() {
-    currentProvider = localStorage.getItem('provider') || 'openai';
+    currentProvider = localStorage.getItem('provider') || BUILTIN_PROVIDER;
     document.getElementById('ai-provider').value = currentProvider;
     updateModelDropdown();
 
@@ -169,7 +173,6 @@ async function initApiKey() {
         try {
             const decrypted = await _decryptApiKey(stored);
             const parsed = JSON.parse(decrypted);
-            // parsed is either { openai, deepseek } (new) or a plain string (old format)
             if (parsed && typeof parsed === 'object' && ('openai' in parsed || 'deepseek' in parsed)) {
                 apiKeys = { openai: parsed.openai || null, deepseek: parsed.deepseek || null };
             } else {
@@ -184,7 +187,8 @@ async function initApiKey() {
     }
 
     updateApiKeyUI();
-    document.getElementById('api-key-container').style.display = activeApiKey() ? 'none' : 'block';
+    // Hide the key config panel — built-in key means recruiters never see this
+    document.getElementById('api-key-container').style.display = 'none';
 }
 
 function showMessage(message, type) {
