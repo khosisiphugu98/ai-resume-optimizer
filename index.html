@@ -7,7 +7,7 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-Oiowct6XXM8dO4RNrzTOe4zz0JbKGVdkPG9Mce+P/FU=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-QIRPIVWVP2z9Hdydqp0y4woyjcpo2kQ2qirr3GEJAxI=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
@@ -193,7 +193,7 @@
         <input type="password" id="api-key" class="api-key-input" placeholder="Enter your OpenAI API key for AI-powered optimization">
         <button id="save-api-key" class="btn btn-success">Save API Key</button>
         <div style="font-size: 11px; margin-top: 5px; color: #666;">
-            Your API key is stored in session memory only (cleared when you close the tab) and never sent to our servers.
+            Your API key is encrypted with AES-256-GCM and stored locally in your browser. It is never sent to our servers.
             Your resume content and job description are sent directly to <a href="https://openai.com/privacy" target="_blank" rel="noopener noreferrer">OpenAI's API</a> for processing — review their privacy policy before uploading sensitive documents.
             <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get your API key</a>
         </div>
@@ -366,6 +366,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-Oiowct6XXM8dO4RNrzTOe4zz0JbKGVdkPG9Mce+P/FU=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-QIRPIVWVP2z9Hdydqp0y4woyjcpo2kQ2qirr3GEJAxI=" crossorigin="anonymous"></script>
 </body>
 </html>

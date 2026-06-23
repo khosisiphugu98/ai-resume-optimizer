@@ -6,7 +6,7 @@ const originalResumeHTML = document.getElementById('resume-content').innerHTML;
 
 // Global state
 let highlightsVisible = false;
-let aiApiKey = sessionStorage.getItem('aiApiKey');
+let aiApiKey = null;
 let isEditing = false;
 let extractedKeywords = [];
 let usingUploadedResume = false;
@@ -14,9 +14,100 @@ let lastAppliedResume = null;
 let preOptimizationSnapshot = null; // DOM snapshot taken just before each optimize run
 let pendingDiffs = []; // Sprint 4: diffs awaiting user review
 
-// Configure AI visibility
-if (aiApiKey) document.getElementById('api-key-container').style.display = 'none';
-else document.getElementById('api-key-container').style.display = 'block';
+// =============================================
+// SECURE API KEY STORAGE — AES-256-GCM + IndexedDB
+// The encryption key lives in IndexedDB with extractable:false.
+// localStorage only stores the ciphertext + IV — useless without the IDB key.
+// Both stores are same-origin and cannot be accessed by other sites.
+// =============================================
+const _IDB_DB    = 'resume_optimizer_keys';
+const _IDB_STORE = 'keys';
+const _IDB_KEY_ID = 'apiKeyEncryptionKey';
+const _LS_KEY     = 'encApiKey';
+
+function _openKeyDb() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(_IDB_DB, 1);
+        req.onupgradeneeded = e => e.target.result.createObjectStore(_IDB_STORE);
+        req.onsuccess = e => resolve(e.target.result);
+        req.onerror   = () => reject(req.error);
+    });
+}
+
+async function _getOrCreateCryptoKey() {
+    const db  = await _openKeyDb();
+    const get = () => new Promise((res, rej) => {
+        const tx = db.transaction(_IDB_STORE, 'readonly');
+        const r  = tx.objectStore(_IDB_STORE).get(_IDB_KEY_ID);
+        r.onsuccess = () => res(r.result);
+        r.onerror   = () => rej(r.error);
+    });
+    const existing = await get();
+    if (existing) return existing;
+    const key = await crypto.subtle.generateKey(
+        { name: 'AES-GCM', length: 256 },
+        false,               // non-extractable — JS can never read the raw key bytes
+        ['encrypt', 'decrypt']
+    );
+    await new Promise((res, rej) => {
+        const tx = db.transaction(_IDB_STORE, 'readwrite');
+        const r  = tx.objectStore(_IDB_STORE).put(key, _IDB_KEY_ID);
+        r.onsuccess = res; r.onerror = () => rej(r.error);
+    });
+    return key;
+}
+
+async function _encryptApiKey(plaintext) {
+    const key = await _getOrCreateCryptoKey();
+    const iv  = crypto.getRandomValues(new Uint8Array(12));
+    const enc = await crypto.subtle.encrypt(
+        { name: 'AES-GCM', iv },
+        key,
+        new TextEncoder().encode(plaintext)
+    );
+    // Prepend IV to ciphertext, encode as base64
+    const combined = new Uint8Array(12 + enc.byteLength);
+    combined.set(iv);
+    combined.set(new Uint8Array(enc), 12);
+    return btoa(String.fromCharCode(...combined));
+}
+
+async function _decryptApiKey(b64) {
+    const key      = await _getOrCreateCryptoKey();
+    const combined = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+    const dec      = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: combined.slice(0, 12) },
+        key,
+        combined.slice(12)
+    );
+    return new TextDecoder().decode(dec);
+}
+
+async function _deleteEncryptionKey() {
+    try {
+        const db = await _openKeyDb();
+        await new Promise((res, rej) => {
+            const tx = db.transaction(_IDB_STORE, 'readwrite');
+            const r  = tx.objectStore(_IDB_STORE).delete(_IDB_KEY_ID);
+            r.onsuccess = res; r.onerror = () => rej(r.error);
+        });
+    } catch { /* fail silently — storage may already be cleared */ }
+}
+
+async function initApiKey() {
+    const stored = localStorage.getItem(_LS_KEY);
+    if (stored) {
+        try {
+            aiApiKey = await _decryptApiKey(stored);
+            document.getElementById('api-key-container').style.display = 'none';
+            return;
+        } catch {
+            // Decryption failed (e.g. IDB key was wiped) — clear stale ciphertext
+            localStorage.removeItem(_LS_KEY);
+        }
+    }
+    document.getElementById('api-key-container').style.display = 'block';
+}
 
 function showMessage(message, type) {
     const msgEl = document.getElementById('message');
@@ -215,10 +306,18 @@ function resetResume() {
 document.getElementById('configure-ai').addEventListener('click', () => {
     document.getElementById('api-key-container').style.display = document.getElementById('api-key-container').style.display === 'none' ? 'block' : 'none';
 });
-document.getElementById('save-api-key').addEventListener('click', () => {
+document.getElementById('save-api-key').addEventListener('click', async () => {
     const key = document.getElementById('api-key').value.trim();
-    if (key) { sessionStorage.setItem('aiApiKey', key); aiApiKey = key; document.getElementById('api-key-container').style.display = 'none'; showMessage('API key saved for this session!', 'success'); }
-    else showMessage('Enter valid API key', 'error');
+    if (!key) { showMessage('Enter valid API key', 'error'); return; }
+    try {
+        const encrypted = await _encryptApiKey(key);
+        localStorage.setItem(_LS_KEY, encrypted);
+        aiApiKey = key;
+        document.getElementById('api-key-container').style.display = 'none';
+        showMessage('API key saved — encrypted and stored permanently.', 'success');
+    } catch (e) {
+        showMessage('Could not save API key: ' + e.message, 'error');
+    }
 });
 document.getElementById('advanced-options').addEventListener('click', () => {
     const cont = document.getElementById('advanced-options-container');
@@ -886,11 +985,12 @@ function saveCurrentAsDefault() {
     }
 }
 
-function clearAllSavedData() {
+async function clearAllSavedData() {
     const ok = confirm('This will permanently delete your saved resume and API key from this browser. Continue?');
     if (!ok) return;
     localStorage.removeItem(SAVED_DEFAULT_KEY);
-    sessionStorage.removeItem('aiApiKey');
+    localStorage.removeItem(_LS_KEY);
+    await _deleteEncryptionKey();
     aiApiKey = null;
     document.getElementById('api-key-container').style.display = 'block';
     showMessage('All saved data cleared from browser storage', 'success');
@@ -2299,3 +2399,4 @@ function loadDefaultOnStartup() {
     });
 }
 loadDefaultOnStartup();
+initApiKey();
