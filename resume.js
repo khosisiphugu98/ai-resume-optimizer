@@ -469,21 +469,21 @@ function getStylesForDownload() {
 //
 // offsetTop/offsetHeight are always in layout-space (unaffected by CSS transforms),
 // which matches the coordinate space html2canvas captures.
-function measureContentBottomDOM(container) {
-    let maxBottom = 0;
+// Returns the actual rendered height of all content inside container, including
+// children that visually overflow below the container's own box (overflow: visible).
+// getBoundingClientRect() captures the real visual position on screen, making this
+// immune to the offsetParent-chain bugs and overflow-clipping that plagued earlier approaches.
+function measureActualContentHeight(container) {
+    const containerTop = container.getBoundingClientRect().top;
+    let maxBottom = container.getBoundingClientRect().bottom; // at least the container's own bottom
     container.querySelectorAll('*').forEach(el => {
         if (el.dataset.autofitHidden) return;
-        if (el.offsetWidth === 0 && el.offsetHeight === 0) return;
-        // Walk up the offsetParent chain to accumulate position relative to container
-        let bottom = el.offsetTop + el.offsetHeight;
-        let node = el.offsetParent;
-        while (node && node !== container && container.contains(node)) {
-            bottom += node.offsetTop;
-            node = node.offsetParent;
-        }
-        if (bottom > maxBottom) maxBottom = bottom;
+        const rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return;
+        if (rect.bottom > maxBottom) maxBottom = rect.bottom;
     });
-    return maxBottom;
+    // 24px safety margin so bottom padding/margins are never clipped
+    return Math.ceil(maxBottom - containerTop) + 24;
 }
 
 // Return a new canvas cropped to croppedHeight pixels
@@ -512,16 +512,17 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
         const element = resumeEl;
         const scale = 2;
 
-        // html2canvas renders at scrollHeight — the canvas is already perfectly sized.
-        // We do not crop: any measurement-based crop risks cutting off content at the bottom,
-        // which is worse than a few extra pixels of padding.
+        // Measure the true rendered height including any children that overflow
+        // below the flex container's own box (overflow: visible). scrollHeight misses these.
+        const contentHeight = measureActualContentHeight(element);
+
         const canvas = await html2canvas(element, {
             scale,
             backgroundColor: '#ffffff',
             width: element.scrollWidth,
-            height: element.scrollHeight,
+            height: contentHeight,
             windowWidth: element.scrollWidth,
-            windowHeight: element.scrollHeight
+            windowHeight: contentHeight
         });
 
         // Compression strategy (all client-side, no data leaves the browser):
