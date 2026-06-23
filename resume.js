@@ -512,14 +512,10 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
         const element = resumeEl;
         const scale = 2;
 
-        // Measure content boundary from the DOM BEFORE rendering the canvas.
-        // This gives us the exact bottom of the last real element in CSS pixels.
-        const contentBottomCSS = measureContentBottomDOM(element);
-        // Convert to canvas pixels and add 20px real-CSS-pixel bottom margin
-        const bottomMarginCSS = 20;
-        const cropHeightCanvas = (contentBottomCSS + bottomMarginCSS) * scale;
-
-        const rawCanvas = await html2canvas(element, {
+        // html2canvas renders at scrollHeight — the canvas is already perfectly sized.
+        // We do not crop: any measurement-based crop risks cutting off content at the bottom,
+        // which is worse than a few extra pixels of padding.
+        const canvas = await html2canvas(element, {
             scale,
             backgroundColor: '#ffffff',
             width: element.scrollWidth,
@@ -527,8 +523,6 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
             windowWidth: element.scrollWidth,
             windowHeight: element.scrollHeight
         });
-
-        const canvas = cropCanvas(rawCanvas, cropHeightCanvas);
 
         // Compression strategy (all client-side, no data leaves the browser):
         // 1. JPEG encoding at quality 0.82 — typically 80-90% smaller than PNG
