@@ -540,26 +540,13 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
 
         const { jsPDF } = window.jspdf;
         const a4Width = 210;
-        const a4Height = 297;
         const imgWidth = a4Width;
         const imgHeight = (canvas.height * a4Width) / canvas.width;
 
+        // Always use a custom page height matching the content exactly — one page, never cut off.
         // compress:true enables deflate on PDF object streams
-        const pdfOpts = { orientation: 'portrait', unit: 'mm', compress: true };
-        let pdf;
-
-        if (imgHeight <= a4Height) {
-            pdf = new jsPDF({ ...pdfOpts, format: [a4Width, imgHeight] });
-            pdf.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
-        } else {
-            pdf = new jsPDF({ ...pdfOpts, format: 'a4' });
-            let yOffset = 0;
-            while (yOffset < imgHeight) {
-                if (yOffset > 0) pdf.addPage();
-                pdf.addImage(imgData, 'JPEG', 0, -yOffset, imgWidth, imgHeight);
-                yOffset += a4Height;
-            }
-        }
+        const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: [a4Width, imgHeight], compress: true });
+        pdf.addImage(imgData, 'JPEG', 0, 0, imgWidth, imgHeight);
 
         // Report actual file size before triggering the download
         const sizeKB = Math.round(pdf.output('blob').size / 1024);
