@@ -967,23 +967,22 @@ document.getElementById('upload-resume-btn').addEventListener('click', async fun
             return;
         }
 
-        // For PDFs, extractedText is actually JSON from Vision API
         let parsed = null;
 
+        // PDFs return JSON only when the scanned/vision path ran; text-based PDFs return plain text.
         if (file.name.endsWith('.pdf')) {
-            // PDF was extracted via Vision API, parse the JSON
             try {
                 parsed = JSON.parse(extractedText);
-                showMessage(`Extracted via Vision API`, 'info');
-            } catch (e) {
-                console.error('Failed to parse Vision API JSON:', e);
-                showMessage('Failed to parse extracted resume data', 'error');
-                return;
+                showMessage('Extracted via Vision API', 'info');
+            } catch {
+                // Plain text from pdf.js — fall through to AI text parser
             }
-        } else {
-            // Non-PDF: use text-based parsing
+        }
+
+        if (!parsed) {
+            // Text-based PDF or non-PDF: AI text parsing
             if (activeApiKey()) {
-                document.getElementById('upload-status').innerHTML = '🤖 AI parsing resume structure...';
+                document.getElementById('upload-status').textContent = '🤖 AI parsing resume structure...';
                 try {
                     parsed = await parseResumeWithAI(extractedText);
                 } catch (e) {
@@ -993,8 +992,7 @@ document.getElementById('upload-resume-btn').addEventListener('click', async fun
             }
 
             if (!parsed) {
-                // FALLBACK: Smart text extraction without AI
-                document.getElementById('upload-status').innerHTML = '📝 Using smart text extraction...';
+                document.getElementById('upload-status').textContent = '📝 Using smart text extraction...';
                 parsed = parseResumeFromText(extractedText);
             }
         }
@@ -1116,155 +1114,64 @@ async function readPDFFile(file) {
 
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
-    const numPages = pdf.numPages;
 
-    // Render all pages as images and extract via OpenAI Vision API
-    const pageImages = [];
-
-    for (let i = 1; i <= Math.min(numPages, 3); i++) { // Limit to 3 pages to avoid token overuse
+    // Step 1: Try pdf.js text extraction (works for all text-based PDFs, no vision API needed)
+    document.getElementById('upload-status').textContent = '📄 Extracting PDF text...';
+    let pdfText = '';
+    for (let i = 1; i <= pdf.numPages; i++) {
         try {
             const page = await pdf.getPage(i);
-            const viewport = page.getViewport({ scale: 2 }); // Scale 2 for better quality
+            const content = await page.getTextContent();
+            pdfText += content.items.map(item => item.str).join(' ') + '\n';
+        } catch (e) {
+            console.warn(`Text extraction failed for page ${i}:`, e);
+        }
+    }
+
+    // If we got enough text, return it — the upload handler will AI-parse it like any other format
+    if (pdfText.trim().length > 100) {
+        return pdfText;
+    }
+
+    // Step 2: Scanned/image-only PDF — needs vision API (OpenAI only)
+    if (currentProvider !== 'openai') {
+        throw new Error('This PDF appears to be a scanned image with no extractable text. Scanned PDFs require OpenAI (GPT-4o). Please switch provider to OpenAI, or upload a text-based PDF.');
+    }
+
+    document.getElementById('upload-status').textContent = '🔍 Scanned PDF — using Vision API...';
+    const pageImages = [];
+    for (let i = 1; i <= Math.min(pdf.numPages, 3); i++) {
+        try {
+            const page = await pdf.getPage(i);
+            const viewport = page.getViewport({ scale: 2 });
             const canvas = document.createElement('canvas');
             canvas.width = viewport.width;
             canvas.height = viewport.height;
-
-            const context = canvas.getContext('2d');
-            await page.render({ canvasContext: context, viewport }).promise;
-
-            // Convert canvas to base64 PNG
-            const imageBase64 = canvas.toDataURL('image/png').split(',')[1];
-            pageImages.push(imageBase64);
+            await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+            pageImages.push(canvas.toDataURL('image/png').split(',')[1]);
         } catch (e) {
             console.warn(`Failed to render page ${i}:`, e);
         }
     }
 
-    if (pageImages.length === 0) {
-        throw new Error('Could not render any pages from PDF');
-    }
+    if (pageImages.length === 0) throw new Error('Could not render any pages from PDF');
 
-    // Send images to OpenAI Vision API for extraction
     const prompt = `Extract structured resume/CV data from these images. Return ONLY valid JSON with this structure:
-{
-  "name": "Full Name",
-  "title": "Professional Title / Headline",
-  "summary": "Professional summary",
-  "contact": {
-"email": "",
-"phone": "",
-"location": "",
-"linkedin": "",
-"website": "",
-"portfolio": ""
-  },
-  "skills": {
-"categories": [
-  { "name": "Category", "items": ["skill1", "skill2"] }
-]
-  },
-  "experience": [
-{
-  "title": "Job Title",
-  "company": "Company Name",
-  "date": "Date Range",
-  "bullets": ["achievement 1", "achievement 2"]
-}
-  ],
-  "education": [
-{
-  "degree": "Degree",
-  "institution": "School",
-  "date": "Date Range",
-  "details": ["detail"]
-}
-  ],
-  "languages": ["Language (Proficiency)"],
-  "references": [
-{
-  "name": "Name",
-  "title": "Title",
-  "email": "",
-  "phone": ""
-}
-  ],
-  "certifications": [
-{
-  "name": "Cert Name",
-  "issuer": "Issuer",
-  "date": "Date"
-}
-  ],
-  "achievements": ["achievement 1"],
-  "projects": [
-{
-  "name": "Project Name",
-  "description": "Description",
-  "bullets": ["detail"]
-}
-  ]
-}
+{"name":"","title":"","summary":"","contact":{"email":"","phone":"","location":"","linkedin":"","website":"","portfolio":""},"skills":{"categories":[{"name":"","items":[]}]},"experience":[{"title":"","company":"","date":"","bullets":[]}],"education":[{"degree":"","institution":"","date":"","details":[]}],"languages":[],"references":[{"name":"","title":"","email":"","phone":""}],"certifications":[{"name":"","issuer":"","date":""}],"achievements":[],"projects":[{"name":"","description":"","bullets":[]}]}
+CRITICAL: Use EXACT text. Return valid JSON only, no markdown.`;
 
-CRITICAL RULES:
-- Use EXACT text from the resume for names, titles, companies — NEVER guess or use generic labels
-- Extract ALL data: contact info, education, achievements, references, skills, projects
-- For phone numbers and emails: search entire resume carefully
-- For company names: use EXACT names as written, not descriptions
-- Return valid JSON only, no markdown or explanation`;
+    const messageContent = [{ type: 'text', text: prompt }];
+    pageImages.forEach(b64 => messageContent.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } }));
 
-    // Build vision API request with multiple images
-    const messageContent = [
-        {
-            type: 'text',
-            text: prompt
-        }
-    ];
-
-    // Add all page images
-    pageImages.forEach(imageBase64 => {
-        messageContent.push({
-            type: 'image_url',
-            image_url: {
-                url: `data:image/png;base64,${imageBase64}`
-            }
-        });
+    const response = await fetch(PROVIDER_CONFIG.openai.baseUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
+        body: JSON.stringify({ model: PROVIDER_CONFIG.openai.visionModel, messages: [{ role: 'user', content: messageContent }], max_tokens: 4000, temperature: 0 })
     });
-
-    try {
-        const response = await fetch(PROVIDER_CONFIG[currentProvider].baseUrl, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${activeApiKey()}`
-            },
-            body: JSON.stringify({
-                model: PROVIDER_CONFIG[currentProvider].visionModel,
-                messages: [{ role: 'user', content: messageContent }],
-                max_tokens: 4000,
-                temperature: 0
-            })
-        });
-
-        if (!response.ok) {
-            const error = await response.json();
-            throw new Error(`OpenAI API error: ${error.error?.message}`);
-        }
-
-        const result = await response.json();
-        let extractedJson = result.choices[0].message.content.trim();
-
-        // Strip markdown code fences if present
-        extractedJson = extractedJson.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
-
-        // Parse and return the structured data
-        const parsed = JSON.parse(extractedJson);
-
-        // Return as JSON string so upload handler can parse it
-        return JSON.stringify(parsed);
-    } catch (e) {
-        console.error('PDF extraction via Vision API failed:', e);
-        throw e;
-    }
+    if (!response.ok) { const err = await response.json(); throw new Error(`API error: ${err.error?.message}`); }
+    let json = (await response.json()).choices[0].message.content.trim();
+    json = json.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+    return JSON.stringify(JSON.parse(json));
 }
 
 async function readDOCXFile(file) {
