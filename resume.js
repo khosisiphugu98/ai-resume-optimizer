@@ -572,8 +572,24 @@ async function callAI(prompt, maxTokens, model, { systemMessage = null, temperat
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
         body: JSON.stringify(body)
     });
-    if (!response.ok) throw new Error(`API error: ${(await response.json()).error?.message}`);
-    return (await response.json()).choices[0].message.content.trim();
+    if (!response.ok) {
+        let msg = `AI request failed (HTTP ${response.status})`;
+        try {
+            const raw = (await response.json()).error?.message || '';
+            if (response.status === 402 || /balance|quota|billing/i.test(raw)) {
+                msg = 'AI quota exceeded. Add your own API key in the settings panel.';
+            } else if (response.status === 401) {
+                msg = 'Invalid API key. Please check your settings.';
+            } else if (response.status === 429) {
+                msg = 'Too many requests — please wait a moment and try again.';
+            } else if (raw) {
+                msg = `AI error: ${raw}`;
+            }
+        } catch { /* non-JSON error body — keep the generic message */ }
+        throw new Error(msg);
+    }
+    const data = await response.json();
+    return data.choices[0].message.content.trim();
 }
 
 // =============================================
@@ -1089,11 +1105,32 @@ async function readTextFile(file) {
     });
 }
 
-async function readPDFFile(file) {
-    if (!activeApiKey()) {
-        throw new Error('AI API key required for PDF extraction');
+// Reconstruct readable text from pdf.js TextItems using x/y positions to detect
+// word boundaries and line breaks — avoids the space-per-glyph problem that turns
+// "Lebethe" into "L eb ethe" when each glyph is a separate item.
+function pdfItemsToText(items) {
+    let text = '';
+    let lastX = null, lastY = null, lastW = 0;
+    for (const item of items) {
+        if (!item.str) continue;
+        const x = item.transform[4];
+        const y = Math.round(item.transform[5]);
+        if (lastY === null) {
+            text += item.str;
+        } else if (Math.abs(y - lastY) > 2) {
+            text += '\n' + item.str;
+        } else {
+            const gap = x - (lastX + lastW);
+            text += (gap > 1 ? ' ' : '') + item.str;
+        }
+        lastX = x;
+        lastY = y;
+        lastW = item.width || 0;
     }
+    return text;
+}
 
+async function readPDFFile(file) {
     const buf = await file.arrayBuffer();
     const pdf = await pdfjsLib.getDocument({ data: buf }).promise;
 
@@ -1104,7 +1141,7 @@ async function readPDFFile(file) {
         try {
             const page = await pdf.getPage(i);
             const content = await page.getTextContent();
-            pdfText += content.items.map(item => item.str).join(' ') + '\n';
+            pdfText += pdfItemsToText(content.items) + '\n';
         } catch (e) {
             console.warn(`Text extraction failed for page ${i}:`, e);
         }
@@ -1150,7 +1187,17 @@ CRITICAL: Use EXACT text. Return valid JSON only, no markdown.`;
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
         body: JSON.stringify({ model: PROVIDER_CONFIG.openai.visionModel, messages: [{ role: 'user', content: messageContent }], max_tokens: 4000, temperature: 0 })
     });
-    if (!response.ok) { const err = await response.json(); throw new Error(`API error: ${err.error?.message}`); }
+    if (!response.ok) {
+        let msg = `Vision API request failed (HTTP ${response.status})`;
+        try {
+            const raw = (await response.json()).error?.message || '';
+            if (response.status === 402 || /balance|quota|billing/i.test(raw)) msg = 'AI quota exceeded. Add your own API key in the settings panel.';
+            else if (response.status === 401) msg = 'Invalid API key. Please check your settings.';
+            else if (response.status === 429) msg = 'Too many requests — please wait a moment and try again.';
+            else if (raw) msg = `Vision API error: ${raw}`;
+        } catch { /* non-JSON body */ }
+        throw new Error(msg);
+    }
     let json = (await response.json()).choices[0].message.content.trim();
     json = json.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
     return JSON.stringify(JSON.parse(json));
