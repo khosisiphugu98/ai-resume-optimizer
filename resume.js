@@ -7,10 +7,10 @@ const originalResumeHTML = document.getElementById('resume-content').innerHTML;
 // Provider configuration — all per-provider values in one place
 const PROVIDER_CONFIG = {
     openai: {
-        baseUrl:      'https://api.openai.com/v1/chat/completions',
-        models:       [{ value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo (Faster)' },
-                       { value: 'gpt-4',         label: 'GPT-4 (Better Quality)' }],
-        defaultModel: 'gpt-3.5-turbo',
+        baseUrl:      'https://resume-ai-proxy.mksiphugu.workers.dev/v1/chat/completions',
+        models:       [{ value: 'gpt-4o-mini', label: 'GPT-4o Mini (Faster)' },
+                       { value: 'gpt-4o',      label: 'GPT-4o (Better Quality)' }],
+        defaultModel: 'gpt-4o-mini',
         extractModel: 'gpt-4o-mini',
         visionModel:  'gpt-4o',
         charLimit:    20000,
@@ -34,9 +34,9 @@ const PROVIDER_CONFIG = {
     }
 };
 
-// Built-in key — lets recruiters use the app without any setup
-const BUILTIN_PROVIDER = 'deepseek';
-const BUILTIN_KEY      = 'sk-0b038d6efff14e3b921d244d5ffa7141';
+// Built-in provider routes through the server-side proxy — key never exposed to client
+const BUILTIN_PROVIDER = 'openai';
+const BUILTIN_KEY      = 'proxy';
 
 // Global state
 let highlightsVisible = false;

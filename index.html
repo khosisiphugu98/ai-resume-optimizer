@@ -7,11 +7,11 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-8znSmdcTx4qORdfmWRGW/6nZB0Yl76BjsKHkc9E8T3M=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-YZDJ5S2t09EVt/5oHPK6zGoLyTRmI4NRIX2pbpSfoh0=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
-        connect-src https://api.openai.com https://api.deepseek.com;
+        connect-src https://resume-ai-proxy.mksiphugu.workers.dev https://api.deepseek.com;
         worker-src blob:;
         frame-ancestors 'none';
         base-uri 'none';
@@ -379,6 +379,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-8znSmdcTx4qORdfmWRGW/6nZB0Yl76BjsKHkc9E8T3M=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-YZDJ5S2t09EVt/5oHPK6zGoLyTRmI4NRIX2pbpSfoh0=" crossorigin="anonymous"></script>
 </body>
 </html>
