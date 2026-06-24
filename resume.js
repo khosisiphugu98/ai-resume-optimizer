@@ -66,13 +66,19 @@ function updateApiKeyUI() {
     document.getElementById('api-privacy-link').href = cfg.privacyUrl;
     document.getElementById('api-get-key-link').href  = cfg.keyUrl;
     document.getElementById('api-get-key-link').textContent = 'Get your ' + cfg.keyLabel;
-    const fmt = (key, id) => {
+    const fmt = (key, id, isBuiltinProvider) => {
         const el = document.getElementById(id);
+        const usingProxy = !key && isBuiltinProvider;
+        const color = (key || usingProxy) ? '#27ae60' : '#e74c3c';
+        const label = key ? '✓ configured' : usingProxy ? '✓ built-in proxy' : 'not set';
         el.innerHTML = el.innerHTML.replace(/<strong.*<\/strong>/,
-            `<strong style="color:${key ? '#27ae60' : '#e74c3c'}">${key ? '✓ configured' : 'not set'}</strong>`);
+            `<strong style="color:${color}">${label}</strong>`);
     };
-    fmt(apiKeys.openai,    'openai-key-status');
-    fmt(apiKeys.deepseek,  'deepseek-key-status');
+    fmt(apiKeys.openai,    'openai-key-status',   true);
+    fmt(apiKeys.deepseek,  'deepseek-key-status',  false);
+    // Show the proxy notice when OpenAI is active and no personal key is saved
+    const proxyNotice = document.getElementById('proxy-notice');
+    if (proxyNotice) proxyNotice.style.display = (!apiKeys.openai && currentProvider === BUILTIN_PROVIDER) ? 'block' : 'none';
 }
 
 document.getElementById('ai-provider').addEventListener('change', function() {
@@ -482,7 +488,7 @@ function measureActualContentHeight(container) {
         if (rect.width === 0 && rect.height === 0) return;
         if (rect.bottom > maxBottom) maxBottom = rect.bottom;
     });
-    // 24px safety margin so bottom padding/margins are never clipped
+    // 24px safety margin so any overflow content at the bottom is never clipped
     return Math.ceil(maxBottom - containerTop) + 24;
 }
 
@@ -506,6 +512,7 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
     const sidebar = document.querySelector('.sidebar');
     const resumeEl = document.getElementById('resume-content');
     const origSidebarBg = sidebar.style.background;
+    const origMinHeight = resumeEl.style.minHeight;
     sidebar.style.background = '#2c3e50';
 
     try {
@@ -515,6 +522,11 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
         // Measure the true rendered height including any children that overflow
         // below the flex container's own box (overflow: visible). scrollHeight misses these.
         const contentHeight = measureActualContentHeight(element);
+
+        // Force the flex container to the full capture height so the sidebar (which
+        // has align-items:stretch) fills the safety-margin pixels with its dark
+        // background instead of leaving a white gap at the bottom.
+        resumeEl.style.minHeight = contentHeight + 'px';
 
         const canvas = await html2canvas(element, {
             scale,
@@ -551,6 +563,7 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
     } catch (e) { console.error('PDF error:', e); showMessage('PDF error: ' + e.message, 'error'); }
     finally {
         sidebar.style.background = origSidebarBg;
+        resumeEl.style.minHeight = origMinHeight;
         if (wasVisible) showHighlightsManually();
     }
 });
