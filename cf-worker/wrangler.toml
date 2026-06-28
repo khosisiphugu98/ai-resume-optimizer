@@ -1,3 +1,9 @@
 name = "resume-ai-proxy"
 main = "worker.js"
 compatibility_date = "2025-01-01"
+
+# PROXY_TOKEN — shared secret that the client must send as X-Proxy-Token header.
+# Set it as a Cloudflare secret (preferred, never committed to git):
+#   wrangler secret put PROXY_TOKEN
+# Then update the matching PROXY_TOKEN constant in ../resume.js.
+# Rotate both together if the token is ever compromised.

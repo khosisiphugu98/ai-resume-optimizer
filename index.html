@@ -7,12 +7,12 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-/q4oXDo2WV1OPc2BMZ3ctMGlTnTk0Bn2AIYlj5RkRpI=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-mX6o+IkrvYoPgaLBioOv7X5j8fKjkIr76BIHife06wQ=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
         connect-src https://resume-ai-proxy.mksiphugu.workers.dev https://api.deepseek.com;
-        worker-src blob:;
+        worker-src 'self' blob:;
         base-uri 'none';
         form-action 'none';
     ">
@@ -201,7 +201,8 @@
         </div>
         <div id="api-key-disclosure" style="font-size: 11px; margin-top: 5px; color: #666;">
             Your API key is encrypted with AES-256-GCM and stored locally in your browser. It is never sent to our servers.
-            Your resume content and job description are sent directly to the provider's API for processing.
+            OpenAI calls are routed through a secure proxy; DeepSeek calls go directly to DeepSeek's API.
+            Your resume content and job description leave your browser only to reach the AI provider for processing.
             <a id="api-privacy-link" href="https://openai.com/privacy" target="_blank" rel="noopener noreferrer">Privacy policy</a> &nbsp;·&nbsp;
             <a id="api-get-key-link" href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer">Get your API key</a>
         </div>
@@ -381,6 +382,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-/q4oXDo2WV1OPc2BMZ3ctMGlTnTk0Bn2AIYlj5RkRpI=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-mX6o+IkrvYoPgaLBioOv7X5j8fKjkIr76BIHife06wQ=" crossorigin="anonymous"></script>
 </body>
 </html>

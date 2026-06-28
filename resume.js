@@ -1,5 +1,9 @@
-// Configure PDF.js worker
-pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+// Configure PDF.js worker.
+// Self-hosted (same-origin) rather than loaded from the CDN. The Subresource Integrity
+// API does not cover dynamically loaded worker scripts, so a CDN-hosted worker could not
+// be hash-verified. The local pdf.worker.min.js was downloaded from cdnjs and verified
+// against its published SHA-512 SRI; it is version-locked with pdf.min.js (3.11.174).
+pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.js';
 
 // Store FULL original HTML for perfect reset (snapshot the entire resume)
 const originalResumeHTML = document.getElementById('resume-content').innerHTML;
@@ -37,6 +41,14 @@ const PROVIDER_CONFIG = {
 // Built-in provider routes through the server-side proxy — key never exposed to client
 const BUILTIN_PROVIDER = 'openai';
 const BUILTIN_KEY      = 'proxy';
+
+// Shared secret sent as X-Proxy-Token on every request to the Cloudflare Worker proxy.
+// The worker rejects requests that don't include this header, preventing unauthorized
+// use of the built-in OpenAI key by anyone who discovers the proxy URL.
+// This value must match the PROXY_TOKEN secret stored in the Cloudflare Worker
+// (set it with: wrangler secret put PROXY_TOKEN).
+// Rotate both together if the token is ever compromised.
+const PROXY_TOKEN = 'rp-2025-8a3f-c7e2-b9d4-1f5e-4c2a-7d6b';
 
 // Global state
 let highlightsVisible = false;
@@ -132,7 +144,9 @@ async function _getOrCreateCryptoKey() {
     return key;
 }
 
-async function _encryptApiKey(plaintext) {
+// Generic AES-256-GCM string encryption — used for both the API keys and the
+// saved resume (which contains PII: name, email, phone, references, etc.).
+async function _encryptString(plaintext) {
     const key = await _getOrCreateCryptoKey();
     const iv  = crypto.getRandomValues(new Uint8Array(12));
     const enc = await crypto.subtle.encrypt(
@@ -140,14 +154,20 @@ async function _encryptApiKey(plaintext) {
         key,
         new TextEncoder().encode(plaintext)
     );
-    // Prepend IV to ciphertext, encode as base64
+    // Prepend IV to ciphertext, encode as base64.
+    // Chunked btoa avoids "Maximum call stack" on larger payloads (full resumes).
     const combined = new Uint8Array(12 + enc.byteLength);
     combined.set(iv);
     combined.set(new Uint8Array(enc), 12);
-    return btoa(String.fromCharCode(...combined));
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < combined.length; i += CHUNK) {
+        binary += String.fromCharCode(...combined.subarray(i, i + CHUNK));
+    }
+    return btoa(binary);
 }
 
-async function _decryptApiKey(b64) {
+async function _decryptString(b64) {
     const key      = await _getOrCreateCryptoKey();
     const combined = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
     const dec      = await crypto.subtle.decrypt(
@@ -177,14 +197,14 @@ async function initApiKey() {
     const stored = localStorage.getItem(_LS_KEY);
     if (stored) {
         try {
-            const decrypted = await _decryptApiKey(stored);
+            const decrypted = await _decryptString(stored);
             const parsed = JSON.parse(decrypted);
             if (parsed && typeof parsed === 'object' && ('openai' in parsed || 'deepseek' in parsed)) {
                 apiKeys = { openai: parsed.openai || null, deepseek: parsed.deepseek || null };
             } else {
                 // One-time migration: old format was a plain encrypted string (OpenAI key)
                 apiKeys = { openai: typeof decrypted === 'string' ? decrypted : null, deepseek: null };
-                const migrated = await _encryptApiKey(JSON.stringify(apiKeys));
+                const migrated = await _encryptString(JSON.stringify(apiKeys));
                 localStorage.setItem(_LS_KEY, migrated);
             }
         } catch {
@@ -399,7 +419,7 @@ document.getElementById('save-api-key').addEventListener('click', async () => {
     if (!key) { showMessage('Enter valid API key', 'error'); return; }
     try {
         apiKeys[currentProvider] = key;
-        const encrypted = await _encryptApiKey(JSON.stringify(apiKeys));
+        const encrypted = await _encryptString(JSON.stringify(apiKeys));
         localStorage.setItem(_LS_KEY, encrypted);
         document.getElementById('api-key').value = '';
         document.getElementById('api-key-container').style.display = 'none';
@@ -580,9 +600,13 @@ async function callAI(prompt, maxTokens, model, { systemMessage = null, temperat
     // response_format: json_object is not supported by deepseek-reasoner (R1)
     const body = { model, messages, max_tokens: maxTokens, temperature };
     if (jsonMode && model !== 'deepseek-reasoner') body.response_format = { type: 'json_object' };
+    // Always include the proxy token for OpenAI calls (which route through our CF Worker).
+    // DeepSeek calls go direct to api.deepseek.com and don't need it.
+    const headers = { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` };
+    if (currentProvider === 'openai') headers['X-Proxy-Token'] = PROXY_TOKEN;
     const response = await fetch(cfg.baseUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
+        headers,
         body: JSON.stringify(body)
     });
     if (!response.ok) {
@@ -1051,16 +1075,18 @@ document.getElementById('reset-to-original').addEventListener('click', function(
 // SAVE AS DEFAULT / REVERT TO HARDCODED
 // =============================================
 const SAVED_DEFAULT_KEY = 'resumeDefault';
-const SAVED_DEFAULT_VERSION = 1;
+// Version 2: resume data (PII) is now AES-256-GCM encrypted at rest. Version 1
+// plaintext payloads are no longer read — they're discarded on load (see loadDefaultOnStartup).
+const SAVED_DEFAULT_VERSION = 2;
 
-function saveCurrentAsDefault() {
+async function saveCurrentAsDefault() {
     if (!lastAppliedResume) {
         showMessage('Import a resume first before saving it as default', 'error');
         return;
     }
     // Warn user their PII will be stored in browser storage
     const ok = confirm(
-        'This will save your resume data (including personal details) in your browser\'s local storage so it loads automatically next time.\n\n' +
+        'This will save your resume data (including personal details) ENCRYPTED in your browser\'s local storage so it loads automatically next time.\n\n' +
         '⚠ Saved data expires automatically after 30 days.\n' +
         '⚠ Do not use this on a shared or public device.\n\n' +
         'To remove saved data earlier: click the 🗑 Clear Saved Data button.\n\n' +
@@ -1068,8 +1094,11 @@ function saveCurrentAsDefault() {
     );
     if (!ok) return;
     try {
-        localStorage.setItem(SAVED_DEFAULT_KEY, JSON.stringify({ version: SAVED_DEFAULT_VERSION, savedAt: Date.now(), data: lastAppliedResume }));
-        showMessage('Saved as default — will load automatically on next visit (expires in 30 days)', 'success');
+        // Encrypt the PII payload; only non-sensitive metadata (version, timestamp)
+        // is stored in the clear so expiry/version can be checked without decrypting.
+        const encData = await _encryptString(JSON.stringify(lastAppliedResume));
+        localStorage.setItem(SAVED_DEFAULT_KEY, JSON.stringify({ version: SAVED_DEFAULT_VERSION, savedAt: Date.now(), encData }));
+        showMessage('Saved as default (encrypted) — will load automatically on next visit (expires in 30 days)', 'success');
     } catch (e) {
         if (e.name === 'QuotaExceededError') {
             showMessage('Could not save — browser storage is full', 'error');
@@ -1197,7 +1226,7 @@ CRITICAL: Use EXACT text. Return valid JSON only, no markdown.`;
 
     const response = await fetch(PROVIDER_CONFIG.openai.baseUrl, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}` },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${activeApiKey()}`, 'X-Proxy-Token': PROXY_TOKEN },
         body: JSON.stringify({ model: PROVIDER_CONFIG.openai.visionModel, messages: [{ role: 'user', content: messageContent }], max_tokens: 4000, temperature: 0 })
     });
     if (!response.ok) {
@@ -2398,7 +2427,7 @@ document.addEventListener('keydown', function(e) {
 // =============================================
 // STARTUP: load saved default if present
 // =============================================
-function loadDefaultOnStartup() {
+async function loadDefaultOnStartup() {
     const raw = localStorage.getItem(SAVED_DEFAULT_KEY);
     if (!raw) return;
     let parsed;
@@ -2409,8 +2438,10 @@ function loadDefaultOnStartup() {
         localStorage.removeItem(SAVED_DEFAULT_KEY);
         return;
     }
-    if (!parsed || parsed.version !== SAVED_DEFAULT_VERSION || !parsed.data) {
-        console.warn('resumeDefault version mismatch or missing data — clearing.');
+    // Discard anything that isn't the current encrypted format. Legacy v1 payloads
+    // stored PII in plaintext; we no longer read them and remove them on sight.
+    if (!parsed || parsed.version !== SAVED_DEFAULT_VERSION || !parsed.encData) {
+        console.warn('resumeDefault is legacy/plaintext or malformed — clearing.');
         localStorage.removeItem(SAVED_DEFAULT_KEY);
         return;
     }
@@ -2420,7 +2451,17 @@ function loadDefaultOnStartup() {
         localStorage.removeItem(SAVED_DEFAULT_KEY);
         return;
     }
-    applyParsedResumeToUI(parsed.data);
+    let data;
+    try {
+        data = JSON.parse(await _decryptString(parsed.encData));
+    } catch (e) {
+        // Decryption fails if the IndexedDB key was cleared/rotated — payload is now
+        // unreadable, so drop it rather than leave dead ciphertext behind.
+        console.warn('resumeDefault could not be decrypted — clearing.', e);
+        localStorage.removeItem(SAVED_DEFAULT_KEY);
+        return;
+    }
+    applyParsedResumeToUI(data);
     usingUploadedResume = true;
     document.getElementById('upload-status').innerHTML = '<span style="color:#27ae60;">✓ Loaded your saved default resume</span>';
     requestAnimationFrame(async () => {
