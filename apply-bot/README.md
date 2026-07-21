@@ -2,8 +2,8 @@
 
 Autonomous job application pipeline. Full design: [`../docs/APPLY_BOT_PLAN.md`](../docs/APPLY_BOT_PLAN.md).
 
-**Phase 1 (current):** discovery + observability. Finds and filters jobs, fetches
-descriptions, resolves apply routes. **Applies to nothing.**
+**Phase 2 (current):** discovery, fit scoring, the answer resolver and the parked
+queue. **Applies to nothing** — form filling arrives in phase 4.
 
 ## First run
 
@@ -12,10 +12,26 @@ cd apply-bot
 npm install
 npx playwright install chromium
 
+cp profile.example.json profile/master-profile.json   # already seeded for Khosi
+npm run profile    # list what still needs confirming — do this first
+export OPENAI_API_KEY=sk-...                          # optional; scoring degrades without it
+
 npm run login      # log in to LinkedIn by hand, once — 2FA included
 npm run check      # confirm the session stuck
 npm run run        # dashboard + one discover/enrich pass
+npm run score      # fit-score everything enriched
 ```
+
+### Confirm the profile before anything else
+
+`npm run profile` lists every unconfirmed field. **Unconfirmed values are ignored** —
+any application asking about one parks instead of using it. The years figures in the
+seeded profile were read off your CV timeline; they are suggestions, not facts, and
+they end up on real employment applications. Set `confirmed: true` only where the
+number is yours.
+
+Fully confirming the profile is the single biggest lever on how much runs
+autonomously.
 
 Dashboard → http://localhost:5175
 
@@ -32,11 +48,32 @@ never sees your password and never handles 2FA.
 | `npm run run` | Dashboard + one discover/enrich pass |
 | `npm run discover` | Discovery only |
 | `npm run enrich [n]` | Fetch JDs, resolve apply routes |
+| `npm run score [n]` | Fit-score enriched jobs |
+| `npm run profile` | List unconfirmed profile fields |
 | `npm run searches` | List configured searches |
 | `npm run stop` / `resume` | Kill switch |
 | `npm run mode [m]` | `observe` \| `review` \| `auto` |
 | `npm run verify` | Print-PDF text-layer check |
-| `node scripts/smoke.mjs` | Filter + board tests, no network |
+| `npm test` | 61 tests, no network |
+
+## How a question gets answered
+
+Ladder, first hit wins (`src/answer/resolver.js`). The tier that answered is
+recorded on every field, so a wrong answer is always traceable.
+
+1. **Profile** — deterministic lookup (`src/answer/matchers.js`). Never sees a model.
+2. **Answer bank, exact** — normalised question text, scoped company → ats → global.
+3. **Answer bank, fuzzy** — token-set cosine ≥ 0.85, flagged `probable`.
+4. **LLM draft** — profile is the only fact source; must return `UNANSWERABLE`.
+5. **Park** — queue it for you. Never a guess.
+
+`guardAnswer()` re-checks anything a model produced, because a prompt is not a
+control: years-of-experience answers must trace to a `confirmed` `skills[].years`
+entry, work authorisation may never come from a model, and credentials must appear
+in the profile.
+
+Answering one parked question in the dashboard releases every application waiting
+on it, and answers every future occurrence automatically.
 
 ## Tuning
 

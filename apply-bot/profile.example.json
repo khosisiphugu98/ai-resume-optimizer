@@ -1,0 +1,80 @@
+{
+  "_readme": [
+    "Copy to profile/master-profile.json (gitignored) and fill in.",
+    "",
+    "Every `confirmed: false` value is IGNORED by the resolver — the application",
+    "parks instead of using it. That is deliberate: these numbers end up on real",
+    "employment applications, so they must come from you, not from a model's",
+    "reading of your CV. Run `npm run profile` to list what still needs confirming."
+  ],
+
+  "identity": {
+    "firstName": "",
+    "lastName": "",
+    "email": "",
+    "phone": "",
+    "city": "",
+    "country": "",
+    "countryCode": "ZA"
+  },
+
+  "links": {
+    "linkedin": "",
+    "github": "",
+    "portfolio": ""
+  },
+
+  "authorization": {
+    "countries": {
+      "ZA": { "authorized": true, "requiresSponsorship": false }
+    },
+    "requiresSponsorshipElsewhere": true,
+    "willingToRelocate": false,
+    "noticePeriodDays": 30,
+    "confirmed": false
+  },
+
+  "current": {
+    "company": "",
+    "title": "",
+    "totalYearsExperience": null,
+    "confirmed": false
+  },
+
+  "experience": [
+    { "company": "", "title": "", "start": "", "end": "", "location": "" }
+  ],
+
+  "education": [
+    { "institution": "", "degree": "", "field": "", "start": "", "end": "" }
+  ],
+
+  "certifications": [
+    { "name": "", "issuer": "", "year": null }
+  ],
+
+  "skills": {
+    "_format": "\"SQL\": { \"years\": 3, \"confirmed\": true }",
+    "_note": "Only confirmed skills can answer a years-of-experience question."
+  },
+
+  "compensation": {
+    "disclose": false,
+    "fallbackText": "Negotiable",
+    "currency": "ZAR"
+  },
+
+  "eeo": {
+    "gender": "decline",
+    "race": "decline",
+    "veteran": "decline",
+    "disability": "decline"
+  },
+
+  "misc": {
+    "howDidYouHear": "LinkedIn",
+    "hasDriversLicense": null,
+    "willingToTravel": null,
+    "startAvailability": ""
+  }
+}

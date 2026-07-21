@@ -166,3 +166,77 @@ export function boardSnapshot() {
 export function recentEvents(limit = 200) {
   return db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit).reverse();
 }
+
+// ---------------------------------------------------------------------------
+// Parked questions. A job can be blocked on several at once, so this is a table
+// rather than a column on jobs.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS parked_questions (
+  id            INTEGER PRIMARY KEY,
+  job_id        INTEGER NOT NULL REFERENCES jobs(id),
+  question_norm TEXT NOT NULL,
+  question_raw  TEXT NOT NULL,
+  field_type    TEXT,
+  options_json  TEXT,
+  reason        TEXT,
+  tier          TEXT,
+  created_at    TEXT NOT NULL,
+  UNIQUE (job_id, question_norm)
+);
+CREATE INDEX IF NOT EXISTS idx_parked_norm ON parked_questions(question_norm);
+`);
+
+export function parkQuestions(jobId, parked) {
+  const stmt = db.prepare(`
+    INSERT INTO parked_questions (job_id, question_norm, question_raw, field_type, options_json, reason, tier, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (job_id, question_norm) DO UPDATE SET reason = excluded.reason, tier = excluded.tier`);
+  const ts = now();
+  db.transaction(rows => {
+    for (const p of rows) {
+      stmt.run(jobId, p.questionNorm, p.question, p.fieldType || 'text',
+               p.options ? JSON.stringify(p.options) : null, p.reason, p.tier, ts);
+    }
+  })(parked);
+  db.prepare(`UPDATE jobs SET status = 'awaiting_answers', parked_question = ?, parked_at = ? WHERE id = ?`)
+    .run(parked[0]?.question || null, ts, jobId);
+}
+
+/** Distinct blocking questions, most-blocking first — drives the dashboard queue. */
+export function parkedQueue() {
+  return db.prepare(`
+    SELECT p.question_norm, p.question_raw, p.field_type, p.options_json, p.reason, p.tier,
+           COUNT(DISTINCT p.job_id) AS blocking,
+           GROUP_CONCAT(DISTINCT j.company) AS companies
+    FROM parked_questions p
+    JOIN jobs j ON j.id = p.job_id
+    WHERE j.status = 'awaiting_answers'
+    GROUP BY p.question_norm
+    ORDER BY blocking DESC, p.id`).all();
+}
+
+/**
+ * Answering one question releases every job that was only waiting on it — the
+ * mechanism that makes the system more autonomous over time (§1).
+ * Returns the job ids that moved back into the pipeline.
+ */
+export function releaseAnswered(questionNorm) {
+  db.prepare('DELETE FROM parked_questions WHERE question_norm = ?').run(questionNorm);
+  const freed = db.prepare(`
+    SELECT j.id FROM jobs j
+    WHERE j.status = 'awaiting_answers'
+      AND NOT EXISTS (SELECT 1 FROM parked_questions p WHERE p.job_id = j.id)`).all().map(r => r.id);
+  if (freed.length) {
+    db.prepare(`UPDATE jobs SET status = 'scored', parked_question = NULL, parked_at = NULL
+                WHERE id IN (${freed.map(() => '?').join(',')})`).run(...freed);
+  }
+  return freed;
+}
+
+/** Postings go cold. Parked-forever is not a state worth keeping. */
+export function expireStaleParked(days = 14) {
+  const cutoff = new Date(Date.now() - days * 864e5).toISOString();
+  return db.prepare(`UPDATE jobs SET status = 'expired'
+                     WHERE status = 'awaiting_answers' AND parked_at < ?`).run(cutoff).changes;
+}

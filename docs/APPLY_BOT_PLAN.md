@@ -581,8 +581,8 @@ Indeed, Otta, Wellfound or direct company boards.
 | Phase | Scope | Est. |
 |---|---|---|
 | **0** | ✅ **Done** — text-PDF export, print-CSS fix, validation gate, hash tooling | ½ day |
-| **1** | SQLite schema, persistent Playwright context, manual login, Tier A/B/C discovery, dashboard board + live browser view. Ships in **Observe** mode. | 3 days |
-| **2** | Master profile, resolver, answer bank + parked queue, scoring incl. authorisation blocker | 2.5 days |
+| **1** | ✅ **Done** — SQLite schema, persistent Playwright context, discovery, dashboard + live browser view | 3 days |
+| **2** | ✅ **Done** — master profile, resolver ladder, answer bank, parked queue, fit scoring | 2.5 days |
 | **3** | Tailoring via hosted optimiser, seed + save-as-default, per-app PDFs | 1.5 days |
 | **4** | LinkedIn Easy Apply adapter, **Review mode**, rate limiter, kill switch, challenge halt | 3 days |
 | **5** | Greenhouse, Lever, Ashby, Workable, SmartRecruiters adapters | 4 days |

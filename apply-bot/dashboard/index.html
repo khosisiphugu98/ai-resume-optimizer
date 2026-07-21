@@ -73,7 +73,25 @@
   #live[hidden] { display: none; }
   #liveOff { padding: 28px 12px; text-align: center; color: var(--faint); font-size: 11px; }
 
-  #log { height: 300px; overflow-y: auto; padding: 8px 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
+  #parked { max-height: 300px; overflow-y: auto; padding: 4px 0; }
+  .pq { padding: 9px 11px; border-bottom: 1px solid var(--line); }
+  .pq:last-child { border-bottom: 0; }
+  .pq .q { font-weight: 600; margin-bottom: 3px; }
+  .pq .why { color: var(--dim); font-size: 11px; margin-bottom: 6px; }
+  .pq .blocking { color: var(--warn); font-size: 11px; }
+  .pq form { display: flex; gap: 6px; }
+  .pq input, .pq select {
+    flex: 1; background: #0d1117; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--ink); padding: 5px 8px; font: inherit; font-size: 12px; min-width: 0;
+  }
+  .pq button {
+    background: var(--ok); border: 0; color: #04260d; border-radius: 5px;
+    padding: 5px 12px; cursor: pointer; font: inherit; font-weight: 600; font-size: 12px;
+  }
+  .gap { padding: 8px 11px; color: var(--warn); font-size: 11px; border-bottom: 1px solid var(--line); }
+  .empty { padding: 14px 11px; color: var(--faint); font-size: 11px; }
+
+  #log { height: 260px; overflow-y: auto; padding: 8px 11px; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; }
   .ev { display: flex; gap: 8px; padding: 2px 0; border-bottom: 1px solid #1a1f27; }
   .ev time { color: var(--faint); flex: 0 0 52px; }
   .ev .stage { color: var(--accent); flex: 0 0 60px; }
@@ -118,6 +136,10 @@
       <h3>Live browser</h3>
       <canvas id="live" hidden></canvas>
       <div id="liveOff">no active session</div>
+    </div>
+    <div class="panel">
+      <h3>Needs answers <span id="pqCount" style="color:var(--warn)"></span></h3>
+      <div id="parked"></div>
     </div>
     <div class="panel">
       <h3>Event log</h3>

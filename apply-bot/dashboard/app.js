@@ -81,6 +81,49 @@ async function openDrawer(id) {
   $('#drawer').classList.add('open');
 }
 
+// Parked questions. Answering one here releases every application waiting on it,
+// and every future application that hits the same question.
+async function refreshParked() {
+  const { queue, profileGaps } = await (await fetch('/api/parked')).json();
+  const el = $('#parked');
+  $('#pqCount').textContent = queue.length || '';
+
+  const gaps = profileGaps.length
+    ? `<div class="gap">${profileGaps.length} unconfirmed profile field(s) — these park applications until confirmed:<br>${
+        profileGaps.slice(0, 6).map(esc).join('<br>')}${profileGaps.length > 6 ? `<br>…and ${profileGaps.length - 6} more` : ''}</div>`
+    : '';
+
+  const items = queue.map(q => {
+    const input = q.options?.length
+      ? `<select name="value">${q.options.map(o => `<option>${esc(o)}</option>`).join('')}</select>`
+      : `<input name="value" placeholder="your answer" autocomplete="off">`;
+    return `<div class="pq">
+      <div class="q">${esc(q.question_raw)}</div>
+      <div class="why">${esc(q.reason || '')}</div>
+      <div class="blocking">blocking ${q.blocking} application${q.blocking === 1 ? '' : 's'} · ${esc(q.companies || '')}</div>
+      <form data-q="${esc(q.question_raw)}" data-type="${esc(q.field_type || 'text')}" style="margin-top:6px">
+        ${input}<button type="submit">Save</button>
+      </form>
+    </div>`;
+  }).join('');
+
+  el.innerHTML = gaps + (items || (profileGaps.length ? '' : '<div class="empty">Nothing waiting on you.</div>'));
+}
+
+document.addEventListener('submit', async e => {
+  const form = e.target.closest('.pq form');
+  if (!form) return;
+  e.preventDefault();
+  const value = form.elements.value.value.trim();
+  if (!value) return;
+  const r = await (await fetch('/api/answer', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: form.dataset.q, value, fieldType: form.dataset.type }),
+  })).json();
+  addEvent({ ts: new Date().toISOString(), stage: 'answer', message: `Saved — released ${r.released} application(s)` });
+  refreshParked(); refreshBoard();
+});
+
 // Live browser frames.
 const canvas = $('#live'), cctx = canvas.getContext('2d');
 let liveTimer;
@@ -103,8 +146,8 @@ function connectLive() {
 const es = new EventSource('/api/stream');
 es.onmessage = m => {
   const e = JSON.parse(m.data);
-  if (e.type === 'board') refreshBoard();
-  else if (e.type === 'event') { addEvent(e); refreshBoard(); }
+  if (e.type === 'board') { refreshBoard(); refreshParked(); }
+  else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); }
 };
 
 document.addEventListener('click', e => {
@@ -120,5 +163,6 @@ document.addEventListener('click', e => {
 
 fetch('/api/events').then(r => r.json()).then(evs => evs.forEach(addEvent));
 refreshBoard();
+refreshParked();
 connectLive();
-setInterval(refreshBoard, 15000);
+setInterval(() => { refreshBoard(); refreshParked(); }, 15000);

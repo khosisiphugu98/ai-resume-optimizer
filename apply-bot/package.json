@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node scripts/smoke.mjs && node scripts/answer-tests.mjs",
     "login": "node src/cli.js login",
     "check": "node src/cli.js check",
     "serve": "node src/cli.js serve",
@@ -14,7 +14,9 @@
     "stop": "node src/cli.js stop",
     "resume": "node src/cli.js resume",
     "mode": "node src/cli.js mode",
-    "verify": "node scripts/verify-pdf.mjs"
+    "verify": "node scripts/verify-pdf.mjs",
+    "profile": "node src/cli.js profile",
+    "score": "node src/cli.js score"
   },
   "keywords": [],
   "author": "",

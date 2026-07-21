@@ -68,6 +68,22 @@ const commands = {
     await startServer();
   },
 
+  async profile() {
+    const { loadProfile, unconfirmed } = await import('./profile.js');
+    const p = loadProfile();
+    const gaps = unconfirmed(p);
+    console.log(`\n  ${p.identity.firstName} ${p.identity.lastName} · ${p.identity.email}`);
+    if (!gaps.length) return console.log('\n  Profile fully confirmed — nothing will park on missing facts.\n');
+    console.log(`\n  ${gaps.length} unconfirmed field(s). Each one parks any application that asks about it:\n`);
+    for (const g of gaps) console.log('   ·', g);
+    console.log(`\n  Edit apply-bot/profile/master-profile.json and set confirmed: true where the value is right.\n`);
+  },
+
+  async score() {
+    const { runScoring } = await import('./score/index.js');
+    console.log(await runScoring({ limit: Number(process.argv[3]) || 30 }));
+  },
+
   async searches() {
     for (const s of SEARCHES) console.log(`  [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}${s.remote ? ' (remote)' : ''}`);
   },

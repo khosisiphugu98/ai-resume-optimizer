@@ -3,8 +3,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { ROOT, SERVER, CAPS, PATHS } from './config.js';
-import { boardSnapshot, recentEvents, db, getSetting, setSetting } from './db.js';
-import { bus } from './bus.js';
+import { boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, releaseAnswered } from './db.js';
+import { bus, emit, emitBoard } from './bus.js';
+import { saveAnswer, allAnswers } from './answer/bank.js';
+import { loadProfile, unconfirmed, profileExists } from './profile.js';
 
 const DASH = path.join(ROOT, 'dashboard');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
@@ -23,6 +25,13 @@ const routes = {
   }),
 
   '/api/events': (req, res) => json(res, recentEvents(200)),
+
+  '/api/parked': (req, res) => json(res, {
+    queue: parkedQueue().map(q => ({ ...q, options: q.options_json ? JSON.parse(q.options_json) : null })),
+    profileGaps: profileExists() ? unconfirmed(loadProfile({ fresh: true })) : ['no profile — copy profile.example.json to profile/master-profile.json'],
+  }),
+
+  '/api/answers': (req, res) => json(res, allAnswers()),
 
   '/api/job': (req, res, url) => {
     const id = Number(url.searchParams.get('id'));
@@ -79,6 +88,19 @@ const server = http.createServer(async (req, res) => {
     const { mode } = JSON.parse(body || '{}');
     setSetting('mode', mode);
     return json(res, { mode });
+  }
+
+  // Answering one parked question releases every job that was only waiting on it.
+  if (url.pathname === '/api/answer' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { question, value, fieldType = 'text', scope = 'global' } = JSON.parse(body || '{}');
+    if (!question || value == null || value === '') return json(res, { error: 'question and value required' }, 400);
+
+    const norm = saveAnswer({ question, value, fieldType, scope, source: 'human', humanVerified: 1 });
+    const freed = releaseAnswered(norm);
+    emit({ stage: 'answer', message: `Answered "${question.slice(0, 60)}" — released ${freed.length} application(s)` });
+    emitBoard();
+    return json(res, { normalised: norm, released: freed.length });
   }
 
   if (routes[url.pathname]) return routes[url.pathname](req, res, url);
