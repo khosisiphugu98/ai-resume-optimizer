@@ -38,6 +38,17 @@ async function refreshBoard() {
   $('#r-pv').textContent = r.linkedin_pageviews; $('#c-pv').textContent = c.linkedin_pageviews;
   $('#stopPill').hidden = !d.stopped;
 
+  // One stage at a time — every browser stage shares the single Chrome profile,
+  // and two LinkedIn sessions on one account is how accounts get flagged.
+  const busy = !!d.running;
+  for (const b of document.querySelectorAll('#controls button[data-run]')) {
+    b.disabled = busy || (d.stopped && b.dataset.run !== 'check');
+  }
+  $('#runState').textContent = busy ? `running: ${d.running}…` : 'idle';
+  $('#runState').classList.toggle('idle', !busy);
+  $('#killswitch').classList.toggle('on', !!d.stopped);
+  $('#killswitch').textContent = d.stopped ? 'Resume' : 'Stop everything';
+
   for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('on', b.dataset.mode === d.mode);
 }
 
@@ -259,7 +270,28 @@ es.onmessage = m => {
   else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); refreshReview(); refreshOutbox(); }
 };
 
-document.addEventListener('click', e => {
+document.addEventListener('click', async e => {
+  const run = e.target.closest('#controls button[data-run]');
+  if (run) {
+    const r = await (await fetch('/api/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stage: run.dataset.run }),
+    })).json();
+    if (r.error) addEvent({ ts: new Date().toISOString(), stage: 'control', level: 'warn', message: r.error });
+    refreshBoard();
+    return;
+  }
+
+  if (e.target.id === 'killswitch') {
+    const on = e.target.textContent !== 'Resume';
+    await fetch('/api/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+    });
+    refreshBoard();
+    return;
+  }
+
   const card = e.target.closest('.card');
   if (card) openDrawer(card.dataset.id);
   if (e.target.id === 'close') $('#drawer').classList.remove('open');

@@ -35,6 +35,25 @@
   }
   #modes button.on { background: var(--accent); color: #fff; border-color: var(--accent); }
 
+  #controls {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    padding: 10px 18px; background: var(--panel-2); border-bottom: 1px solid var(--line);
+  }
+  #controls .grp { display: flex; gap: 5px; }
+  #controls .sep { width: 1px; height: 20px; background: var(--line); }
+  #controls .spacer { flex: 1; }
+  #controls button {
+    background: var(--panel); color: var(--ink); border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: 6px; cursor: pointer; font: inherit; font-size: 11px;
+  }
+  #controls button:hover:not(:disabled) { border-color: var(--accent); }
+  #controls button.go { border-color: #23472b; color: var(--ok); }
+  #controls button:disabled { opacity: .4; cursor: not-allowed; }
+  #killswitch { border-color: #4d2226 !important; color: var(--err) !important; }
+  #killswitch.on { background: var(--err) !important; color: #2b0b0d !important; }
+  #runState { font-size: 11px; color: var(--ok); }
+  #runState.idle { color: var(--faint); }
+
   main { display: grid; grid-template-columns: 1fr 420px; gap: 14px; padding: 14px; align-items: start; }
 
   /* Wrap rather than scroll — the Rejected column is where you catch a
@@ -164,6 +183,30 @@
   <span class="pill">Views <b id="r-pv">0</b>/<span id="c-pv">0</span></span>
   <span class="pill" id="stopPill" hidden>STOPPED</span>
 </header>
+
+<div id="controls">
+  <span class="grp">
+    <button data-run="login">Log in to LinkedIn</button>
+    <button data-run="check">Check session</button>
+  </span>
+  <span class="sep"></span>
+  <span class="grp">
+    <button data-run="discover">1 · Discover</button>
+    <button data-run="enrich">2 · Fetch details</button>
+    <button data-run="score">3 · Score fit</button>
+    <button data-run="seed">4 · Seed CV</button>
+    <button data-run="tailor">5 · Tailor CVs</button>
+  </span>
+  <span class="sep"></span>
+  <span class="grp">
+    <button data-run="apply" class="go">6 · Apply</button>
+    <button data-run="email" class="go">6b · Draft emails</button>
+    <button data-run="replies">Check replies</button>
+  </span>
+  <span class="spacer"></span>
+  <span id="runState"></span>
+  <button id="killswitch">Stop everything</button>
+</div>
 
 <main>
   <div>

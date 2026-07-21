@@ -25,6 +25,8 @@ const routes = {
     caps: CAPS,
     mode: getSetting('mode', 'observe'),
     stopped: fs.existsSync(PATHS.stop),
+    running,
+    profileReady: profileExists() && unconfirmed(loadProfile({ fresh: true })).length === 0,
   }),
 
   '/api/events': (req, res) => json(res, recentEvents(200)),
@@ -75,6 +77,50 @@ const routes = {
   },
 };
 
+/**
+ * Pipeline stages, runnable from the dashboard so the whole system is operable
+ * without a terminal.
+ *
+ * Exactly one runs at a time. That is not just tidiness: every browser stage
+ * shares the single persistent Chrome profile, and two concurrent LinkedIn
+ * sessions on one account is the fastest way to get flagged.
+ */
+let running = null;
+
+const STAGES = {
+  login: async () => {
+    const { getContext, attachScreencast, isLoggedIn } = await import('./browser.js');
+    const ctx = await getContext({ headless: false });
+    const page = ctx.pages()[0] || await ctx.newPage();
+    await attachScreencast(page);
+    if (await isLoggedIn(page)) return emit({ stage: 'login', message: 'Already logged in to LinkedIn' });
+    await page.goto('https://www.linkedin.com/login');
+    emit({ stage: 'login', message: 'A browser window is open — log in to LinkedIn there, 2FA included. It stays logged in afterwards.' });
+  },
+  check: async () => {
+    const { getContext, isLoggedIn } = await import('./browser.js');
+    const ctx = await getContext();
+    const page = ctx.pages()[0] || await ctx.newPage();
+    const ok = await isLoggedIn(page);
+    emit({ stage: 'login', level: ok ? 'info' : 'warn', message: ok ? 'LinkedIn session is live' : 'Not logged in — press Log in to LinkedIn' });
+  },
+  discover: async () => { const m = await import('./discover/linkedin.js'); await m.runDiscovery(); },
+  enrich:   async () => { const m = await import('./discover/linkedin.js'); await m.runEnrich({ limit: 25 }); },
+  score:    async () => { const m = await import('./score/index.js'); await m.runScoring({ limit: 30 }); },
+  seed:     async () => {
+    const { getContext, attachScreencast } = await import('./browser.js');
+    const { seedDefaultResume } = await import('./tailor/optimiser.js');
+    const ctx = await getContext();
+    const page = ctx.pages()[0] || await ctx.newPage();
+    await attachScreencast(page);
+    await seedDefaultResume(page);
+  },
+  tailor:   async () => { const m = await import('./tailor/optimiser.js'); await m.runTailoring({ limit: 10 }); },
+  apply:    async () => { const m = await import('./apply/run.js'); await m.runApplications({ limit: 5 }); },
+  email:    async () => { const m = await import('./email/outbox.js'); await m.runEmailApplications({ limit: 10 }); },
+  replies:  async () => { const m = await import('./email/outbox.js'); await m.checkReplies(); },
+};
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${SERVER.port}`);
 
@@ -113,6 +159,47 @@ const server = http.createServer(async (req, res) => {
     const ping = setInterval(() => res.write(': ping\n\n'), 20000);
     req.on('close', () => { bus.off('event', push); clearInterval(poll); clearInterval(ping); });
     return;
+  }
+
+  // Start a pipeline stage. Returns immediately; progress arrives over SSE.
+  if (url.pathname === '/api/run' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { stage } = JSON.parse(body || '{}');
+
+    if (!STAGES[stage]) return json(res, { error: `unknown stage "${stage}"` }, 400);
+    if (running) return json(res, { error: `${running} is already running`, running }, 409);
+    if (fs.existsSync(PATHS.stop) && stage !== 'check') {
+      return json(res, { error: 'kill switch is on — clear it first' }, 409);
+    }
+
+    running = stage;
+    emit({ stage, message: `Started: ${stage}` });
+    emitBoard();
+
+    STAGES[stage]()
+      .catch(err => emit({ stage, level: 'error', message: `${stage} failed: ${err.message}` }))
+      .finally(() => {
+        running = null;
+        emit({ stage, message: `Finished: ${stage}` });
+        emitBoard();
+      });
+
+    return json(res, { started: stage });
+  }
+
+  // Kill switch, toggleable from the dashboard.
+  if (url.pathname === '/api/stop' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { on } = JSON.parse(body || '{}');
+    if (on) {
+      fs.writeFileSync(PATHS.stop, new Date().toISOString());
+      emit({ stage: 'control', level: 'warn', message: 'Kill switch ON — everything halts before its next action' });
+    } else {
+      fs.rmSync(PATHS.stop, { force: true });
+      emit({ stage: 'control', message: 'Kill switch cleared' });
+    }
+    emitBoard();
+    return json(res, { stopped: !!on });
   }
 
   if (url.pathname === '/api/mode' && req.method === 'POST') {
