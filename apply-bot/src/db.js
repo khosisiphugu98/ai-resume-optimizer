@@ -247,6 +247,76 @@ export function releaseAnswered(questionNorm) {
   return freed;
 }
 
+// ---------------------------------------------------------------------------
+// Outbox. Email is the one irreversible channel — there is no unsend and the
+// recipient is a named human — so drafts sit here briefly and auto-send unless
+// cancelled.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS outbox (
+  id               INTEGER PRIMARY KEY,
+  job_id           INTEGER NOT NULL REFERENCES jobs(id),
+  to_addr          TEXT NOT NULL,
+  cc_addr          TEXT,
+  subject          TEXT NOT NULL,
+  body             TEXT NOT NULL,
+  attachments_json TEXT,
+  reference_number TEXT,
+  created_at       TEXT NOT NULL,
+  send_after       TEXT NOT NULL,
+  sent_at          TEXT,
+  cancelled_at     TEXT,
+  status           TEXT NOT NULL DEFAULT 'held',   -- held|sent|cancelled|failed
+  error            TEXT,
+  gmail_message_id TEXT,
+  gmail_thread_id  TEXT,
+  reply_state      TEXT                            -- replied|rejected|interview
+);
+CREATE INDEX IF NOT EXISTS idx_outbox_status ON outbox(status);
+`);
+
+export function queueEmail(draft) {
+  const ts = now();
+  const info = db.prepare(`
+    INSERT INTO outbox (job_id, to_addr, cc_addr, subject, body, attachments_json,
+                        reference_number, created_at, send_after, status)
+    VALUES (@job_id, @to, @cc, @subject, @body, @attachments, @ref, @now, @sendAfter, 'held')`).run({
+    job_id: draft.jobId,
+    to: draft.to,
+    cc: (draft.cc || []).join(', ') || null,
+    subject: draft.subject,
+    body: draft.body,
+    attachments: JSON.stringify(draft.attachments || []),
+    ref: draft.referenceNumber || null,
+    now: ts,
+    sendAfter: draft.sendAfter,
+  });
+  return info.lastInsertRowid;
+}
+
+export function outboxPending() {
+  return db.prepare(`SELECT * FROM outbox WHERE status = 'held' ORDER BY send_after`).all();
+}
+
+export function outboxDue() {
+  return db.prepare(`SELECT * FROM outbox WHERE status = 'held' AND send_after <= ? ORDER BY send_after`).all(now());
+}
+
+export function cancelEmail(id) {
+  const r = db.prepare(`UPDATE outbox SET status = 'cancelled', cancelled_at = ? WHERE id = ? AND status = 'held'`)
+    .run(now(), id);
+  return r.changes > 0;
+}
+
+export function markEmailSent(id, { messageId, threadId }) {
+  db.prepare(`UPDATE outbox SET status = 'sent', sent_at = ?, gmail_message_id = ?, gmail_thread_id = ? WHERE id = ?`)
+    .run(now(), messageId, threadId, id);
+}
+
+export function markEmailFailed(id, error) {
+  db.prepare(`UPDATE outbox SET status = 'failed', error = ? WHERE id = ?`).run(String(error).slice(0, 400), id);
+}
+
 /** Postings go cold. Parked-forever is not a state worth keeping. */
 export function expireStaleParked(days = 14) {
   const cutoff = new Date(Date.now() - days * 864e5).toISOString();

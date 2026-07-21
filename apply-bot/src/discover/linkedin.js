@@ -8,6 +8,7 @@ import {
 } from '../browser.js';
 import { upsertJob, updateJob, bumpRate, todayRates, db } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
+import { looksLikeEmailApplication } from '../email/extract.js';
 
 function buildSearchUrl({ keywords, location, remote, easyApplyOnly }) {
   const p = new URLSearchParams({
@@ -190,7 +191,7 @@ export async function runEnrich({ limit = 20 } = {}) {
 
       const applyLabel = await textOf(page, SELECTORS.detailApplyBtn);
       const emailMatch = jdText?.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
-      const wantsEmail = jdText && /send (your |the )?(cv|resume|application)|email your (application|cv|resume)|applications? to|forward your (cv|resume)/i.test(jdText);
+      const wantsEmail = looksLikeEmailApplication(jdText);
 
       let applyType = 'unknown';
       if (wantsEmail && emailMatch) applyType = 'email';

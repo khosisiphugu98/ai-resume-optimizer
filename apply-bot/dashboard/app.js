@@ -127,6 +127,49 @@ document.addEventListener('click', async e => {
   refreshReview(); refreshBoard();
 });
 
+// Outbox. Drafts send themselves when the hold expires — cancelling is the
+// action, not sending. Email is the one channel that cannot be undone.
+async function refreshOutbox() {
+  const { drafts, gmailConnected, holdMinutes } = await (await fetch('/api/outbox')).json();
+  $('#outboxWrap').hidden = drafts.length === 0;
+  $('#obCount').textContent = drafts.length || '';
+  if (!drafts.length) return;
+
+  const warn = gmailConnected ? '' :
+    `<div class="warnbar">Gmail not connected — these will not send. Drafts are in artifacts/emails/. Run <b>npm run gmail:auth</b></div>`;
+
+  $('#outbox').innerHTML = warn + drafts.map(d => {
+    const secs = Math.max(0, Math.round((new Date(d.send_after) - Date.now()) / 1000));
+    const mins = Math.floor(secs / 60);
+    // Report the real countdown either way — claiming "hold elapsed" while
+    // minutes remain would misrepresent how long there is to cancel.
+    const when = secs > 0
+      ? `sends in ${mins}m ${String(secs % 60).padStart(2, '0')}s`
+      : (gmailConnected ? 'sending now' : 'due — held, Gmail not connected');
+    return `<div class="ob" data-id="${d.id}">
+      <div class="subj">${esc(d.subject)}</div>
+      <div class="to">to ${esc(d.to_addr)} · ${esc(d.company)} · ${(d.attachments || []).length} attachment(s)</div>
+      <div class="cd">${when}</div>
+      <pre>${esc(d.body)}</pre>
+      <div class="acts">
+        <button class="cancel" data-act="cancel">Cancel</button>
+        <button class="now" data-act="send">Send now</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+document.addEventListener('click', async e => {
+  const btn = e.target.closest('.ob .acts button');
+  if (!btn) return;
+  const id = btn.closest('.ob').dataset.id;
+  await fetch('/api/outbox', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, action: btn.dataset.act }),
+  });
+  refreshOutbox(); refreshBoard();
+});
+
 // Parked questions. Answering one here releases every application waiting on it,
 // and every future application that hits the same question.
 async function refreshParked() {
@@ -212,8 +255,8 @@ function connectLive() {
 const es = new EventSource('/api/stream');
 es.onmessage = m => {
   const e = JSON.parse(m.data);
-  if (e.type === 'board') { refreshBoard(); refreshParked(); refreshReview(); }
-  else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); refreshReview(); }
+  if (e.type === 'board') { refreshBoard(); refreshParked(); refreshReview(); refreshOutbox(); }
+  else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); refreshReview(); refreshOutbox(); }
 };
 
 document.addEventListener('click', e => {
@@ -231,5 +274,8 @@ fetch('/api/events').then(r => r.json()).then(evs => evs.forEach(addEvent));
 refreshBoard();
 refreshParked();
 refreshReview();
+refreshOutbox();
 connectLive();
 setInterval(() => { refreshBoard(); refreshParked(); refreshReview(); }, 15000);
+// Faster tick so the countdown on a pending send stays honest.
+setInterval(refreshOutbox, 5000);

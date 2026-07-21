@@ -7,6 +7,9 @@ import { boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, r
 import { bus, emit, emitBoard } from './bus.js';
 import { saveAnswer, allAnswers } from './answer/bank.js';
 import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue } from './profile.js';
+import { cancelEmail } from './db.js';
+import { flushOutbox, HOLD_MINUTES } from './email/outbox.js';
+import * as gmail from './email/gmail.js';
 
 const DASH = path.join(ROOT, 'dashboard');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
@@ -33,6 +36,19 @@ const routes = {
   }),
 
   '/api/answers': (req, res) => json(res, allAnswers()),
+
+  // Drafts waiting out their hold. Shown so a send can be caught before it is
+  // permanent — no action needed to let one go.
+  '/api/outbox': (req, res) => {
+    const rows = db.prepare(`
+      SELECT o.*, j.title, j.company FROM outbox o JOIN jobs j ON j.id = o.job_id
+      WHERE o.status = 'held' ORDER BY o.send_after`).all();
+    json(res, {
+      gmailConnected: gmail.isConfigured(),
+      holdMinutes: HOLD_MINUTES,
+      drafts: rows.map(r => ({ ...r, attachments: JSON.parse(r.attachments_json || '[]') })),
+    });
+  },
 
   // Everything the bot filled, for approval before it's sent.
   '/api/review': (req, res) => {
@@ -140,6 +156,29 @@ const server = http.createServer(async (req, res) => {
   // nothing.
   if (req.method === 'GET' && routes[url.pathname]) return routes[url.pathname](req, res, url);
 
+  // Cancel a held draft. The only action that stops an email being sent.
+  if (url.pathname === '/api/outbox' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { id, action } = JSON.parse(body || '{}');
+    if (action === 'cancel') {
+      const ok = cancelEmail(Number(id));
+      if (ok) {
+        const row = db.prepare('SELECT job_id, to_addr FROM outbox WHERE id = ?').get(Number(id));
+        db.prepare(`UPDATE jobs SET status = 'rejected', reject_reason = 'email cancelled in outbox' WHERE id = ?`).run(row.job_id);
+        emit({ jobId: row.job_id, stage: 'email', message: `Cancelled before sending to ${row.to_addr}` });
+        emitBoard();
+      }
+      return json(res, { cancelled: ok });
+    }
+    if (action === 'send') {
+      db.prepare(`UPDATE outbox SET send_after = ? WHERE id = ? AND status = 'held'`)
+        .run(new Date().toISOString(), Number(id));
+      const r = await flushOutbox();
+      return json(res, r);
+    }
+    return json(res, { error: 'action must be cancel or send' }, 400);
+  }
+
   // Approve or skip a reviewed application. Approving marks it for submission on
   // the next apply run — it re-runs the whole flow rather than resuming a modal
   // that closed hours ago.
@@ -206,6 +245,15 @@ export function startServer() {
   return new Promise(resolve => {
     server.listen(SERVER.port, () => {
       console.log(`\n  Dashboard → http://localhost:${SERVER.port}\n`);
+      if (!gmail.isConfigured()) console.log(gmail.SETUP_HELP);
+
+      // Drafts send themselves once the hold expires — cancelling is the action,
+      // not sending. Running this here means the dashboard being open is what
+      // keeps the outbox moving.
+      setInterval(() => {
+        flushOutbox().catch(err => emit({ stage: 'email', level: 'error', message: `Outbox flush failed: ${err.message}` }));
+      }, 60_000).unref?.();
+
       resolve(server);
     });
   });

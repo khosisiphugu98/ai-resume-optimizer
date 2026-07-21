@@ -73,7 +73,19 @@
   #live[hidden] { display: none; }
   #liveOff { padding: 28px 12px; text-align: center; color: var(--faint); font-size: 11px; }
 
-  #parked, #profile { max-height: 260px; overflow-y: auto; padding: 4px 0; }
+  #parked, #profile, #outbox { max-height: 260px; overflow-y: auto; padding: 4px 0; }
+  .ob { padding: 10px 11px; border-bottom: 1px solid var(--line); }
+  .ob:last-child { border-bottom: 0; }
+  .ob .subj { font-weight: 600; margin-bottom: 2px; }
+  .ob .to { color: var(--dim); font-size: 11px; }
+  .ob .cd { color: var(--err); font-size: 11px; margin: 5px 0 6px; font-variant-numeric: tabular-nums; }
+  .ob pre { background:#0d1117; border:1px solid var(--line); border-radius:5px; padding:8px;
+            font-size:10px; max-height:110px; overflow-y:auto; white-space:pre-wrap; margin:0 0 7px; }
+  .ob .acts { display: flex; gap: 6px; }
+  .ob button { border:0; border-radius:5px; padding:4px 12px; cursor:pointer; font:inherit; font-size:11px; font-weight:600; }
+  .ob .cancel { background: var(--err); color: #2b0b0d; }
+  .ob .now { background: var(--panel-2); color: var(--dim); border: 1px solid var(--line) !important; }
+  .warnbar { padding: 8px 11px; color: var(--warn); font-size: 11px; border-bottom: 1px solid var(--line); }
   .pq { padding: 9px 11px; border-bottom: 1px solid var(--line); }
   .pq:last-child { border-bottom: 0; }
   .pq .q { font-weight: 600; margin-bottom: 3px; }
@@ -166,6 +178,10 @@
       <h3>Live browser</h3>
       <canvas id="live" hidden></canvas>
       <div id="liveOff">no active session</div>
+    </div>
+    <div id="outboxWrap" class="panel" hidden>
+      <h3>Outbox — sending shortly <span id="obCount" style="color:var(--err)"></span></h3>
+      <div id="outbox"></div>
     </div>
     <div class="panel">
       <h3>Profile — confirm to unblock <span id="pfCount" style="color:var(--warn)"></span></h3>

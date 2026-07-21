@@ -110,6 +110,38 @@ const commands = {
     await closeContext();
   },
 
+  async email() {
+    const { runEmailApplications } = await import('./email/outbox.js');
+    console.log(await runEmailApplications({ limit: Number(process.argv[3]) || 10 }));
+  },
+
+  async outbox() {
+    const { flushOutbox, HOLD_MINUTES } = await import('./email/outbox.js');
+    const { outboxPending } = await import('./db.js');
+    const pending = outboxPending();
+    if (process.argv[3] === '--send') return console.log(await flushOutbox({ force: true }));
+    if (!pending.length) return console.log('Outbox empty.');
+    console.log(`\n  ${pending.length} draft(s) held (${HOLD_MINUTES} min hold):\n`);
+    for (const d of pending) {
+      const secs = Math.max(0, Math.round((new Date(d.send_after) - Date.now()) / 1000));
+      console.log(`   #${d.id} → ${d.to_addr}  "${d.subject}"  ${secs > 0 ? `sends in ${Math.ceil(secs / 60)}m` : 'due'}`);
+    }
+    console.log('\n  npm run outbox -- --send   send everything now');
+    console.log('  Cancel individual drafts in the dashboard.\n');
+  },
+
+  async replies() {
+    const { checkReplies } = await import('./email/outbox.js');
+    console.log(await checkReplies());
+  },
+
+  async 'gmail:auth'() {
+    const gmail = await import('./email/gmail.js');
+    if (!gmail.hasCredentials()) { console.log(gmail.SETUP_HELP); process.exit(1); }
+    await gmail.authorise();
+    console.log(`\n  Connected as ${await gmail.profileAddress()}\n`);
+  },
+
   async searches() {
     for (const s of SEARCHES) console.log(`  [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}${s.remote ? ' (remote)' : ''}`);
   },

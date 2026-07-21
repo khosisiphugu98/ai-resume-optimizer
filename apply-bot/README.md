@@ -2,9 +2,9 @@
 
 Autonomous job application pipeline. Full design: [`../docs/APPLY_BOT_PLAN.md`](../docs/APPLY_BOT_PLAN.md).
 
-**Phase 5 (current):** discovery, fit scoring, tailoring, LinkedIn Easy Apply, and
-five external ATS platforms — all with a review queue. Ships in **observe** mode —
-it applies to nothing until you switch it.
+**Phase 6 (current):** all three channels — LinkedIn Easy Apply, five external ATS
+platforms, and email — with a review queue and an outbox. Ships in **observe**
+mode; it applies to nothing until you switch it.
 
 ## First run
 
@@ -49,7 +49,11 @@ never sees your password and never handles 2FA.
 | `npm run run` | Dashboard + one discover/enrich pass |
 | `npm run discover` | Discovery only |
 | `npm run enrich [n]` | Fetch JDs, resolve apply routes |
-| `npm run apply [mode] [n] [--now]` | Apply to tailored Easy Apply jobs |
+| `npm run apply [mode] [n] [--now]` | Apply via Easy Apply and external ATS |
+| `npm run email [n]` | Draft email applications into the outbox |
+| `npm run outbox [-- --send]` | List held drafts, or send them now |
+| `npm run replies` | Poll sent threads for responses |
+| `npm run gmail:auth` | One-time Gmail connection |
 | `npm run seed [--force]` | Load the base resume into the optimiser's saved default |
 | `npm run tailor [n]` | Tailor + export a PDF per scored job |
 | `npm run score [n]` | Fit-score enriched jobs |
@@ -58,7 +62,7 @@ never sees your password and never handles 2FA.
 | `npm run stop` / `resume` | Kill switch |
 | `npm run mode [m]` | `observe` \| `review` \| `auto` |
 | `npm run verify` | Print-PDF text-layer check |
-| `npm test` | 61 tests, no network |
+| `npm test` | 202 tests, no network |
 
 ## How a question gets answered
 
@@ -137,6 +141,42 @@ Two behaviours worth knowing:
 - **Prefilled values are never clobbered.** Several boards parse the uploaded
   resume and autofill from it; where their value already matches ours it is left
   alone and marked `prefilled` in the review table.
+
+### Email applications
+
+Common in South African postings: *"Send your CV to careers@company.co.za, quoting
+reference MKT/2026/04 in the subject line."* Treated as a first-class channel.
+
+```bash
+npm run gmail:auth      # one-time; without it, drafts are written to disk only
+npm run email           # draft into the outbox
+```
+
+Sent through the **Gmail API rather than SMTP** — your real address, correct
+threading, and the mail lands in your own Sent folder. Scopes are `gmail.send` and
+`gmail.readonly`; nothing here can alter or delete mail.
+
+**Drafts hold for 15 minutes, then send themselves.** Cancelling is the action,
+not sending — no input is needed to let one go. This is the only deliberate delay
+left in autonomous mode, because email cannot be unsent, the recipient is a named
+human, and a malformed send is a first impression you cannot retract. Set
+`OUTBOX_HOLD_MINUTES=0` to disable. The dashboard flushes the outbox once a
+minute, so leaving it open is what keeps mail moving.
+
+Three guards:
+
+- **The recipient must literally appear in the posting.** A model-suggested
+  address that is not in the text is discarded in favour of one that is. Sending a
+  CV to a hallucinated stranger is the worst failure available here.
+- **Required documents are detected deterministically**, not by the model, and
+  unioned with whatever the model reports. A posting demanding a certified ID copy
+  or transcripts parks rather than sending a knowingly incomplete application.
+- **Reference numbers are carried into the subject line.** ZA postings routinely
+  bin applications that omit them.
+
+Replies are polled and classified (`replied` / `interview` / `rejected`). Email is
+the only channel that returns outcome data automatically — the ATS ones tell you
+nothing.
 
 ### Safety
 

@@ -236,7 +236,7 @@ export async function runTailoring({ limit = 10 } = {}) {
 
   const jobs = db.prepare(
     `SELECT * FROM jobs WHERE status = 'scored' ORDER BY fit_score DESC, id LIMIT ?`
-  ).all(limit);
+  ).all(limit);   // all channels tailor first — email attaches the same PDF
 
   let done = 0, failed = 0;
 
