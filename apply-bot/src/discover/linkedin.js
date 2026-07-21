@@ -38,6 +38,19 @@ export function preFilter({ title, location, jd }) {
   return null;
 }
 
+/**
+ * "<Job Title> | <Company> | LinkedIn" — but titles themselves often contain
+ * pipes ("Visual Content Analyst | $70/hr Remote"), so take the company from the
+ * end and treat everything before it as the title.
+ */
+export function parseDocTitle(docTitle) {
+  const parts = String(docTitle || '').split(' | ').map(s => s.trim()).filter(Boolean);
+  if (parts.length && /^linkedin$/i.test(parts.at(-1))) parts.pop();
+  if (parts.length < 2) return { title: parts[0] || null, company: null };
+  const company = parts.pop();
+  return { title: parts.join(' | ') || null, company };
+}
+
 async function collectCards(page) {
   return page.evaluate(({ cardSels, idAttrs, titleSels, companySels, locSels }) => {
     const pick = (root, sels) => {
@@ -184,34 +197,68 @@ export async function runEnrich({ limit = 20 } = {}) {
       await page.waitForTimeout(2200);
       await assertNoChallenge(page);
 
-      const jdText = await page.evaluate(sels => {
-        for (const s of sels) { const el = document.querySelector(s); if (el) return el.innerText.trim(); }
-        return null;
-      }, SELECTORS.detailDescription);
+      const page1 = await page.evaluate(({ sels, jobId }) => {
+        // The per-job id is the most reliable anchor in the new UI.
+        const byId = document.getElementById(`JobDetails_AboutTheJob_${jobId}`);
+        let desc = byId;
+        if (!desc) for (const s of sels) { const el = document.querySelector(s); if (el) { desc = el; break; } }
 
-      const applyLabel = await textOf(page, SELECTORS.detailApplyBtn);
+        // The apply button's accessible name distinguishes the routes cleanly:
+        // "Easy Apply to this job" vs "Apply on company website".
+        const applyEl = document.querySelector('[aria-label*="pply" i]');
+
+        return {
+          jd: desc ? desc.innerText.replace(/^\s*About the job\s*/i, '').trim() : null,
+          applyLabel: applyEl?.getAttribute('aria-label') || applyEl?.innerText?.trim() || null,
+          docTitle: document.title || '',
+        };
+      }, { sels: SELECTORS.detailDescription, jobId: job.external_id });
+
+      const jdText = page1.jd;
+
+      // Job cards are lazily hydrated — LinkedIn strips the text of off-screen
+      // ones (they are literally data-occludable), so most cards yield an id and
+      // nothing else. document.title is "<Title> | <Company> | LinkedIn" and is
+      // always present, so title and company are backfilled here instead.
+      const meta = parseDocTitle(page1.docTitle);
+      const title = job.title || meta.title;
+      const company = job.company || meta.company;
+
       const emailMatch = jdText?.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
       const wantsEmail = looksLikeEmailApplication(jdText);
+      const label = page1.applyLabel || '';
 
       let applyType = 'unknown';
       if (wantsEmail && emailMatch) applyType = 'email';
-      else if (/easy apply/i.test(applyLabel || '')) applyType = 'easy_apply';
-      else if (applyLabel) applyType = 'external';
+      else if (/easy apply/i.test(label)) applyType = 'easy_apply';
+      else if (/apply/i.test(label)) applyType = 'external';
 
-      const reason = preFilter({ title: job.title, location: job.location, jd: jdText });
+      if (!jdText) {
+        updateJob(job.id, { title, company, status: 'error' });
+        emit({
+          jobId: job.id, stage: 'enrich', level: 'warn',
+          message: `No description found for "${title || job.external_id}" — check SELECTORS.detailDescription`,
+        });
+        continue;
+      }
+
+      // Re-run the filter now that the real title is known. At discovery most
+      // titles were null, so the seniority gate could not fire.
+      const reason = preFilter({ title, location: job.location, jd: jdText });
       if (reason) {
-        updateJob(job.id, { jd_text: jdText, apply_type: applyType, status: 'rejected', reject_reason: reason });
+        updateJob(job.id, { title, company, jd_text: jdText, apply_type: applyType, status: 'rejected', reject_reason: reason });
         rejected++;
-        emit({ jobId: job.id, stage: 'enrich', message: `Rejected — ${reason}: ${job.title} @ ${job.company}` });
+        emit({ jobId: job.id, stage: 'enrich', message: `Rejected — ${reason}: ${title} @ ${company}` });
       } else {
         updateJob(job.id, {
+          title, company,
           jd_text: jdText,
           apply_type: applyType,
           apply_email: applyType === 'email' ? emailMatch[0] : null,
           status: 'enriched',
         });
         enriched++;
-        emit({ jobId: job.id, stage: 'enrich', message: `Enriched (${applyType}): ${job.title} @ ${job.company}` });
+        emit({ jobId: job.id, stage: 'enrich', message: `Enriched (${applyType}, ${jdText.length} chars): ${title} @ ${company}` });
       }
     } catch (err) {
       if (err instanceof ChallengeDetected) {

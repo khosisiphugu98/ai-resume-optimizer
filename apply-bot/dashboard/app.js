@@ -46,6 +46,10 @@ async function refreshBoard() {
   }
   $('#runState').textContent = busy ? `running: ${d.running}…` : 'idle';
   $('#runState').classList.toggle('idle', !busy);
+  const ai = $('#aiState');
+  ai.textContent = d.secrets?.openai ? `AI on ${d.secrets.openaiHint}` : 'AI off — click to add key';
+  ai.className = 'chip ' + (d.secrets?.openai ? 'on' : 'off');
+
   $('#killswitch').classList.toggle('on', !!d.stopped);
   $('#killswitch').textContent = d.stopped ? 'Resume' : 'Stop everything';
 
@@ -278,6 +282,17 @@ document.addEventListener('click', async e => {
       body: JSON.stringify({ stage: run.dataset.run }),
     })).json();
     if (r.error) addEvent({ ts: new Date().toISOString(), stage: 'control', level: 'warn', message: r.error });
+    refreshBoard();
+    return;
+  }
+
+  if (e.target.id === 'aiState') {
+    const key = prompt('Paste your OpenAI API key (sk-...). Stored locally in apply-bot/profile/, never committed. Leave blank to clear.');
+    if (key === null) return;
+    await fetch('/api/key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key.trim() }),
+    });
     refreshBoard();
     return;
   }

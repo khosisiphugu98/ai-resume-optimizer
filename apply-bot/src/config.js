@@ -83,8 +83,21 @@ export const SELECTORS = {
   jobCardCompany: ['.artdeco-entity-lockup__subtitle', '.job-card-container__primary-description'],
   jobCardLocation: ['.job-card-container__metadata-wrapper', '.job-card-container__metadata-item'],
   resultsList: ['.scaffold-layout__list', '.jobs-search-results-list'],
-  detailDescription: ['#job-details', '.jobs-description__content', '.jobs-box__html-content'],
-  detailApplyBtn: ['.jobs-apply-button', 'button.jobs-apply-button--top-card'],
+
+  // LinkedIn's new server-driven UI ships hashed class names (._7e3b9f11) that
+  // change every deploy, so nothing here may depend on a class. What is stable:
+  // ids of the form JobDetails_AboutTheJob_<jobId>, data-sdui-component, and
+  // aria-labels. Old-UI selectors stay as fallbacks — the rollout is partial.
+  detailDescription: [
+    '[data-sdui-component*="aboutTheJob"]',
+    '#job-details', '.jobs-description__content', '.jobs-box__html-content',
+  ],
+  detailApplyBtn: [
+    'button[aria-label*="Apply to this job" i]',
+    'button[aria-label*="Apply on company website" i]',
+    '[aria-label*="pply"][role="button"]',
+    '.jobs-apply-button', 'button.jobs-apply-button--top-card',
+  ],
   detailTitle: ['.job-details-jobs-unified-top-card__job-title', '.jobs-unified-top-card__job-title'],
   // Any of these visible means stop everything (§8.2).
   challenge: ['#captcha-internal', '.challenge-dialog', 'iframe[title*="challenge" i]', '[data-id="checkpoint"]'],

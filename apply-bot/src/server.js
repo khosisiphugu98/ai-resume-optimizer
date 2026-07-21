@@ -10,6 +10,9 @@ import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue 
 import { cancelEmail } from './db.js';
 import { flushOutbox, HOLD_MINUTES } from './email/outbox.js';
 import * as gmail from './email/gmail.js';
+import { applySecretsToEnv, setSecret, secretsStatus } from './secrets.js';
+
+applySecretsToEnv();
 
 const DASH = path.join(ROOT, 'dashboard');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
@@ -27,6 +30,8 @@ const routes = {
     stopped: fs.existsSync(PATHS.stop),
     running,
     profileReady: profileExists() && unconfirmed(loadProfile({ fresh: true })).length === 0,
+    secrets: secretsStatus(),
+    gmailConnected: gmail.isConfigured(),
   }),
 
   '/api/events': (req, res) => json(res, recentEvents(200)),
@@ -185,6 +190,17 @@ const server = http.createServer(async (req, res) => {
       });
 
     return json(res, { started: stage });
+  }
+
+  // Store the OpenAI key locally. Without one, scoring falls back to a keyword
+  // heuristic and answer drafting is unavailable.
+  if (url.pathname === '/api/key' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { key } = JSON.parse(body || '{}');
+    setSecret('OPENAI_API_KEY', key || '');
+    emit({ stage: 'control', message: key ? 'OpenAI key saved — AI scoring and answer drafting enabled' : 'OpenAI key cleared' });
+    emitBoard();
+    return json(res, secretsStatus());
   }
 
   // Kill switch, toggleable from the dashboard.

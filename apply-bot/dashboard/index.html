@@ -51,6 +51,9 @@
   #controls button:disabled { opacity: .4; cursor: not-allowed; }
   #killswitch { border-color: #4d2226 !important; color: var(--err) !important; }
   #killswitch.on { background: var(--err) !important; color: #2b0b0d !important; }
+  .chip { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--line); cursor: pointer; }
+  .chip.on { color: var(--ok); border-color: #23472b; }
+  .chip.off { color: var(--warn); border-color: #4a3a12; }
   #runState { font-size: 11px; color: var(--ok); }
   #runState.idle { color: var(--faint); }
 
@@ -204,6 +207,7 @@
     <button data-run="replies">Check replies</button>
   </span>
   <span class="spacer"></span>
+  <span id="aiState" class="chip"></span>
   <span id="runState"></span>
   <button id="killswitch">Stop everything</button>
 </div>
