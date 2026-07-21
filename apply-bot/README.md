@@ -48,6 +48,8 @@ never sees your password and never handles 2FA.
 | `npm run run` | Dashboard + one discover/enrich pass |
 | `npm run discover` | Discovery only |
 | `npm run enrich [n]` | Fetch JDs, resolve apply routes |
+| `npm run seed [--force]` | Load the base resume into the optimiser's saved default |
+| `npm run tailor [n]` | Tailor + export a PDF per scored job |
 | `npm run score [n]` | Fit-score enriched jobs |
 | `npm run profile` | List unconfirmed profile fields |
 | `npm run searches` | List configured searches |
@@ -74,6 +76,35 @@ in the profile.
 
 Answering one parked question in the dashboard releases every application waiting
 on it, and answers every future occurrence automatically.
+
+## How tailoring works
+
+`src/tailor/optimiser.js` drives the deployed optimiser
+(khosisiphugu98.github.io/ai-resume-optimizer) in the same browser: fill the job
+description, optimise, accept all diffs, export.
+
+`npm run seed` uploads the base resume once and clicks Save as Default. resume.js
+encrypts it into localStorage against a non-extractable IndexedDB key, both of
+which live in the persistent Chrome profile, so every later run skips upload and
+AI-parsing entirely. **It expires after 30 days** (`loadDefaultOnStartup` in
+resume.js), so tailoring re-seeds automatically whenever the default is missing.
+
+Export uses Chromium's `page.pdf()`, not the site's own download button. Measured
+on the same resume:
+
+| | Extractable text | Section headers |
+|---|---|---|
+| `#download-pdf-btn` (html2canvas → JPEG) | 2 chars | none |
+| Base CV PDF | 8,415 chars | letter-spaced, extract as `D E V E L O P M E N T` |
+| `page.pdf()` | 9,370 chars | clean words |
+
+The header row matters as much as the character count: ATS parsers use section
+headings to segment a CV into experience / education / skills. Headers that
+extract as spaced single letters mean the parser cannot segment the document.
+
+Every generated PDF passes a text-layer gate (name, email, ≥5 skills) before it is
+allowed anywhere near an upload. A PDF that fails is deleted and the job moves to
+`tailor_failed`.
 
 ## Tuning
 

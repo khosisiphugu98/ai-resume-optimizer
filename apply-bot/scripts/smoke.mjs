@@ -58,5 +58,11 @@ t('5 fixtures on board', smokeJobs.length >= 5, true);
 t('rejected carry a reason', smokeJobs.filter(j => j.status === 'rejected').every(j => !!j.reject_reason), true);
 t('rates recorded', snap.rates.linkedin_pageviews >= 12, true);
 
+// Leave no fixtures behind — a first real run should start on an empty board.
+// Order matters: events and parked_questions have FKs onto jobs.
+db.exec(`DELETE FROM events WHERE stage IN ('smoke','test')`);
+db.exec(`DELETE FROM parked_questions WHERE job_id IN (SELECT id FROM jobs WHERE external_id LIKE 'smoke-%')`);
+db.exec(`DELETE FROM jobs WHERE external_id LIKE 'smoke-%'`);
+
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

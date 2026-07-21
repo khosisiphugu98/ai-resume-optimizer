@@ -11,7 +11,9 @@ let screencastAttached = new WeakSet();
  * session, cookies and fingerprint stable. Never run two of these against one
  * LinkedIn account (§8.2).
  */
-export async function getContext({ headless = false } = {}) {
+// Headed by default — a real window on a real profile is the least detectable
+// shape, and you can watch it. HEADLESS=1 for tests and unattended runs.
+export async function getContext({ headless = process.env.HEADLESS === '1' } = {}) {
   if (ctx) return ctx;
   fs.mkdirSync(PATHS.chromeProfile, { recursive: true });
   ctx = await chromium.launchPersistentContext(PATHS.chromeProfile, {

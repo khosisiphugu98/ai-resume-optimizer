@@ -105,6 +105,17 @@ const server = http.createServer(async (req, res) => {
 
   if (routes[url.pathname]) return routes[url.pathname](req, res, url);
 
+  // Tailored resume PDFs, so the drawer can preview exactly what would be sent.
+  if (url.pathname === '/api/resume') {
+    const job = db.prepare('SELECT resume_path FROM jobs WHERE id = ?').get(Number(url.searchParams.get('id')));
+    const p = job?.resume_path && path.resolve(job.resume_path);
+    if (!p || !p.startsWith(path.resolve(PATHS.artifacts)) || !fs.existsSync(p)) {
+      res.writeHead(404); return res.end('No resume for this job');
+    }
+    res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Disposition': `inline; filename="${path.basename(p)}"` });
+    return fs.createReadStream(p).pipe(res);
+  }
+
   // Static dashboard
   const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   const full = path.join(DASH, file);

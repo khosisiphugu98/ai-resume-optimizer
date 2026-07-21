@@ -95,6 +95,16 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
+// Additive migrations. CREATE TABLE IF NOT EXISTS won't add columns to a table
+// that already exists, so new columns go here.
+function addColumn(table, name, decl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map(c => c.name);
+  if (!cols.includes(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${decl}`);
+}
+addColumn('jobs', 'resume_path', 'TEXT');
+addColumn('jobs', 'cover_letter_path', 'TEXT');
+addColumn('jobs', 'tailored_at', 'TEXT');
+
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
 

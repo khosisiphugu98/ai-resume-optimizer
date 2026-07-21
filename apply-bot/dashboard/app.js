@@ -8,6 +8,7 @@ const COLUMNS = [
   ['outbox', 'Outbox'],
   ['submitted', 'Submitted'],
   ['manual_required', 'Manual'],
+  ['tailor_failed', 'Tailor failed'],
   ['rejected', 'Rejected'],
 ];
 
@@ -74,6 +75,7 @@ async function openDrawer(id) {
       <dt>Tier / search</dt><dd>${esc(job.tier)} · ${esc(job.search_keywords)}</dd>
       ${job.fit_score != null ? `<dt>Fit</dt><dd>${job.fit_score} — ${esc(job.fit_rationale)}</dd>` : ''}
       ${job.parked_question ? `<dt>Parked on</dt><dd>${esc(job.parked_question)}</dd>` : ''}
+      ${job.resume_path ? `<dt>Tailored resume</dt><dd><a href="/api/resume?id=${job.id}" target="_blank" rel="noopener">${esc(job.resume_path.split('/').pop())}</a></dd>` : ''}
       <dt>Link</dt><dd><a href="${esc(job.url)}" target="_blank" rel="noopener">Open on LinkedIn</a></dd>
       <dt>Timeline</dt><dd>${events.map(e => `${new Date(e.ts).toLocaleTimeString('en-ZA', { hour12: false })} · ${esc(e.message)}`).join('<br>') || '—'}</dd>
       <dt>Job description</dt><dd><pre>${esc(job.jd_text) || 'not fetched yet'}</pre></dd>

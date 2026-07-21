@@ -84,6 +84,21 @@ const commands = {
     console.log(await runScoring({ limit: Number(process.argv[3]) || 30 }));
   },
 
+  async seed() {
+    const { seedDefaultResume } = await import('./tailor/optimiser.js');
+    const ctx = await getContext();
+    const page = ctx.pages()[0] || await ctx.newPage();
+    await attachScreencast(page);
+    console.log(await seedDefaultResume(page, { force: process.argv[3] === '--force' }));
+    await closeContext();
+  },
+
+  async tailor() {
+    const { runTailoring } = await import('./tailor/optimiser.js');
+    console.log(await runTailoring({ limit: Number(process.argv[3]) || 10 }));
+    await closeContext();
+  },
+
   async searches() {
     for (const s of SEARCHES) console.log(`  [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}${s.remote ? ' (remote)' : ''}`);
   },

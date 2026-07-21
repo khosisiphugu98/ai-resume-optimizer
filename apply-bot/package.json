@@ -16,7 +16,9 @@
     "mode": "node src/cli.js mode",
     "verify": "node scripts/verify-pdf.mjs",
     "profile": "node src/cli.js profile",
-    "score": "node src/cli.js score"
+    "score": "node src/cli.js score",
+    "seed": "node src/cli.js seed",
+    "tailor": "node src/cli.js tailor"
   },
   "keywords": [],
   "author": "",
