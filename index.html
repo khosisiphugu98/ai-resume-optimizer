@@ -185,6 +185,16 @@
             .resume-container { box-shadow: none; }
             .controls, .job-description-input, .message, .api-key-container, .keywords-display, .config-container, .keyword-status, .upload-section,
             .diff-view, .match-score-panel, .loading { display: none !important; }
+            /* Keyword highlights are a review aid, never something to send to an
+               employer. finaliseDiffs() re-applies them after "Accept All", so
+               relying on hideHighlights() having been clicked is a race — neutralise
+               them unconditionally at print time. */
+            .highlight-skill {
+                background-color: transparent !important;
+                padding: 0 !important;
+                border-radius: 0 !important;
+                font-weight: inherit !important;
+            }
         }
     </style>
 </head>

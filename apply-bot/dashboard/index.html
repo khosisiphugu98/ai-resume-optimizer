@@ -73,7 +73,7 @@
   #live[hidden] { display: none; }
   #liveOff { padding: 28px 12px; text-align: center; color: var(--faint); font-size: 11px; }
 
-  #parked { max-height: 300px; overflow-y: auto; padding: 4px 0; }
+  #parked, #profile { max-height: 260px; overflow-y: auto; padding: 4px 0; }
   .pq { padding: 9px 11px; border-bottom: 1px solid var(--line); }
   .pq:last-child { border-bottom: 0; }
   .pq .q { font-weight: 600; margin-bottom: 3px; }
@@ -136,6 +136,10 @@
       <h3>Live browser</h3>
       <canvas id="live" hidden></canvas>
       <div id="liveOff">no active session</div>
+    </div>
+    <div class="panel">
+      <h3>Profile — confirm to unblock <span id="pfCount" style="color:var(--warn)"></span></h3>
+      <div id="profile"></div>
     </div>
     <div class="panel">
       <h3>Needs answers <span id="pqCount" style="color:var(--warn)"></span></h3>

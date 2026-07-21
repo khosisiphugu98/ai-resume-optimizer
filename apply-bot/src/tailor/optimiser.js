@@ -22,6 +22,12 @@ const SEL = {
   message: '#message',
 };
 
+async function pdfPageCount(file) {
+  const { getDocument } = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const pdf = await getDocument({ data: new Uint8Array(fs.readFileSync(file)) }).promise;
+  return pdf.numPages;
+}
+
 /** Filenames a recruiter sorts by. Never ship "resume(11).pdf". */
 export function outputName(job, profile) {
   const slug = s => String(s || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
@@ -137,7 +143,22 @@ export async function tailorForJob(page, job, profile) {
 
   const matchScore = await page.textContent(SEL.matchScore).catch(() => null);
 
-  // Highlights are a review aid, not something to print.
+  // Highlights are a review aid, never something to send to an employer.
+  //
+  // hideHighlights() alone is not enough: finaliseDiffs() re-applies highlights
+  // after "Accept All" and then awaits an async keyword-integration call, so a
+  // click-then-hide sequence races it. The deployed print CSS now neutralises
+  // .highlight-skill unconditionally; this injects the same rule so the bot is
+  // correct regardless of which build is live.
+  await page.addStyleTag({ content: `
+    @media print {
+      .highlight-skill {
+        background-color: transparent !important;
+        padding: 0 !important;
+        border-radius: 0 !important;
+        font-weight: inherit !important;
+      }
+    }` });
   await page.evaluate(() => { try { hideHighlights(); } catch {} });
   await page.waitForTimeout(600);
 
@@ -145,9 +166,43 @@ export async function tailorForJob(page, job, profile) {
   fs.mkdirSync(outDir, { recursive: true });
   const outPath = path.join(outDir, outputName(job, profile));
 
-  await page.pdf({ path: outPath, format: 'A4', printBackground: true });
+  // Size the page to the resume instead of forcing A4.
+  //
+  // The design is a two-column layout with a full-height dark sidebar, and
+  // resume.js's own PDF export already uses a custom single-page format for this
+  // reason. Printing to A4 splits it mid-section and leaves the sidebar behind on
+  // page 2, producing a near-empty second sheet. One tall page keeps the visual
+  // output identical to what the optimiser produces today — the only difference
+  // from the html2canvas export is that the text stays real text.
+  const box = await page.evaluate(() => {
+    const el = document.getElementById('resume-content');
+    const rect = el.getBoundingClientRect();
+    // measureActualContentHeight() accounts for overflowing children; it is what
+    // resume.js uses for the same job.
+    let h;
+    try { h = measureActualContentHeight(el); } catch { h = 0; }
+    return { w: Math.ceil(rect.width), h: Math.ceil(Math.max(h, el.scrollHeight, rect.height)) };
+  });
 
-  // Never let an unreadable PDF reach an ATS.
+  if (!box.w || !box.h || box.h > 20000) {
+    throw new Error(`Implausible resume dimensions ${box.w}x${box.h} — refusing to export`);
+  }
+
+  await page.pdf({
+    path: outPath,
+    width: `${box.w}px`,
+    height: `${box.h}px`,
+    printBackground: true,
+    pageRanges: '1',
+  });
+
+  // Never let an unreadable or mis-paginated PDF reach an ATS.
+  const pageCount = await pdfPageCount(outPath);
+  if (pageCount !== 1) {
+    fs.rmSync(outPath, { force: true });
+    throw new Error(`Export produced ${pageCount} pages; this layout must be a single page`);
+  }
+
   const text = await extractPdfText(outPath);
   const check = validateResumePdf(text, {
     name: `${profile.identity.firstName} ${profile.identity.lastName}`,

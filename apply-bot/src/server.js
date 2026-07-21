@@ -6,7 +6,7 @@ import { ROOT, SERVER, CAPS, PATHS } from './config.js';
 import { boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, releaseAnswered } from './db.js';
 import { bus, emit, emitBoard } from './bus.js';
 import { saveAnswer, allAnswers } from './answer/bank.js';
-import { loadProfile, unconfirmed, profileExists } from './profile.js';
+import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue } from './profile.js';
 
 const DASH = path.join(ROOT, 'dashboard');
 const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css', '.json': 'application/json' };
@@ -29,6 +29,7 @@ const routes = {
   '/api/parked': (req, res) => json(res, {
     queue: parkedQueue().map(q => ({ ...q, options: q.options_json ? JSON.parse(q.options_json) : null })),
     profileGaps: profileExists() ? unconfirmed(loadProfile({ fresh: true })) : ['no profile — copy profile.example.json to profile/master-profile.json'],
+    profileFields: editableGaps(),
   }),
 
   '/api/answers': (req, res) => json(res, allAnswers()),
@@ -101,6 +102,22 @@ const server = http.createServer(async (req, res) => {
     emit({ stage: 'answer', message: `Answered "${question.slice(0, 60)}" — released ${freed.length} application(s)` });
     emitBoard();
     return json(res, { normalised: norm, released: freed.length });
+  }
+
+  // Confirm a profile field from the dashboard. Confirming is what makes the
+  // value usable — unconfirmed values are invisible to the resolver.
+  if (url.pathname === '/api/profile' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { path: dotPath, value } = JSON.parse(body || '{}');
+    if (!dotPath || value === '' || value == null) return json(res, { error: 'path and value required' }, 400);
+    try {
+      const out = setProfileValue(dotPath, value);
+      emit({ stage: 'profile', message: `Confirmed ${dotPath} = ${out.value} (${out.remaining} field(s) still unconfirmed)` });
+      emitBoard();
+      return json(res, out);
+    } catch (err) {
+      return json(res, { error: err.message }, 500);
+    }
   }
 
   if (routes[url.pathname]) return routes[url.pathname](req, res, url);

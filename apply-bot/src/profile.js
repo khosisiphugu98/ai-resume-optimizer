@@ -88,6 +88,57 @@ export function unconfirmed(profile) {
   return out;
 }
 
+/** Unconfirmed fields as editable rows for the dashboard. */
+export function editableGaps() {
+  if (!profileExists()) return [];
+  const p = loadProfile({ fresh: true });
+  const rows = [];
+
+  if (!p.authorization?.confirmed) {
+    rows.push({ path: 'authorization.noticePeriodDays', label: 'Notice period (days)', value: p.authorization?.noticePeriodDays ?? '', type: 'number', group: 'authorization' });
+    rows.push({ path: 'authorization.willingToRelocate', label: 'Willing to relocate?', value: String(!!p.authorization?.willingToRelocate), type: 'bool', group: 'authorization' });
+  }
+  if (!p.current?.confirmed) {
+    rows.push({ path: 'current.company', label: 'Current employer', value: p.current?.company ?? '', type: 'text', group: 'current' });
+    rows.push({ path: 'current.title', label: 'Current job title', value: p.current?.title ?? '', type: 'text', group: 'current' });
+    rows.push({ path: 'current.totalYearsExperience', label: 'Total years of experience', value: p.current?.totalYearsExperience ?? '', type: 'number', group: 'current' });
+  }
+  for (const [name, meta] of Object.entries(p.skills || {})) {
+    if (name.startsWith('_') || !meta || typeof meta !== 'object' || meta.confirmed) continue;
+    rows.push({ path: `skills.${name}.years`, label: `${name} — years`, value: meta.years ?? '', type: 'number', group: `skills.${name}` });
+  }
+  return rows;
+}
+
+/**
+ * Write a value and mark its group confirmed. Confirming is the whole point —
+ * an unconfirmed value is invisible to the resolver.
+ */
+export function setProfileValue(dotPath, value, { confirm = true } = {}) {
+  const p = loadProfile({ fresh: true });
+  const parts = dotPath.split('.');
+  let node = p;
+  for (const k of parts.slice(0, -1)) {
+    if (node[k] == null || typeof node[k] !== 'object') node[k] = {};
+    node = node[k];
+  }
+  const leaf = parts.at(-1);
+  const raw = String(value).trim();
+  node[leaf] = /^-?\d+(\.\d+)?$/.test(raw) ? Number(raw)
+    : /^(true|false)$/i.test(raw) ? /^true$/i.test(raw)
+    : raw;
+
+  if (confirm) {
+    // Group = the object that carries the confirmed flag.
+    if (parts[0] === 'skills') p.skills[parts[1]].confirmed = true;
+    else if (p[parts[0]] && typeof p[parts[0]] === 'object') p[parts[0]].confirmed = true;
+  }
+
+  fs.writeFileSync(PROFILE_PATH, JSON.stringify(p, null, 2) + '\n');
+  cache = p;
+  return { path: dotPath, value: node[leaf], remaining: unconfirmed(p).length };
+}
+
 export function summariseForLLM(profile) {
   const skills = Object.entries(profile.skills || {})
     .filter(([n, m]) => !n.startsWith('_') && m?.confirmed)

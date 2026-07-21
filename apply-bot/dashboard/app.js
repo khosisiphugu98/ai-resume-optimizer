@@ -86,14 +86,25 @@ async function openDrawer(id) {
 // Parked questions. Answering one here releases every application waiting on it,
 // and every future application that hits the same question.
 async function refreshParked() {
-  const { queue, profileGaps } = await (await fetch('/api/parked')).json();
+  const { queue, profileFields } = await (await fetch('/api/parked')).json();
   const el = $('#parked');
   $('#pqCount').textContent = queue.length || '';
+  $('#pfCount').textContent = profileFields.length || '';
 
-  const gaps = profileGaps.length
-    ? `<div class="gap">${profileGaps.length} unconfirmed profile field(s) — these park applications until confirmed:<br>${
-        profileGaps.slice(0, 6).map(esc).join('<br>')}${profileGaps.length > 6 ? `<br>…and ${profileGaps.length - 6} more` : ''}</div>`
-    : '';
+  // Unconfirmed profile fields, editable in place. A confirmed value stops the
+  // resolver parking on it.
+  $('#profile').innerHTML = profileFields.length
+    ? profileFields.map(f => {
+        const input = f.type === 'bool'
+          ? `<select name="value"><option value="true"${f.value === 'true' ? ' selected' : ''}>Yes</option><option value="false"${f.value !== 'true' ? ' selected' : ''}>No</option></select>`
+          : `<input name="value" type="${f.type === 'number' ? 'number' : 'text'}" value="${esc(f.value)}" autocomplete="off">`;
+        return `<div class="pq">
+          <div class="q">${esc(f.label)}</div>
+          <div class="why">${esc(f.path)} — suggested, not yet confirmed</div>
+          <form data-path="${esc(f.path)}" style="margin-top:6px">${input}<button type="submit">Confirm</button></form>
+        </div>`;
+      }).join('')
+    : '<div class="empty">Profile fully confirmed.</div>';
 
   const items = queue.map(q => {
     const input = q.options?.length
@@ -109,7 +120,7 @@ async function refreshParked() {
     </div>`;
   }).join('');
 
-  el.innerHTML = gaps + (items || (profileGaps.length ? '' : '<div class="empty">Nothing waiting on you.</div>'));
+  el.innerHTML = items || '<div class="empty">Nothing waiting on you.</div>';
 }
 
 document.addEventListener('submit', async e => {
@@ -118,11 +129,20 @@ document.addEventListener('submit', async e => {
   e.preventDefault();
   const value = form.elements.value.value.trim();
   if (!value) return;
-  const r = await (await fetch('/api/answer', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ question: form.dataset.q, value, fieldType: form.dataset.type }),
-  })).json();
-  addEvent({ ts: new Date().toISOString(), stage: 'answer', message: `Saved — released ${r.released} application(s)` });
+
+  if (form.dataset.path) {
+    const r = await (await fetch('/api/profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: form.dataset.path, value }),
+    })).json();
+    addEvent({ ts: new Date().toISOString(), stage: 'profile', message: r.error || `Confirmed ${form.dataset.path} — ${r.remaining} left` });
+  } else {
+    const r = await (await fetch('/api/answer', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: form.dataset.q, value, fieldType: form.dataset.type }),
+    })).json();
+    addEvent({ ts: new Date().toISOString(), stage: 'answer', message: `Saved — released ${r.released} application(s)` });
+  }
   refreshParked(); refreshBoard();
 });
 
