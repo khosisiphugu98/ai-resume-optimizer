@@ -7,7 +7,7 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-mX6o+IkrvYoPgaLBioOv7X5j8fKjkIr76BIHife06wQ=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-afHUX1GrfA+6oFzglC8NoKU6UzHBHf1MJ8dt6RTh4OA=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
@@ -183,7 +183,8 @@
         @media print {
             body { padding: 0; background: white; }
             .resume-container { box-shadow: none; }
-            .controls, .job-description-input, .message, .api-key-container, .keywords-display, .config-container, .keyword-status, .upload-section { display: none; }
+            .controls, .job-description-input, .message, .api-key-container, .keywords-display, .config-container, .keyword-status, .upload-section,
+            .diff-view, .match-score-panel, .loading { display: none !important; }
         }
     </style>
 </head>
@@ -265,9 +266,9 @@
         <button id="optimize-btn" class="btn">AI-Optimized Resume</button>
         <button id="toggle-highlights" class="btn btn-secondary">Show Highlights</button>
         <button id="toggle-edit" class="btn btn-warning">Enable Editing</button>
-        <button id="print-btn" class="btn btn-secondary">Print</button>
+        <button id="print-btn" class="btn btn-success" title="Opens the print dialog — choose &quot;Save as PDF&quot;. Produces a real text layer that applicant tracking systems can read. Use this when applying for jobs.">Download PDF (ATS-ready)</button>
         <button id="download-html-btn" class="btn">Download as HTML</button>
-        <button id="download-pdf-btn" class="btn btn-danger">Download as PDF</button>
+        <button id="download-pdf-btn" class="btn btn-danger" title="Pixel-perfect image PDF. Looks identical but contains no text layer, so ATS parsers read it as an empty document. Use for sharing with people, not for applications.">Download PDF (image only)</button>
         <button id="reset-btn" class="btn btn-secondary">Reset Optimized Changes</button>
         <button id="configure-ai" class="btn btn-success">Configure AI</button>
         <button id="clear-data-btn" class="btn btn-secondary" title="Clears saved resume and API key from browser storage">🗑 Clear Saved Data</button>
@@ -382,6 +383,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-mX6o+IkrvYoPgaLBioOv7X5j8fKjkIr76BIHife06wQ=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-afHUX1GrfA+6oFzglC8NoKU6UzHBHf1MJ8dt6RTh4OA=" crossorigin="anonymous"></script>
 </body>
 </html>

@@ -8,3 +8,7 @@ node_modules/
 # Wrangler secrets / local env — never commit
 cf-worker/.dev.vars
 .env
+apply-bot/node_modules/
+apply-bot/artifacts/
+apply-bot/data/
+apply-bot/profile/

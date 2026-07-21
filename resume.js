@@ -579,7 +579,10 @@ document.getElementById('download-pdf-btn').addEventListener('click', async () =
         const sizeKB = Math.round(pdf.output('blob').size / 1024);
         const sizeLabel = sizeKB >= 1024 ? `${(sizeKB / 1024).toFixed(1)} MB` : `${sizeKB} KB`;
         pdf.save('Resume.pdf');
-        showMessage(`PDF downloaded — ${sizeLabel} (JPEG + deflate compressed)`, 'success');
+        // This export rasterises the resume to a JPEG, so the PDF has no text layer.
+        // ATS parsers (Greenhouse, Lever, Ashby, Taleo) read it as an empty document.
+        // Warn explicitly and point at the print path, which keeps real text.
+        showMessage(`PDF downloaded — ${sizeLabel}. Note: this is an image PDF with no text layer — job application systems cannot read it. Use "Download PDF (ATS-ready)" when applying.`, 'error');
     } catch (e) { console.error('PDF error:', e); showMessage('PDF error: ' + e.message, 'error'); }
     finally {
         sidebar.style.background = origSidebarBg;
