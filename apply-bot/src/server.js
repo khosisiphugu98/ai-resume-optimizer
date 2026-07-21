@@ -34,6 +34,21 @@ const routes = {
 
   '/api/answers': (req, res) => json(res, allAnswers()),
 
+  // Everything the bot filled, for approval before it's sent.
+  '/api/review': (req, res) => {
+    const jobs = db.prepare(`SELECT * FROM jobs WHERE status = 'awaiting_review' ORDER BY fit_score DESC, id`).all();
+    json(res, jobs.map(job => {
+      const app = db.prepare(
+        `SELECT * FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1`).get(job.id);
+      return {
+        job,
+        filled: app?.filled_json ? JSON.parse(app.filled_json) : [],
+        screenshots: app?.screenshots_json ? JSON.parse(app.screenshots_json) : [],
+        steps: app?.step_count ?? 0,
+      };
+    }));
+  },
+
   '/api/job': (req, res, url) => {
     const id = Number(url.searchParams.get('id'));
     const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
@@ -120,7 +135,42 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (routes[url.pathname]) return routes[url.pathname](req, res, url);
+  // GET-only. Without the method guard a POST to a path that also has a GET
+  // handler (e.g. /api/review) is swallowed by the reader and silently does
+  // nothing.
+  if (req.method === 'GET' && routes[url.pathname]) return routes[url.pathname](req, res, url);
+
+  // Approve or skip a reviewed application. Approving marks it for submission on
+  // the next apply run — it re-runs the whole flow rather than resuming a modal
+  // that closed hours ago.
+  if (url.pathname === '/api/review' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { id, action } = JSON.parse(body || '{}');
+    const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(Number(id));
+    if (!job) return json(res, { error: 'not found' }, 404);
+
+    if (action === 'approve') {
+      db.prepare(`UPDATE jobs SET status = 'approved' WHERE id = ?`).run(job.id);
+      emit({ jobId: job.id, stage: 'review', message: `Approved — ${job.title} @ ${job.company} will submit on the next run` });
+    } else if (action === 'skip') {
+      db.prepare(`UPDATE jobs SET status = 'rejected', reject_reason = 'skipped in review' WHERE id = ?`).run(job.id);
+      emit({ jobId: job.id, stage: 'review', message: `Skipped — ${job.title} @ ${job.company}` });
+    } else {
+      return json(res, { error: 'action must be approve or skip' }, 400);
+    }
+    emitBoard();
+    return json(res, { ok: true });
+  }
+
+  // Step screenshots from an application attempt.
+  if (url.pathname === '/api/shot') {
+    const p = path.resolve(url.searchParams.get('p') || '');
+    if (!p.startsWith(path.resolve(PATHS.artifacts)) || !fs.existsSync(p)) {
+      res.writeHead(404); return res.end('not found');
+    }
+    res.writeHead(200, { 'Content-Type': 'image/png' });
+    return fs.createReadStream(p).pipe(res);
+  }
 
   // Tailored resume PDFs, so the drawer can preview exactly what would be sent.
   if (url.pathname === '/api/resume') {

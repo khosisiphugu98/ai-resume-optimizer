@@ -5,10 +5,13 @@ const COLUMNS = [
   ['tailored', 'Tailored'],
   ['applying', 'Applying'],
   ['awaiting_answers', 'Needs answers'],
+  ['awaiting_review', 'Review'],
+  ['approved', 'Approved'],
   ['outbox', 'Outbox'],
   ['submitted', 'Submitted'],
   ['manual_required', 'Manual'],
   ['tailor_failed', 'Tailor failed'],
+  ['apply_failed', 'Apply failed'],
   ['rejected', 'Rejected'],
 ];
 
@@ -82,6 +85,47 @@ async function openDrawer(id) {
     </dl>`;
   $('#drawer').classList.add('open');
 }
+
+// Review queue — everything the bot filled, before it is sent. Each row shows
+// which tier produced the value, so a suspect answer is obvious at a glance.
+async function refreshReview() {
+  const items = await (await fetch('/api/review')).json();
+  $('#reviewWrap').hidden = items.length === 0;
+  $('#rvCount').textContent = items.length || '';
+  if (!items.length) return;
+
+  $('#review').innerHTML = items.map(({ job, filled, screenshots, steps }) => `
+    <div class="rv" data-id="${job.id}">
+      <h4>${esc(job.title)}</h4>
+      <div class="co">${esc(job.company)} · ${esc(job.location) || '—'} · fit ${job.fit_score ?? '—'} · ${steps} step${steps === 1 ? '' : 's'}</div>
+      <table>${filled.map(f => `<tr>
+        <td class="q">${esc(f.question)}</td>
+        <td class="v">${esc(f.value)}</td>
+        <td class="t"><span class="tier ${f.probable ? 'probable' : esc((f.tier || '').split('-')[0])}">${esc(f.probable ? 'probable' : f.tier)}</span></td>
+      </tr>`).join('') || '<tr><td class="q">No fields on this application</td></tr>'}</table>
+      <div class="shots">${screenshots.map(s => `<img src="/api/shot?p=${encodeURIComponent(s)}" alt="step">`).join('')}</div>
+      <div class="acts">
+        <button class="ok" data-act="approve">Approve &amp; submit</button>
+        <button class="no" data-act="skip">Skip</button>
+        ${job.resume_path ? `<a href="/api/resume?id=${job.id}" target="_blank" rel="noopener" style="align-self:center;font-size:11px">resume</a>` : ''}
+      </div>
+    </div>`).join('');
+}
+
+document.addEventListener('click', async e => {
+  const img = e.target.closest('.rv .shots img');
+  if (img) { $('#lightbox img').src = img.src; $('#lightbox').classList.add('on'); return; }
+  if (e.target.id === 'lightbox' || e.target.closest('#lightbox')) { $('#lightbox').classList.remove('on'); return; }
+
+  const btn = e.target.closest('.rv .acts button');
+  if (!btn) return;
+  const id = btn.closest('.rv').dataset.id;
+  await fetch('/api/review', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, action: btn.dataset.act }),
+  });
+  refreshReview(); refreshBoard();
+});
 
 // Parked questions. Answering one here releases every application waiting on it,
 // and every future application that hits the same question.
@@ -168,8 +212,8 @@ function connectLive() {
 const es = new EventSource('/api/stream');
 es.onmessage = m => {
   const e = JSON.parse(m.data);
-  if (e.type === 'board') { refreshBoard(); refreshParked(); }
-  else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); }
+  if (e.type === 'board') { refreshBoard(); refreshParked(); refreshReview(); }
+  else if (e.type === 'event') { addEvent(e); refreshBoard(); refreshParked(); refreshReview(); }
 };
 
 document.addEventListener('click', e => {
@@ -186,5 +230,6 @@ document.addEventListener('click', e => {
 fetch('/api/events').then(r => r.json()).then(evs => evs.forEach(addEvent));
 refreshBoard();
 refreshParked();
+refreshReview();
 connectLive();
-setInterval(() => { refreshBoard(); refreshParked(); }, 15000);
+setInterval(() => { refreshBoard(); refreshParked(); refreshReview(); }, 15000);

@@ -99,6 +99,17 @@ const commands = {
     await closeContext();
   },
 
+  async apply() {
+    await guard();
+    const { runApplications } = await import('./apply/run.js');
+    const { currentMode } = await import('./apply/rate.js');
+    const args = process.argv.slice(3);
+    const mode = args.find(a => ['observe', 'review', 'auto'].includes(a)) || currentMode();
+    const limit = Number(args.find(a => /^\d+$/.test(a))) || 5;
+    console.log(await runApplications({ limit, mode, ignoreHours: args.includes('--now') }));
+    await closeContext();
+  },
+
   async searches() {
     for (const s of SEARCHES) console.log(`  [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}${s.remote ? ' (remote)' : ''}`);
   },

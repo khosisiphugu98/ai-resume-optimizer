@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node scripts/smoke.mjs && node scripts/answer-tests.mjs",
+    "test": "node scripts/smoke.mjs && node scripts/answer-tests.mjs && node scripts/apply-tests.mjs && node scripts/easyapply-integration.mjs",
     "login": "node src/cli.js login",
     "check": "node src/cli.js check",
     "serve": "node src/cli.js serve",
@@ -18,7 +18,8 @@
     "profile": "node src/cli.js profile",
     "score": "node src/cli.js score",
     "seed": "node src/cli.js seed",
-    "tailor": "node src/cli.js tailor"
+    "tailor": "node src/cli.js tailor",
+    "apply": "node src/cli.js apply"
   },
   "keywords": [],
   "author": "",

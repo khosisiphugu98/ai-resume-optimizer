@@ -104,6 +104,9 @@ function addColumn(table, name, decl) {
 addColumn('jobs', 'resume_path', 'TEXT');
 addColumn('jobs', 'cover_letter_path', 'TEXT');
 addColumn('jobs', 'tailored_at', 'TEXT');
+addColumn('applications', 'filled_json', 'TEXT');
+addColumn('applications', 'screenshots_json', 'TEXT');
+addColumn('applications', 'step_count', 'INTEGER');
 
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);

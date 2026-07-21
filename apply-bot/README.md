@@ -2,8 +2,9 @@
 
 Autonomous job application pipeline. Full design: [`../docs/APPLY_BOT_PLAN.md`](../docs/APPLY_BOT_PLAN.md).
 
-**Phase 2 (current):** discovery, fit scoring, the answer resolver and the parked
-queue. **Applies to nothing** — form filling arrives in phase 4.
+**Phase 4 (current):** discovery, fit scoring, tailoring, and LinkedIn Easy Apply
+with a review queue. Ships in **observe** mode — it applies to nothing until you
+switch it.
 
 ## First run
 
@@ -48,6 +49,7 @@ never sees your password and never handles 2FA.
 | `npm run run` | Dashboard + one discover/enrich pass |
 | `npm run discover` | Discovery only |
 | `npm run enrich [n]` | Fetch JDs, resolve apply routes |
+| `npm run apply [mode] [n] [--now]` | Apply to tailored Easy Apply jobs |
 | `npm run seed [--force]` | Load the base resume into the optimiser's saved default |
 | `npm run tailor [n]` | Tailor + export a PDF per scored job |
 | `npm run score [n]` | Fit-score enriched jobs |
@@ -76,6 +78,52 @@ in the profile.
 
 Answering one parked question in the dashboard releases every application waiting
 on it, and answers every future occurrence automatically.
+
+## Applying
+
+```bash
+npm run mode review        # fill everything, submit nothing
+npm run apply              # walk the Easy Apply flow for tailored jobs
+```
+
+Three modes, switchable in the dashboard header or via `npm run mode`:
+
+| Mode | Behaviour |
+|---|---|
+| `observe` | Applies to nothing. The default. |
+| `review` | Fills every step, screenshots it, abandons, queues for approval. |
+| `auto` | Fills and submits. |
+
+In review mode the dashboard shows every field the bot filled with **the tier that
+produced each value** — `profile` (green), `bank-exact`, `llm` (amber), `probable`
+(red, a fuzzy answer-bank match worth checking) — plus a screenshot of every step.
+Approve queues it for submission; the next `npm run apply` re-runs the flow and
+submits.
+
+Approving re-runs rather than resuming: LinkedIn discards in-progress
+applications, sessions expire and postings change, so a half-filled modal from an
+hour ago cannot be picked back up. It costs a second pass through the form, which
+only matters while you are in review mode.
+
+**Parking beats submitting.** If any required question cannot be answered
+truthfully, the application is abandoned and the modal discarded — even in auto
+mode. It never guesses to get to the end.
+
+### Safety
+
+| Control | Setting |
+|---|---|
+| Easy Apply / day | 15 (the only ban-exposed channel) |
+| External ATS / day | 35 |
+| Email / day | 15 |
+| LinkedIn pageviews / day | 250 |
+| Gap between applications | 2–8 min, log-normal |
+| Operating window | 08:00–19:00 SAST, weekdays |
+| Challenge / captcha | Global halt, sticky for the rest of the day |
+| Kill switch | `npm run stop` |
+
+`--now` bypasses the operating-hours check for testing. Nothing bypasses the caps
+or the challenge halt.
 
 ## How tailoring works
 
