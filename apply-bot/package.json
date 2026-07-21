@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node scripts/smoke.mjs && node scripts/answer-tests.mjs && node scripts/apply-tests.mjs && node scripts/easyapply-integration.mjs",
+    "test": "node scripts/smoke.mjs && node scripts/answer-tests.mjs && node scripts/apply-tests.mjs && node scripts/easyapply-integration.mjs && node scripts/ats-tests.mjs",
     "login": "node src/cli.js login",
     "check": "node src/cli.js check",
     "serve": "node src/cli.js serve",

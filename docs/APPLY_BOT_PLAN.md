@@ -585,7 +585,7 @@ Indeed, Otta, Wellfound or direct company boards.
 | **2** | ✅ **Done** — master profile, resolver ladder, answer bank, parked queue, fit scoring | 2.5 days |
 | **3** | ✅ **Done** — tailoring via hosted optimiser, seed + save-as-default, per-app PDFs, text-layer gate | 1.5 days |
 | **4** | ✅ **Done** — Easy Apply adapter, review queue, per-channel rate limiter, challenge halt | 3 days |
-| **5** | Greenhouse, Lever, Ashby, Workable, SmartRecruiters adapters | 4 days |
+| **5** | ✅ **Done** — vendor routing, Greenhouse/Lever/Ashby/Workable/SmartRecruiters, iframe resolution, generic fallback | 4 days |
 | **6** | Email channel — detection, extraction, Gmail API, outbox hold, reply monitoring | 2.5 days |
 | **7** | Generic accessibility-tree adapter | 2.5 days |
 | **8** | Flip to **Auto** per channel; calibrate scoring against real outcomes | ongoing |

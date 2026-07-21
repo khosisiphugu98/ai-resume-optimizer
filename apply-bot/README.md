@@ -2,9 +2,9 @@
 
 Autonomous job application pipeline. Full design: [`../docs/APPLY_BOT_PLAN.md`](../docs/APPLY_BOT_PLAN.md).
 
-**Phase 4 (current):** discovery, fit scoring, tailoring, and LinkedIn Easy Apply
-with a review queue. Ships in **observe** mode — it applies to nothing until you
-switch it.
+**Phase 5 (current):** discovery, fit scoring, tailoring, LinkedIn Easy Apply, and
+five external ATS platforms — all with a review queue. Ships in **observe** mode —
+it applies to nothing until you switch it.
 
 ## First run
 
@@ -108,6 +108,35 @@ only matters while you are in review mode.
 **Parking beats submitting.** If any required question cannot be answered
 truthfully, the application is abandoned and the modal discarded — even in auto
 mode. It never guesses to get to the end.
+
+### External ATS platforms
+
+LinkedIn's Apply button usually opens a new tab behind a redirect shim, so the
+runner follows the popup, lets it settle on its final URL, and fingerprints the
+vendor from that.
+
+| Vendor | Handling |
+|---|---|
+| Greenhouse, Lever, Ashby, Workable, SmartRecruiters | Automated |
+| Anything unrecognised | Generic adapter — filled, **never auto-submitted** |
+| Workday, Taleo, iCIMS | Routed to `manual_required` with a reason |
+
+These five boards are the same shape — one page, labelled inputs, a file input, a
+submit button — so they share one flow and differ only by config in
+`src/apply/adapters/index.js`: how to recognise them, where the form is, where the
+file and submit controls are, and what success looks like. Five bespoke adapters
+would rot independently; one flow plus five configs does not. Ashby and Workable
+render behind hashed CSS class names, so selectors lean on stable attributes
+(`name`, `type`, `data-ui`, `aria-label`, button text) rather than classes.
+
+Two behaviours worth knowing:
+
+- **The form is often in an iframe.** These boards are commonly embedded on the
+  company's own careers domain, so the runner searches every frame for one that
+  actually contains form controls.
+- **Prefilled values are never clobbered.** Several boards parse the uploaded
+  resume and autofill from it; where their value already matches ours it is left
+  alone and marked `prefilled` in the review table.
 
 ### Safety
 
