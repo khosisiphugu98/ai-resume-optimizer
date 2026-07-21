@@ -3,7 +3,18 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "login": "node src/cli.js login",
+    "check": "node src/cli.js check",
+    "serve": "node src/cli.js serve",
+    "run": "node src/cli.js run",
+    "discover": "node src/cli.js discover",
+    "enrich": "node src/cli.js enrich",
+    "searches": "node src/cli.js searches",
+    "stop": "node src/cli.js stop",
+    "resume": "node src/cli.js resume",
+    "mode": "node src/cli.js mode",
+    "verify": "node scripts/verify-pdf.mjs"
   },
   "keywords": [],
   "author": "",
@@ -13,5 +24,9 @@
   "devDependencies": {
     "pdfjs-dist": "^6.1.200",
     "playwright": "^1.61.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.1",
+    "ws": "^8.21.1"
   }
 }
