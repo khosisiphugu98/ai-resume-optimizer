@@ -770,6 +770,41 @@ Fixtures reproducing Workday's markup with real `data-automation-id` attributes:
 
 ---
 
+### 9.9 Decision — not built (2026-07-22)
+
+The spec says to check the queue before building. Checked:
+
+```sql
+SELECT ats_vendor, COUNT(*) FROM jobs WHERE status = 'manual_required' GROUP BY ats_vendor;
+-- 0 rows
+SELECT COUNT(*) FROM jobs
+WHERE external_apply_url LIKE '%workday%' OR external_apply_url LIKE '%taleo%' OR external_apply_url LIKE '%icims%';
+-- 0
+SELECT COUNT(*) FROM applications;  -- 0
+```
+
+The `manual_required` queue is empty, no posting has ever resolved to a Workday
+tenant, and nothing has been submitted through any channel yet. The threshold in
+§9 is "fewer than ~3 per week"; the observed rate is zero, on a pipeline that has
+not yet applied to anything.
+
+So this would be a week of work — per-tenant registration, email verification,
+encrypted credential storage, a 5–7 page wizard, duplicate detection, lockout
+handling — to clear a queue that does not exist, and it would ship untested
+against a real tenant because there is no real tenant to test against.
+
+**Revisit when** the query above shows Workday consistently above ~3 per week.
+Phase 7's `runWizard` was built to be the foundation for it, so the wizard half
+of §9.3 is already done when that day comes; what remains is tenant account
+management (§9.2), which was always the actual work.
+
+The one thing carried forward: Workday, Taleo and iCIMS stay in `DEFERRED`, so
+they route to `manual_required` with a reason rather than falling through to the
+generic adapter — which, now that the accessibility collector exists, would
+otherwise make a confident and wrong attempt at them.
+
+---
+
 ## 10. Suggested order
 
 1. **§7.3 prerequisite** — approved reviews teach the answer bank. Half a day,

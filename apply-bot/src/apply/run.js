@@ -6,15 +6,16 @@ import { applyEasy } from './linkedin-easy.js';
 import { applyExternal, resolveExternalUrl } from './external.js';
 import { detectVendor } from './adapters/index.js';
 import { canApply, recordApplication, currentMode, applicationGap } from './rate.js';
+import { AUDIT } from '../score/index.js';
 
 /** Persist an attempt so the dashboard can show exactly what was filled. */
 function recordAttempt(job, channel, result, outcome) {
   const info = db.prepare(`
     INSERT INTO applications (job_id, channel, resume_path, ats_vendor, adapter_used,
                               submitted_at, confirmation_evidence, outcome,
-                              filled_json, screenshots_json, step_count)
+                              filled_json, screenshots_json, step_count, outcome_note)
     VALUES (@job_id, @channel, @resume_path, @ats_vendor, @adapter, @submitted_at,
-            @evidence, @outcome, @filled, @shots, @steps)`).run({
+            @evidence, @outcome, @filled, @shots, @steps, @note)`).run({
     job_id: job.id,
     channel,
     resume_path: job.resume_path || null,
@@ -26,6 +27,10 @@ function recordAttempt(job, channel, result, outcome) {
     filled: JSON.stringify(result.filled || []),
     shots: JSON.stringify(result.screenshots || []),
     steps: result.steps || 0,
+    // Carried onto the application so the calibration report can hold audit
+    // samples out of the headline rate — they were sent *because* they scored
+    // below the threshold, so counting them with the rest would understate it.
+    note: job.reject_reason === AUDIT.reason ? AUDIT.reason : null,
   });
   return info.lastInsertRowid;
 }

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { PATHS } from '../config.js';
 import {
   db, updateJob, queueEmail, outboxDue, markEmailSent, markEmailFailed, parkQuestions,
+  recordEmailApplication, setOutcome,
 } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { loadProfile } from '../profile.js';
@@ -14,6 +15,9 @@ import * as gmail from './gmail.js';
 
 /** Minutes a draft sits visible before it sends itself. 0 disables the hold. */
 export const HOLD_MINUTES = Number(process.env.OUTBOX_HOLD_MINUTES ?? 15);
+
+/** Reply classification → the ordinal outcome scale in db.js. */
+const REPLY_TO_OUTCOME = { rejected: 'rejected', interview: 'interview', replied: 'screen' };
 
 /**
  * Draft an email application and put it in the outbox.
@@ -114,6 +118,14 @@ export async function flushOutbox({ force = false } = {}) {
       });
       markEmailSent(row.id, res);
       recordApplication('email');
+      // Gives the email channel an application row like every other channel, so
+      // its outcomes are captured and it appears in the calibration report.
+      recordEmailApplication({
+        jobId: row.job_id,
+        resumePath: JSON.parse(row.attachments_json || '[]')[0] || null,
+        to: row.to_addr,
+        outboxId: row.id,
+      });
       updateJob(row.job_id, { status: 'submitted' });
       sent++;
       emit({ jobId: row.job_id, stage: 'email', message: `Sent to ${row.to_addr} — "${row.subject}"` });
@@ -193,6 +205,20 @@ export async function checkReplies() {
       const r = await gmail.checkThread(row.gmail_thread_id, me);
       if (!r.replied) continue;
       db.prepare(`UPDATE outbox SET reply_state = ? WHERE id = ?`).run(r.state, row.id);
+
+      // The one outcome signal that arrives without the operator doing anything.
+      // "replied" is a human engaging without saying which way, which is a screen
+      // in the ordinal scale — above a rejection, below a booked interview.
+      const app = db.prepare(
+        `SELECT id FROM applications WHERE job_id = ? AND channel = 'email' ORDER BY id DESC LIMIT 1`)
+        .get(row.job_id);
+      if (app) {
+        setOutcome(app.id, {
+          state: REPLY_TO_OUTCOME[r.state] || 'screen',
+          source: 'email',
+          note: r.snippet.slice(0, 200),
+        });
+      }
       replies++;
       emit({
         jobId: row.job_id, stage: 'email',

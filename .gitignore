@@ -12,3 +12,6 @@ apply-bot/node_modules/
 apply-bot/artifacts/
 apply-bot/data/
 apply-bot/profile/
+# Kill switch — a machine-local runtime flag. Committed, it would silently
+# halt every run on a fresh clone.
+apply-bot/STOP

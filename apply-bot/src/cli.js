@@ -1,13 +1,15 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
-import { PATHS, SEARCHES } from './config.js';
-import { getContext, closeContext, isLoggedIn, attachScreencast } from './browser.js';
+import { PATHS } from './config.js';
+import { getContext, closeContext, isLoggedIn, attachScreencast, closeBrowserOnExit } from './browser.js';
 import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
 import { emit } from './bus.js';
-import { getSetting, setSetting, todayRates } from './db.js';
+import { getSetting, setSetting, todayRates, allSearches, blockedCompanies } from './db.js';
 
 const cmd = process.argv[2];
+
+closeBrowserOnExit();
 
 const commands = {
   async login() {
@@ -43,8 +45,11 @@ const commands = {
     await closeContext();
   },
 
+  // No guard: enrichment reads LinkedIn's public guest endpoint, so it needs
+  // neither a session nor the browser profile and must stay runnable when
+  // something else has the browser.
   async enrich() {
-    await guard();
+    if (fs.existsSync(PATHS.stop)) { console.error('STOP file present. Run `npm run resume` first.'); process.exit(1); }
     const r = await runEnrich({ limit: Number(process.argv[3]) || 20 });
     console.log(r);
     await closeContext();
@@ -143,7 +148,15 @@ const commands = {
   },
 
   async searches() {
-    for (const s of SEARCHES) console.log(`  [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}${s.remote ? ' (remote)' : ''}`);
+    for (const s of allSearches()) {
+      console.log(`  ${s.enabled ? ' ' : '·'} [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}` +
+        `${s.remote ? ' (remote)' : ''}  ${String(s.found).padStart(4)} found${s.enabled ? '' : '   [off]'}`);
+    }
+    const blocked = blockedCompanies();
+    if (blocked.length) {
+      console.log(`\n  Blocked companies: ${blocked.map(b => b.company).join(', ')}`);
+    }
+    console.log('\n  Add, disable or remove these in the dashboard\'s Search terms panel.\n');
   },
 
   async stop() {

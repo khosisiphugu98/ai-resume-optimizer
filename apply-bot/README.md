@@ -39,6 +39,33 @@ Dashboard → http://localhost:5175
 You log in yourself in a persistent Chrome profile (`data/chrome-profile`). The bot
 never sees your password and never handles 2FA.
 
+### Settings
+
+The gear in the control bar opens everything that is configured once: the OpenAI
+key, Gmail, profile status and the daily caps. It carries a small amber dot while
+something it owns is unset, and is otherwise silent.
+
+Secrets are written to `profile/` at mode 600 and gitignored. Neither the API nor
+the dashboard ever reads a key back — only whether one is set and its last four
+characters. The server binds to `127.0.0.1` only: it has no authentication
+because it is not meant to be reachable from anywhere but this machine.
+
+### The browser profile has one owner
+
+A Chrome profile takes exactly one browser at a time. A crashed run or a stray
+script leaves one behind, and a second launch does not queue — it fails with
+`Opening in existing browser session`.
+
+So the dashboard treats itself as the owner: it clears any leftover browser on
+startup, and again before launching one. If you see
+`Cleared N leftover browser process holding the profile` on the way up, that is
+this working, not a problem.
+
+Enrichment sidesteps the question entirely. It reads LinkedIn's public guest
+endpoint over plain HTTP, so it needs no browser, no session and no pageview
+budget, and it keeps working while another stage has the browser. Only
+`login`, `check`, `discover`, `seed`, `tailor` and `apply` need Chrome.
+
 ## Commands
 
 | Command | Does |
@@ -48,7 +75,7 @@ never sees your password and never handles 2FA.
 | `npm run serve` | Dashboard only |
 | `npm run run` | Dashboard + one discover/enrich pass |
 | `npm run discover` | Discovery only |
-| `npm run enrich [n]` | Fetch JDs, resolve apply routes |
+| `npm run enrich [n]` | Fetch JDs, resolve apply routes (no browser, no session) |
 | `npm run apply [mode] [n] [--now]` | Apply via Easy Apply and external ATS |
 | `npm run email [n]` | Draft email applications into the outbox |
 | `npm run outbox [-- --send]` | List held drafts, or send them now |
@@ -58,7 +85,7 @@ never sees your password and never handles 2FA.
 | `npm run tailor [n]` | Tailor + export a PDF per scored job |
 | `npm run score [n]` | Fit-score enriched jobs |
 | `npm run profile` | List unconfirmed profile fields |
-| `npm run searches` | List configured searches |
+| `npm run searches` | List search terms and blocked companies |
 | `npm run stop` / `resume` | Kill switch |
 | `npm run mode [m]` | `observe` \| `review` \| `auto` |
 | `npm run verify` | Print-PDF text-layer check |
@@ -122,7 +149,7 @@ vendor from that.
 | Vendor | Handling |
 |---|---|
 | Greenhouse, Lever, Ashby, Workable, SmartRecruiters | Automated |
-| Anything unrecognised | Generic adapter — filled, **never auto-submitted** |
+| Anything unrecognised | Generic adapter + accessibility collector — filled, **never auto-submitted** |
 | Workday, Taleo, iCIMS | Routed to `manual_required` with a reason |
 
 These five boards are the same shape — one page, labelled inputs, a file input, a
@@ -141,6 +168,37 @@ Two behaviours worth knowing:
 - **Prefilled values are never clobbered.** Several boards parse the uploaded
   resume and autofill from it; where their value already matches ours it is left
   alone and marked `prefilled` in the review table.
+
+### Boards nobody has written an adapter for
+
+The five named vendors are built from native `input`, `select` and `textarea`
+elements, which is what makes one shared flow enough for all of them. A React or
+Vue careers site often is not: the controls are `div[role="textbox"]`, the select
+is a button plus a listbox, and the whole form may sit inside a web component
+where `querySelectorAll` cannot reach it at all.
+
+For those, a second collector walks the accessibility tree instead
+(`src/apply/a11y.js`). It computes each control's accessible name in the page —
+`aria-labelledby`, then `aria-label`, then a `<legend>` or `<label for>`, then a
+wrapping label, then a name from the element's own contents, and only as a last
+resort a placeholder — pierces open shadow roots, and tags each control so it can
+be found again to fill. Where a label is only visual (a `<p>` sitting above the
+box), the nearest preceding text in the enclosing block is used.
+
+The DOM collector still runs first, because it is faster and deterministic;
+finding fewer than two fillable fields is the signal to fall back.
+
+Multi-step forms go through the same loop as Easy Apply (`src/apply/wizard.js`).
+Two guards there are worth knowing about:
+
+- **Fields are re-read after filling.** "Do you require sponsorship? → Yes" can
+  reveal three more questions; advancing without re-reading would submit them
+  blank.
+- **A form that does not advance is abandoned, not retried.** If clicking Next
+  produces the same set of questions again, the run stops with a reason rather
+  than spinning until the step ceiling.
+
+An unknown form is still never auto-submitted, whatever the mode.
 
 ### Email applications
 
@@ -223,11 +281,89 @@ Every generated PDF passes a text-layer gate (name, email, ≥5 skills) before i
 allowed anywhere near an upload. A PDF that fails is deleted and the job moves to
 `tailor_failed`.
 
+## Search terms
+
+What discovery looks for lives in the database and is edited in the dashboard's
+**Search terms** panel — add a title, pause one that is not earning its keep,
+delete it. Each row shows how many jobs it has ever turned up, which is the point
+of the panel: a term returning nothing still spends a pageview off the daily cap
+on every run. `SEARCHES` in `src/config.js` seeds the table on first boot and is
+never read again. `npm run searches` lists the current set.
+
+## Blocking
+
+Two vetoes, both reversible, both reachable from a job's drawer:
+
+- **Block this application** — the job goes to `blocked` and drops out of the
+  queues apply and email read from. Any draft already held in the outbox is
+  cancelled, because a held draft sends itself when its timer expires. The
+  tailored resume is kept, so unblocking costs nothing and returns the job to the
+  stage it had reached.
+- **Block this company** — the same sweep across every live job at that employer,
+  plus a standing filter so their future postings are rejected at discovery.
+  Unblock either from the drawer or from the chip under the search terms.
+
+Neither can touch an application that has already been submitted. Blocking is a
+veto on sending, not an undo.
+
+## Outcomes, and whether any of this works
+
+Everything upstream is a guess until something comes back. `THRESHOLD = 65` was
+picked out of the air, and so was the rule deciding which postings are worth
+scoring at all. Neither has ever been checked against a real reply.
+
+**The Sent panel is the whole dataset.** Easy Apply and the ATS boards report
+nothing back, so unless outcomes get marked there is no data. It lists submitted
+applications older than seven days with no verdict, oldest first, with one-click
+buttons: no response, rejected, screen, interview, offer. Email replies label
+themselves — `Check replies` classifies them and writes the outcome — but that is
+one channel of three.
+
+The scale is ordinal on purpose. *Rejected* ranks above *no response*, because a
+rejection means a human actually opened it.
+
+Two things happen without being asked:
+
+- An application with no reply after 45 days is marked `no_response` with source
+  `timeout`. Silence is data; leaving it unlabelled would quietly drop it from
+  the denominator and push every response rate upward.
+- One in twenty jobs scoring between 40 and the threshold is applied to anyway,
+  capped at two a day and labelled `audit sample`. This is the only defence
+  against the loop where the threshold decides what gets applied to, which
+  decides the data used to set the threshold — without it, jobs below the line
+  are never observed, false negatives leave no trace, and the number drifts
+  upward forever on evidence that looks good only because everything underneath
+  was never tried. Audit samples are excluded from the headline rate and reported
+  separately.
+
+**The calibration panel** answers one question in words: *does the fit score
+predict a response?* For a long time the answer will be "not enough data yet",
+and it says so rather than showing a ranking. Below that: response rate by score
+decile, channel, tier, ATS vendor and search term; the profile gaps costing the
+most volume; time to response; and a threshold sweep.
+
+Every rate carries a Wilson interval and any group under eight is suppressed
+rather than shown as 0% — three applications and no replies is not a 0% response
+rate, it is no information, and displayed as a percentage it reads like the
+strongest finding on the page.
+
+In the sweep, the column to read is **missed**: replies from applications that
+scored *below* that threshold. A threshold set too high discards good jobs
+silently, and the only symptom is a thin pipeline that looks like a quiet week.
+Nothing is auto-tuned — the panel shows the trade-off, you set the number, and it
+is stored in `settings` rather than in code.
+
+Rules of thumb, from `docs/APPLY_BOT_PHASES_7_9.md` §8.5:
+
+- 40 labelled applications before changing anything.
+- Expect a 2–8% base response rate. At 5% and n=40, one extra reply moves the
+  rate by 2.5 points. Do not chase that.
+- Weekly at most, not after every batch.
+
 ## Tuning
 
-Everything lives in `src/config.js`:
+The rest lives in `src/config.js`:
 
-- `SEARCHES` — the 17 saved searches across tiers A–D
 - `CAPS` — per-channel daily limits; only `linkedin_easy` carries ban risk
 - `AUTH_BLOCKERS` / `ZA_LOCATIONS` — the work-authorisation filter (§2.3), the
   highest-leverage rule in the system

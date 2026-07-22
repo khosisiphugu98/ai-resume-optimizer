@@ -1,7 +1,8 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS } from './config.js';
+import { PATHS, SEARCHES } from './config.js';
+import { normaliseSkill } from './profile.js';
 
 fs.mkdirSync(path.dirname(PATHS.db), { recursive: true });
 
@@ -104,9 +105,25 @@ function addColumn(table, name, decl) {
 addColumn('jobs', 'resume_path', 'TEXT');
 addColumn('jobs', 'cover_letter_path', 'TEXT');
 addColumn('jobs', 'tailored_at', 'TEXT');
+// Where a blocked job came from, so unblocking puts it back in the pipeline at
+// the stage it had reached rather than at the start.
+addColumn('jobs', 'blocked_from', 'TEXT');
 addColumn('applications', 'filled_json', 'TEXT');
 addColumn('applications', 'screenshots_json', 'TEXT');
 addColumn('applications', 'step_count', 'INTEGER');
+// Guest-endpoint fetches are unauthenticated, so they carry no account risk and
+// are counted apart from signed-in pageviews rather than against that cap.
+addColumn('rate_ledger', 'guest_fetches', 'INTEGER NOT NULL DEFAULT 0');
+// Below-threshold jobs deliberately let through to keep the calibration data from
+// censoring itself (§8.6). Capped daily, so it needs a counter that resets.
+addColumn('rate_ledger', 'audit_samples', 'INTEGER NOT NULL DEFAULT 0');
+// What happened after an application went out (§8.2). `outcome` above is what the
+// bot did; these are what the employer did, which is the only thing that can tell
+// us whether the fit score predicts anything.
+addColumn('applications', 'outcome_state', 'TEXT');
+addColumn('applications', 'outcome_at', 'TEXT');
+addColumn('applications', 'outcome_source', 'TEXT');
+addColumn('applications', 'outcome_note', 'TEXT');
 
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -164,7 +181,8 @@ export function bumpRate(column, by = 1) {
 
 export function todayRates() {
   return db.prepare('SELECT * FROM rate_ledger WHERE date = ?').get(today())
-    || { date: today(), linkedin_easy: 0, external_ats: 0, email: 0, linkedin_pageviews: 0, challenges_hit: 0 };
+    || { date: today(), linkedin_easy: 0, external_ats: 0, email: 0, linkedin_pageviews: 0,
+         challenges_hit: 0, guest_fetches: 0, audit_samples: 0 };
 }
 
 export function boardSnapshot() {
@@ -178,6 +196,103 @@ export function boardSnapshot() {
 
 export function recentEvents(limit = 200) {
   return db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit).reverse();
+}
+
+// ---------------------------------------------------------------------------
+// Outcomes (§8.2). Deliberately ordinal: "rejected after a human read it" is a
+// better signal than silence, because it means the application was at least
+// parsed. Silence is data too — an unlabelled application biases every rate
+// upward, so they time out rather than staying null forever.
+// ---------------------------------------------------------------------------
+export const OUTCOME_STATES = ['no_response', 'rejected', 'screen', 'interview', 'offer'];
+
+/** Anything at or above `rejected` means a human engaged with the application. */
+export const RESPONSE_STATES = ['rejected', 'screen', 'interview', 'offer'];
+
+/** Days of silence after which an application is called a non-response. */
+export const OUTCOME_TIMEOUT_DAYS = 45;
+
+const DAY_MS = 864e5;
+
+/**
+ * Submitted applications still waiting on a verdict, oldest first.
+ *
+ * `minAgeDays` exists because asking about something sent this morning is noise —
+ * nothing has had time to happen yet.
+ */
+export function pendingOutcomes({ minAgeDays = 7, limit = 100 } = {}) {
+  const cutoff = new Date(Date.now() - minAgeDays * DAY_MS).toISOString();
+  return db.prepare(`
+    SELECT a.id, a.job_id, a.channel, a.ats_vendor, a.submitted_at,
+           j.title, j.company, j.fit_score, j.tier, j.url,
+           CAST(julianday('now') - julianday(a.submitted_at) AS INTEGER) AS age_days
+    FROM applications a JOIN jobs j ON j.id = a.job_id
+    WHERE a.outcome = 'submitted' AND a.submitted_at IS NOT NULL
+      AND a.outcome_state IS NULL AND a.submitted_at <= ?
+    ORDER BY a.submitted_at
+    LIMIT ?`).all(cutoff, limit);
+}
+
+export function setOutcome(applicationId, { state, source = 'manual', note = null } = {}) {
+  if (!OUTCOME_STATES.includes(state)) {
+    throw new Error(`outcome must be one of: ${OUTCOME_STATES.join(', ')}`);
+  }
+  const r = db.prepare(`
+    UPDATE applications SET outcome_state = ?, outcome_at = ?, outcome_source = ?,
+           outcome_note = COALESCE(?, outcome_note)
+    WHERE id = ?`).run(state, now(), source, note, applicationId);
+  return r.changes > 0;
+}
+
+/**
+ * An absence of a reply is data. Leaving it null biases every response rate
+ * upward, because the denominator quietly excludes everything nobody answered.
+ */
+export function autoTimeoutOutcomes({ days = OUTCOME_TIMEOUT_DAYS } = {}) {
+  const cutoff = new Date(Date.now() - days * DAY_MS).toISOString();
+  return db.prepare(`
+    UPDATE applications SET outcome_state = 'no_response', outcome_at = ?, outcome_source = 'timeout'
+    WHERE outcome = 'submitted' AND submitted_at IS NOT NULL
+      AND outcome_state IS NULL AND submitted_at < ?`).run(now(), cutoff).changes;
+}
+
+/** Headline counts for the Sent panel. Audit-sample rows are counted apart. */
+export function outcomeSummary() {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS submitted,
+           SUM(CASE WHEN outcome_state IS NOT NULL THEN 1 ELSE 0 END) AS labelled,
+           SUM(CASE WHEN outcome_state IN ('rejected','screen','interview','offer') THEN 1 ELSE 0 END) AS responses,
+           SUM(CASE WHEN outcome_note LIKE 'audit sample%' THEN 1 ELSE 0 END) AS audit
+    FROM applications WHERE outcome = 'submitted' AND submitted_at IS NOT NULL`).get();
+  return {
+    submitted: row.submitted || 0,
+    labelled: row.labelled || 0,
+    responses: row.responses || 0,
+    audit: row.audit || 0,
+    awaiting: (row.submitted || 0) - (row.labelled || 0),
+  };
+}
+
+/**
+ * The email channel sends through Gmail rather than a browser, so it has no
+ * application row of its own. Without one it is invisible to calibration — and
+ * email is the channel most likely to differ from the rest.
+ */
+export function recordEmailApplication({ jobId, resumePath, to, outboxId }) {
+  // Carry the audit-sample marker onto the application row, exactly as recordAttempt
+  // does for the browser channels — an audit-sample job sent by email would
+  // otherwise land with outcome_note=NULL and be counted in the headline response
+  // rate it was specifically meant to be held out of. 'audit sample' is
+  // AUDIT.reason (score/index.js); the literal is used here to avoid a db→score
+  // import, matching outcomeSummary()'s existing 'audit sample%' filter.
+  const rejectReason = db.prepare('SELECT reject_reason FROM jobs WHERE id = ?').get(jobId)?.reject_reason;
+  const note = rejectReason === 'audit sample' ? 'audit sample' : null;
+  const info = db.prepare(`
+    INSERT INTO applications (job_id, channel, resume_path, adapter_used, submitted_at,
+                              confirmation_evidence, outcome, filled_json, screenshots_json, step_count, outcome_note)
+    VALUES (?, 'email', ?, 'email:gmail', ?, ?, 'submitted', '[]', '[]', 1, ?)`)
+    .run(jobId, resumePath || null, now(), `sent to ${to} (outbox ${outboxId})`, note);
+  return info.lastInsertRowid;
 }
 
 // ---------------------------------------------------------------------------
@@ -248,6 +363,79 @@ export function releaseAnswered(questionNorm) {
 }
 
 // ---------------------------------------------------------------------------
+// Skill suggestions. When tailoring, the optimiser reports skills a job asked for
+// that the candidate has NOT confirmed in the profile. They are never added to the
+// resume — they queue here so the candidate can confirm the ones that are actually
+// true (which then flow into future tailoring) or dismiss the noise for good.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS skill_suggestions (
+  skill_norm  TEXT PRIMARY KEY,
+  display     TEXT NOT NULL,
+  job_count   INTEGER NOT NULL DEFAULT 0,
+  status      TEXT NOT NULL DEFAULT 'pending',   -- pending|dismissed
+  first_seen  TEXT NOT NULL,
+  last_seen   TEXT NOT NULL
+);`);
+
+// One canonical skill normaliser, shared with profile.js — it carries the alias map
+// (ga4/gtm/js…), so a suggestion for "Google Analytics" dedups against, and is
+// suppressed by, an already-confirmed "GA4". A separate local normaliser here would
+// silently disagree and nag the operator to confirm a skill they already hold.
+const normSkill = normaliseSkill;
+
+/**
+ * Record skills a job wanted but the candidate hasn't confirmed. Upserts by
+ * normalised name, bumping the per-skill job count (the volume signal the
+ * dashboard sorts by). A dismissed skill stays dismissed — it is not resurrected
+ * just because another posting mentions it. Returns how many rows were newly
+ * created as pending suggestions.
+ */
+export function recordSkillSuggestions(skills) {
+  if (!Array.isArray(skills) || skills.length === 0) return 0;
+  const ts = now();
+  const upsert = db.prepare(`
+    INSERT INTO skill_suggestions (skill_norm, display, job_count, status, first_seen, last_seen)
+    VALUES (@norm, @display, 1, 'pending', @ts, @ts)
+    ON CONFLICT (skill_norm) DO UPDATE SET
+      job_count = job_count + 1,
+      last_seen = @ts`);
+  const isNew = db.prepare(`SELECT 1 FROM skill_suggestions WHERE skill_norm = ?`);
+  let created = 0;
+  db.transaction(rows => {
+    for (const raw of rows) {
+      const norm = normSkill(raw);
+      if (!norm) continue;
+      const existed = isNew.get(norm);
+      upsert.run({ norm, display: String(raw).trim(), ts });
+      if (!existed) created++;
+    }
+  })(skills);
+  return created;
+}
+
+/** Pending suggestions, most-wanted first. Optionally hide ones already confirmed. */
+export function listSkillSuggestions(excludeNorms = []) {
+  const exclude = new Set(excludeNorms.map(normSkill));
+  return db.prepare(`
+    SELECT skill_norm, display, job_count FROM skill_suggestions
+    WHERE status = 'pending' ORDER BY job_count DESC, display`)
+    .all()
+    .filter(r => !exclude.has(r.skill_norm));
+}
+
+export function dismissSkillSuggestion(skill) {
+  return db.prepare(`UPDATE skill_suggestions SET status = 'dismissed' WHERE skill_norm = ?`)
+    .run(normSkill(skill)).changes > 0;
+}
+
+/** Drop a suggestion once it's been confirmed into the profile. */
+export function removeSkillSuggestion(skill) {
+  return db.prepare(`DELETE FROM skill_suggestions WHERE skill_norm = ?`)
+    .run(normSkill(skill)).changes > 0;
+}
+
+// ---------------------------------------------------------------------------
 // Outbox. Email is the one irreversible channel — there is no unsend and the
 // recipient is a named human — so drafts sit here briefly and auto-send unless
 // cancelled.
@@ -315,6 +503,164 @@ export function markEmailSent(id, { messageId, threadId }) {
 
 export function markEmailFailed(id, error) {
   db.prepare(`UPDATE outbox SET status = 'failed', error = ? WHERE id = ?`).run(String(error).slice(0, 400), id);
+}
+
+// ---------------------------------------------------------------------------
+// Saved searches. These live in the database rather than config.js because they
+// are the one knob worth turning weekly: a search that returns nothing useful
+// costs a pageview off the daily cap every run, and a title you have not thought
+// of yet is the difference between a thin board and a full one.
+//
+// config.SEARCHES is the seed, not the source of truth — it populates the table
+// once and is never read again.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS searches (
+  id         INTEGER PRIMARY KEY,
+  keywords   TEXT NOT NULL,
+  location   TEXT NOT NULL,
+  tier       TEXT NOT NULL DEFAULT 'B',
+  remote     INTEGER NOT NULL DEFAULT 0,
+  enabled    INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  UNIQUE (keywords, location)
+);
+`);
+
+// Seeded once, tracked by a flag rather than by row count — deleting every
+// search is a decision, and re-seeding on the next boot would silently undo it.
+if (!getSetting('searches_seeded')) {
+  const stmt = db.prepare(`
+    INSERT INTO searches (keywords, location, tier, remote, created_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT (keywords, location) DO NOTHING`);
+  db.transaction(() => {
+    for (const s of SEARCHES) stmt.run(s.keywords, s.location, s.tier, s.remote ? 1 : 0, now());
+  })();
+  setSetting('searches_seeded', '1');
+}
+
+/** Every search with how many jobs it has ever turned up — drives the panel. */
+export function allSearches() {
+  return db.prepare(`
+    SELECT s.*, (SELECT COUNT(*) FROM jobs j WHERE j.search_keywords = s.keywords) AS found
+    FROM searches s
+    ORDER BY s.tier, s.keywords`).all();
+}
+
+/** The shape runDiscovery consumes. Disabled searches are skipped, not deleted. */
+export function activeSearches() {
+  return db.prepare('SELECT * FROM searches WHERE enabled = 1 ORDER BY tier, id').all()
+    .map(s => ({ tier: s.tier, keywords: s.keywords, location: s.location, remote: !!s.remote }));
+}
+
+export function addSearch({ keywords, location, tier = 'B', remote = false }) {
+  const k = String(keywords || '').trim();
+  const l = String(location || '').trim();
+  if (!k) throw new Error('a job title or keyword is required');
+  if (!l) throw new Error('a location is required');
+  const r = db.prepare(`
+    INSERT INTO searches (keywords, location, tier, remote, created_at)
+    VALUES (?, ?, ?, ?, ?) ON CONFLICT (keywords, location) DO NOTHING`)
+    .run(k, l, tier, remote ? 1 : 0, now());
+  if (!r.changes) throw new Error(`"${k}" in ${l} is already on the list`);
+  return { id: r.lastInsertRowid, keywords: k, location: l, tier, remote: !!remote };
+}
+
+export function setSearchEnabled(id, enabled) {
+  db.prepare('UPDATE searches SET enabled = ? WHERE id = ?').run(enabled ? 1 : 0, id);
+  return db.prepare('SELECT * FROM searches WHERE id = ?').get(id);
+}
+
+export function deleteSearch(id) {
+  const row = db.prepare('SELECT * FROM searches WHERE id = ?').get(id);
+  db.prepare('DELETE FROM searches WHERE id = ?').run(id);
+  return row;
+}
+
+// ---------------------------------------------------------------------------
+// Blocking. Two kinds, both meaning "this must never go out".
+//
+// A blocked job keeps its row and its tailored resume — blocking is a veto on
+// sending, not a delete, so it can be taken back. Anything already drafted into
+// the outbox for it is cancelled, because a held draft sends itself.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS blocked_companies (
+  company_norm TEXT PRIMARY KEY,
+  company      TEXT NOT NULL,
+  reason       TEXT,
+  created_at   TEXT NOT NULL
+);
+`);
+
+const normCompany = c => String(c || '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+/** Statuses a block can rescue a job from. Already-submitted is too late. */
+const BLOCKABLE = ['new', 'discovered', 'enriched', 'scored', 'tailored', 'approved',
+                   'awaiting_review', 'awaiting_answers', 'outbox', 'applying'];
+
+export function blockJob(id, reason = 'blocked by you') {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
+  if (!job) return null;
+  if (job.status === 'blocked') return { job, cancelledDrafts: 0, alreadyBlocked: true };
+  if (!BLOCKABLE.includes(job.status)) {
+    throw new Error(`too late — this one is already "${job.status}"`);
+  }
+
+  // A held draft sends itself when the hold expires, so blocking has to reach
+  // into the outbox or the block is cosmetic.
+  const cancelled = db.prepare(
+    `UPDATE outbox SET status = 'cancelled', cancelled_at = ? WHERE job_id = ? AND status = 'held'`)
+    .run(now(), id).changes;
+
+  db.prepare(`UPDATE jobs SET status = 'blocked', blocked_from = ?, reject_reason = ? WHERE id = ?`)
+    .run(job.status, reason, id);
+
+  return { job, cancelledDrafts: cancelled };
+}
+
+export function unblockJob(id) {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
+  if (!job || job.status !== 'blocked') return null;
+  // Back to where it was. A cancelled draft is not resurrected — re-running the
+  // email stage drafts a fresh one against the current posting.
+  const to = job.blocked_from && job.blocked_from !== 'outbox' ? job.blocked_from : 'tailored';
+  db.prepare(`UPDATE jobs SET status = ?, blocked_from = NULL, reject_reason = NULL WHERE id = ?`)
+    .run(to, id);
+  return { job, restoredTo: to };
+}
+
+/** Blocks the company and sweeps every live job already on the board for it. */
+export function blockCompany(company, reason = 'blocked by you') {
+  const norm = normCompany(company);
+  if (!norm) throw new Error('no company name to block');
+  db.prepare(`INSERT INTO blocked_companies (company_norm, company, reason, created_at)
+              VALUES (?, ?, ?, ?) ON CONFLICT(company_norm) DO NOTHING`)
+    .run(norm, String(company).trim(), reason, now());
+
+  const live = db.prepare(
+    `SELECT id FROM jobs WHERE LOWER(TRIM(company)) = ? AND status IN (${BLOCKABLE.map(() => '?').join(',')})`)
+    .all(norm, ...BLOCKABLE);
+  let cancelledDrafts = 0;
+  for (const { id } of live) cancelledDrafts += blockJob(id, reason)?.cancelledDrafts || 0;
+  return { company: String(company).trim(), blocked: live.length, cancelledDrafts };
+}
+
+export function unblockCompany(company) {
+  const norm = normCompany(company);
+  return db.prepare('DELETE FROM blocked_companies WHERE company_norm = ?').run(norm).changes > 0;
+}
+
+export function isCompanyBlocked(company) {
+  const norm = normCompany(company);
+  if (!norm) return false;
+  return !!db.prepare('SELECT 1 FROM blocked_companies WHERE company_norm = ?').get(norm);
+}
+
+export function blockedCompanies() {
+  return db.prepare(`
+    SELECT b.*, (SELECT COUNT(*) FROM jobs j WHERE LOWER(TRIM(j.company)) = b.company_norm) AS jobs
+    FROM blocked_companies b ORDER BY b.company`).all();
 }
 
 /** Postings go cold. Parked-forever is not a state worth keeping. */

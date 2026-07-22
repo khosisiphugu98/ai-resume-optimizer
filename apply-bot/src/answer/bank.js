@@ -78,6 +78,52 @@ export function saveAnswer({ question, fieldType = 'text', value, scope = 'globa
   return norm;
 }
 
+// The bank stores a field type it can render a form control from; the `filled`
+// rows an application records carry the DOM kind instead.
+const FIELD_TYPE = { input: 'text', select: 'select', radio: 'radio', checkbox: 'checkbox' };
+
+/**
+ * Approving a reviewed application is a human verifying its answers, so it has to
+ * teach the bank (plan §3.7).
+ *
+ * Without this the bank only ever learns from questions that *parked*, and review
+ * load never falls for the ones the model answered plausibly — the operator
+ * re-approves the same "why do you want to work here" phrasing forever.
+ *
+ * Only drafted answers are worth storing. `profile` values are already
+ * deterministic and would duplicate, `prefilled` came from the board itself, and
+ * a file upload is not an answer. A `probable` (fuzzy) hit is promoted to an
+ * exact one under the phrasing that was actually asked.
+ *
+ * Returns how many answers were learned.
+ */
+export function learnFromApproved(filled, { scope = 'global' } = {}) {
+  let learned = 0;
+
+  for (const f of filled || []) {
+    if (f.tier !== 'llm' && !f.probable) continue;
+    if (!f.question || f.value == null || f.value === '') continue;
+
+    // An answer the operator typed by hand outranks one they merely waved
+    // through, so approving never overwrites it.
+    const existing = db.prepare('SELECT source FROM answers WHERE question_norm = ? AND scope = ?')
+      .get(normaliseQuestion(f.question), scope);
+    if (existing?.source === 'human') continue;
+
+    saveAnswer({
+      question: f.question,
+      value: f.value,
+      fieldType: FIELD_TYPE[f.kind] || 'text',
+      scope,
+      source: 'llm_approved',
+      humanVerified: 1,
+    });
+    learned++;
+  }
+
+  return learned;
+}
+
 export function recordUse(id) {
   db.prepare('UPDATE answers SET times_used = times_used + 1, last_used_at = ? WHERE id = ?')
     .run(new Date().toISOString(), id);

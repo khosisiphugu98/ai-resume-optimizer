@@ -3,7 +3,7 @@
 // beyond a failing build. No network.
 import { resolveField, guardAnswer } from '../src/answer/resolver.js';
 import { extractSkill, matchProfile } from '../src/answer/matchers.js';
-import { normaliseQuestion, similarity, saveAnswer } from '../src/answer/bank.js';
+import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
 import { db, parkQuestions, parkedQueue, releaseAnswered, upsertJob, updateJob } from '../src/db.js';
 import { heuristicScore } from '../src/score/index.js';
@@ -98,6 +98,45 @@ db.exec("DELETE FROM answers WHERE question_raw LIKE 'TEST %'");
 saveAnswer({ question: 'TEST what is your favourite colour?', value: 'Blue', source: 'human', humanVerified: 1 });
 t('exact hit returns stored value', (await resolveField({ question: 'TEST what is your favourite colour?' }, ctx)).value, 'Blue');
 t('tier is bank-exact',             (await resolveField({ question: 'TEST what is your favourite colour?' }, ctx)).tier, 'bank-exact');
+
+// Without this the bank only learns from questions that parked, so review load
+// never falls for the ones the model answered plausibly.
+section('approving a review teaches the bank');
+db.exec("DELETE FROM answers WHERE question_raw LIKE 'TEST %'");
+const APPROVED = [
+  { question: 'TEST why do you want to work here?', value: 'Because of the adtech work', tier: 'llm', kind: 'input' },
+  { question: 'TEST which office would you prefer?', value: 'Cape Town', tier: 'bank-fuzzy', kind: 'select', probable: true },
+  { question: 'TEST email address', value: 'k@example.com', tier: 'profile', kind: 'input' },
+  { question: 'TEST resume', value: 'cv.pdf', tier: 'resume', kind: 'file' },
+  { question: 'TEST phone', value: '+27 82 000 0000', tier: 'prefilled', kind: 'input' },
+  { question: 'TEST blank answer', value: '', tier: 'llm', kind: 'input' },
+];
+t('learns only drafted answers', learnFromApproved(APPROVED), 2);
+
+const stored = q => db.prepare('SELECT * FROM answers WHERE question_norm = ?').get(normaliseQuestion(q));
+t('llm answer stored',            stored('TEST why do you want to work here?').answer_value, 'Because of the adtech work');
+t('marked llm_approved',          stored('TEST why do you want to work here?').source, 'llm_approved');
+t('marked human verified',        stored('TEST why do you want to work here?').human_verified, 1);
+t('fuzzy hit promoted to exact',  stored('TEST which office would you prefer?').answer_value, 'Cape Town');
+t('field type mapped from kind',  stored('TEST which office would you prefer?').field_type, 'select');
+t('profile value not duplicated', stored('TEST email address'), undefined);
+t('file upload not an answer',    stored('TEST resume'), undefined);
+t('prefilled value not stored',   stored('TEST phone'), undefined);
+t('blank value not stored',       stored('TEST blank answer'), undefined);
+
+// The operator typing an answer is a stronger signal than waving one through,
+// so approving must not silently overwrite it.
+saveAnswer({ question: 'TEST hand typed question', value: 'Correct', source: 'human', humanVerified: 1 });
+t('hand-typed answer is not clobbered',
+  [learnFromApproved([{ question: 'TEST hand typed question', value: 'Wrong', tier: 'llm', kind: 'input' }]),
+   stored('TEST hand typed question').answer_value],
+  [0, 'Correct']);
+
+// A learned answer must actually short-circuit the ladder next time.
+t('learned answer resolves as bank-exact next time',
+  (await resolveField({ question: 'TEST why do you want to work here?' }, ctx)).tier, 'bank-exact');
+
+db.exec("DELETE FROM answers WHERE question_raw LIKE 'TEST %'");
 
 section('parked queue — answering once releases every waiting application');
 db.exec("DELETE FROM parked_questions");

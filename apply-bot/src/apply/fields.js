@@ -54,7 +54,12 @@ export const collectFieldsInPage = (rootSelector) => {
   const selectorFor = el => {
     if (el.id) return `#${CSS.escape(el.id)}`;
     if (el.name) return `${el.tagName.toLowerCase()}[name="${CSS.escape(el.name)}"]`;
-    // Last resort: tag it so the filler can find it again.
+    // Last resort: tag it so the filler can find it again. Reuse an existing tag —
+    // the wizard re-collects fields each round and matches them by uid, so minting a
+    // fresh key on every collect would make an anonymous field look new and get
+    // re-resolved and re-filled every round (mirrors a11y.js's data-bot-a11y reuse).
+    const existing = el.getAttribute('data-bot-field');
+    if (existing) return `[data-bot-field="${existing}"]`;
     const key = 'bot-' + Math.random().toString(36).slice(2, 10);
     el.setAttribute('data-bot-field', key);
     return `[data-bot-field="${key}"]`;
@@ -125,6 +130,23 @@ export const collectFieldsInPage = (rootSelector) => {
 
   return out;
 };
+
+/**
+ * Lift a FieldSpec into the shape the wizard works in, which is also the shape
+ * `a11y.js` produces. One vocabulary means the loop, the no-progress detector and
+ * the `filled` rows in the dashboard do not care which collector found a field.
+ */
+export const fromDomField = f => ({
+  collector: 'dom',
+  uid: f.selector,
+  role: f.kind,
+  question: f.question,
+  fieldType: f.fieldType,
+  options: f.options || null,
+  required: f.required,
+  currentValue: f.currentValue,
+  field: f,
+});
 
 /** Apply one resolved value. Returns what actually landed in the DOM. */
 export async function fillField(scope, field, value) {

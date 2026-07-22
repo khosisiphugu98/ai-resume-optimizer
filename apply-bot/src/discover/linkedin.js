@@ -1,14 +1,15 @@
 import {
-  SEARCHES, SELECTORS, LINKEDIN, CAPS, REJECT_TITLE,
+  SELECTORS, LINKEDIN, CAPS, REJECT_TITLE,
   AUTH_BLOCKERS, ZA_LOCATIONS, OPEN_REMOTE,
 } from '../config.js';
 import {
   getContext, attachScreencast, assertNoChallenge, stopRequested,
   humanDelay, textOf, ChallengeDetected,
 } from '../browser.js';
-import { upsertJob, updateJob, bumpRate, todayRates, db } from '../db.js';
+import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { looksLikeEmailApplication } from '../email/extract.js';
+import { fetchGuestPosting, seniorityReject } from './jd-fetch.js';
 
 function buildSearchUrl({ keywords, location, remote, easyApplyOnly }) {
   const p = new URLSearchParams({
@@ -101,7 +102,12 @@ async function scrollResults(page, rounds = 6) {
   }
 }
 
-export async function runDiscovery({ searches = SEARCHES, maxPerSearch = 25 } = {}) {
+export async function runDiscovery({ searches = activeSearches(), maxPerSearch = 25 } = {}) {
+  if (!searches.length) {
+    emit({ stage: 'discover', level: 'warn', message: 'No search terms enabled — add one in the Search terms panel' });
+    return { found: 0, kept: 0, rejected: 0 };
+  }
+
   const ctx = await getContext();
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
@@ -137,7 +143,8 @@ export async function runDiscovery({ searches = SEARCHES, maxPerSearch = 25 } = 
       }
 
       for (const card of cards.slice(0, maxPerSearch)) {
-        const reason = preFilter({ title: card.title, location: card.location });
+        const reason = preFilter({ title: card.title, location: card.location })
+          || (isCompanyBlocked(card.company) ? `blocked company: ${card.company}` : null);
         const id = upsertJob({ ...card, tier: search.tier, search_keywords: search.keywords });
         if (!id) continue;                       // already known — dedupe on (source, external_id)
 
@@ -173,18 +180,161 @@ export async function runDiscovery({ searches = SEARCHES, maxPerSearch = 25 } = 
 }
 
 /**
- * Fetch full JD text and resolve the apply route for jobs that passed the
- * pre-filter. Split from discovery because it costs a pageview per job.
+ * Decide the apply route and, for email postings, the address. Kept separate
+ * from fetching so it can be tested against fixture text with no network.
  */
-export async function runEnrich({ limit = 20 } = {}) {
-  const ctx = await getContext();
-  const page = ctx.pages()[0] || await ctx.newPage();
-  await attachScreencast(page);
+export function classifyApply({ jd, applyRoute }) {
+  const emailMatch = jd?.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
 
+  // An email instruction in the body beats whatever button LinkedIn renders:
+  // plenty of postings show "Apply on company website" and then spend a
+  // paragraph telling you to send your CV to a named address.
+  if (looksLikeEmailApplication(jd) && emailMatch) {
+    return { applyType: 'email', applyEmail: emailMatch[0] };
+  }
+  return { applyType: applyRoute || 'unknown', applyEmail: null };
+}
+
+/**
+ * Fetch full JD text and resolve the apply route for jobs that passed the
+ * pre-filter.
+ *
+ * Runs over HTTP against LinkedIn's public guest endpoint — no browser, no
+ * session, nothing to contend over. The signed-in page is kept only as a
+ * fallback for the rare posting the guest view will not serve, and even that is
+ * skipped when the profile is busy rather than failing the stage.
+ */
+export async function runEnrich({ limit = 20, allowBrowserFallback = true } = {}) {
   const jobs = db.prepare(`SELECT * FROM jobs WHERE status = 'discovered' ORDER BY id LIMIT ?`).all(limit);
-  let enriched = 0, rejected = 0;
+  let enriched = 0, rejected = 0, failed = 0, gone = 0;
+  const needBrowser = [];
+
+  if (!jobs.length) {
+    emit({ stage: 'enrich', message: 'Nothing to enrich — no jobs in "discovered"' });
+    return { enriched, rejected, failed, gone };
+  }
+
+  emit({ stage: 'enrich', message: `Enriching ${jobs.length} job(s) over HTTP` });
 
   for (const job of jobs) {
+    if (stopRequested()) { emit({ stage: 'enrich', level: 'warn', message: 'STOP file present — halting enrich' }); break; }
+
+    try {
+      const post = await fetchGuestPosting(job.external_id);
+
+      if (!post) {
+        updateJob(job.id, { status: 'expired', reject_reason: 'posting removed from LinkedIn' });
+        gone++;
+        continue;
+      }
+      bumpRate('guest_fetches');
+
+      if (!post.jd) { needBrowser.push({ job, post }); continue; }
+
+      const outcome = recordEnrichment(job, post);
+      if (outcome === 'rejected') rejected++; else enriched++;
+    } catch (err) {
+      needBrowser.push({ job, post: null, error: err.message });
+    }
+
+    // Polite, not paranoid — this endpoint is public and unauthenticated, so the
+    // pacing is about not hammering a host, not about account risk.
+    await new Promise(r => setTimeout(r, 400 + Math.random() * 700));
+    if ((enriched + rejected) % 10 === 0) emitBoard();
+  }
+
+  emitBoard();
+
+  if (needBrowser.length && allowBrowserFallback && !stopRequested()) {
+    const r = await enrichViaBrowser(needBrowser);
+    enriched += r.enriched; rejected += r.rejected; failed += r.failed;
+  } else if (needBrowser.length) {
+    failed += needBrowser.length;
+    for (const { job } of needBrowser) updateJob(job.id, { status: 'error' });
+  }
+
+  emit({
+    stage: 'enrich',
+    level: failed && !enriched ? 'error' : 'info',
+    message: `Enrich complete — ${enriched} enriched, ${rejected} rejected, ${gone} expired, ${failed} failed`,
+  });
+  emitBoard();
+  return { enriched, rejected, failed, gone };
+}
+
+/** Apply one fetched posting to the row. Returns 'enriched' or 'rejected'. */
+function recordEnrichment(job, post) {
+  const title = post.title || job.title;
+  const company = post.company || job.company;
+  const location = post.location || job.location;
+  const { applyType, applyEmail } = classifyApply(post);
+
+  if (post.closed) {
+    updateJob(job.id, { title, company, location, status: 'expired', reject_reason: 'no longer accepting applications' });
+    return 'rejected';
+  }
+
+  // Re-run the filter now that the real title, location and JD are known. At
+  // discovery most cards yielded an id and nothing else, so neither the
+  // seniority gate nor the work-authorisation gate could fire.
+  // The company name is only trustworthy once the posting itself has been read —
+  // card subtitles are frequently the recruiter, not the employer — so the
+  // blocklist is applied here as well as at discovery.
+  const reason = preFilter({ title, location, jd: post.jd })
+    || seniorityReject(post.criteria)
+    || (isCompanyBlocked(company) ? `blocked company: ${company}` : null);
+
+  const common = {
+    title, company, location,
+    jd_text: post.jd,
+    apply_type: applyType,
+    apply_email: applyEmail,
+    external_apply_url: post.applyUrl || null,
+    posted_at: post.postedAt || job.posted_at,
+  };
+
+  if (reason) {
+    updateJob(job.id, { ...common, status: 'rejected', reject_reason: reason });
+    emit({ jobId: job.id, stage: 'enrich', message: `Rejected — ${reason}: ${title} @ ${company}` });
+    return 'rejected';
+  }
+
+  updateJob(job.id, { ...common, status: 'enriched' });
+  emit({
+    jobId: job.id, stage: 'enrich',
+    message: `Enriched (${applyType}, ${post.jd.length} chars): ${title} @ ${company}`,
+  });
+  return 'enriched';
+}
+
+/**
+ * Last resort for postings the guest endpoint would not serve. Costs a real
+ * pageview each, so it is capped and only reached for the handful that failed.
+ */
+async function enrichViaBrowser(pending) {
+  let enriched = 0, rejected = 0, failed = 0;
+
+  emit({
+    stage: 'enrich', level: 'warn',
+    message: `${pending.length} posting(s) had no public description — retrying those in the browser`,
+  });
+
+  let page;
+  try {
+    const ctx = await getContext();
+    page = ctx.pages()[0] || await ctx.newPage();
+    await attachScreencast(page);
+  } catch (err) {
+    // The browser being unavailable must not fail the stage — everything the
+    // guest endpoint served is already saved.
+    emit({
+      stage: 'enrich', level: 'warn',
+      message: `Browser fallback unavailable (${err.message.split('\n')[0]}) — leaving ${pending.length} job(s) for the next run`,
+    });
+    return { enriched, rejected, failed: pending.length };
+  }
+
+  for (const { job } of pending) {
     if (stopRequested()) break;
     if (todayRates().linkedin_pageviews >= CAPS.linkedin_pageviews) {
       emit({ stage: 'enrich', level: 'warn', message: 'LinkedIn pageview cap reached — stopping' });
@@ -197,7 +347,7 @@ export async function runEnrich({ limit = 20 } = {}) {
       await page.waitForTimeout(2200);
       await assertNoChallenge(page);
 
-      const page1 = await page.evaluate(({ sels, jobId }) => {
+      const seen = await page.evaluate(({ sels, jobId }) => {
         // The per-job id is the most reliable anchor in the new UI.
         const byId = document.getElementById(`JobDetails_AboutTheJob_${jobId}`);
         let desc = byId;
@@ -214,52 +364,32 @@ export async function runEnrich({ limit = 20 } = {}) {
         };
       }, { sels: SELECTORS.detailDescription, jobId: job.external_id });
 
-      const jdText = page1.jd;
-
-      // Job cards are lazily hydrated — LinkedIn strips the text of off-screen
-      // ones (they are literally data-occludable), so most cards yield an id and
-      // nothing else. document.title is "<Title> | <Company> | LinkedIn" and is
-      // always present, so title and company are backfilled here instead.
-      const meta = parseDocTitle(page1.docTitle);
-      const title = job.title || meta.title;
-      const company = job.company || meta.company;
-
-      const emailMatch = jdText?.match(/[\w.+-]+@[\w-]+\.[\w.]{2,}/);
-      const wantsEmail = looksLikeEmailApplication(jdText);
-      const label = page1.applyLabel || '';
-
-      let applyType = 'unknown';
-      if (wantsEmail && emailMatch) applyType = 'email';
-      else if (/easy apply/i.test(label)) applyType = 'easy_apply';
-      else if (/apply/i.test(label)) applyType = 'external';
-
-      if (!jdText) {
-        updateJob(job.id, { title, company, status: 'error' });
+      if (!seen.jd) {
+        updateJob(job.id, { status: 'error' });
+        failed++;
         emit({
           jobId: job.id, stage: 'enrich', level: 'warn',
-          message: `No description found for "${title || job.external_id}" — check SELECTORS.detailDescription`,
+          message: `No description found for ${job.external_id} — check SELECTORS.detailDescription`,
         });
         continue;
       }
 
-      // Re-run the filter now that the real title is known. At discovery most
-      // titles were null, so the seniority gate could not fire.
-      const reason = preFilter({ title, location: job.location, jd: jdText });
-      if (reason) {
-        updateJob(job.id, { title, company, jd_text: jdText, apply_type: applyType, status: 'rejected', reject_reason: reason });
-        rejected++;
-        emit({ jobId: job.id, stage: 'enrich', message: `Rejected — ${reason}: ${title} @ ${company}` });
-      } else {
-        updateJob(job.id, {
-          title, company,
-          jd_text: jdText,
-          apply_type: applyType,
-          apply_email: applyType === 'email' ? emailMatch[0] : null,
-          status: 'enriched',
-        });
-        enriched++;
-        emit({ jobId: job.id, stage: 'enrich', message: `Enriched (${applyType}, ${jdText.length} chars): ${title} @ ${company}` });
-      }
+      // document.title is "<Title> | <Company> | LinkedIn" and is always
+      // present, so title and company are backfilled from it.
+      const meta = parseDocTitle(seen.docTitle);
+      const label = seen.applyLabel || '';
+      const outcome = recordEnrichment(job, {
+        title: job.title || meta.title,
+        company: job.company || meta.company,
+        location: job.location,
+        jd: seen.jd,
+        criteria: {},
+        applyRoute: /easy apply/i.test(label) ? 'easy_apply' : (/apply/i.test(label) ? 'external' : 'unknown'),
+        applyUrl: null,
+        postedAt: null,
+        closed: false,
+      });
+      if (outcome === 'rejected') rejected++; else enriched++;
     } catch (err) {
       if (err instanceof ChallengeDetected) {
         bumpRate('challenges_hit');
@@ -267,6 +397,7 @@ export async function runEnrich({ limit = 20 } = {}) {
         throw err;
       }
       updateJob(job.id, { status: 'error' });
+      failed++;
       emit({ jobId: job.id, stage: 'enrich', level: 'error', message: `Enrich failed: ${err.message}` });
     }
 
@@ -274,6 +405,5 @@ export async function runEnrich({ limit = 20 } = {}) {
     await humanDelay(3000, 9000);
   }
 
-  emit({ stage: 'enrich', message: `Enrich complete — ${enriched} enriched, ${rejected} rejected` });
-  return { enriched, rejected };
+  return { enriched, rejected, failed };
 }

@@ -26,13 +26,7 @@ export function hasCredentials() {
 
 export const SETUP_HELP = `
   Gmail is not connected, so emails will be drafted but not sent.
-
-  To connect:
-    1. console.cloud.google.com → create a project
-    2. Enable the Gmail API
-    3. Credentials → Create OAuth client ID → Desktop app
-    4. Download the JSON to apply-bot/profile/google-credentials.json
-    5. npm run gmail:auth
+  Connect it under the gear in the dashboard, which walks through the steps.
 `;
 
 function loadClient() {
@@ -42,32 +36,84 @@ function loadClient() {
   return new OAuth2Client(conf.client_id, conf.client_secret, REDIRECT);
 }
 
-/** One-time browser consent. Runs a throwaway local server for the redirect. */
-export async function authorise() {
+/**
+ * Save the OAuth client JSON downloaded from Google Cloud. Validated on the way
+ * in, because the difference between a Desktop client and a Web one only shows
+ * up as an opaque redirect_uri_mismatch three steps later.
+ */
+export function saveCredentials(jsonText) {
+  let raw;
+  try { raw = JSON.parse(jsonText); }
+  catch { throw new Error('That is not valid JSON — paste the whole file you downloaded from Google Cloud.'); }
+
+  const conf = raw.installed || raw.web;
+  if (!conf?.client_id || !conf?.client_secret) {
+    throw new Error('No OAuth client in that JSON. It needs an "installed" or "web" block with client_id and client_secret.');
+  }
+  if (raw.web && !raw.installed) {
+    throw new Error('That is a Web application client. Create an OAuth client of type "Desktop app" instead.');
+  }
+
+  fs.mkdirSync(path.dirname(CREDS), { recursive: true });
+  fs.writeFileSync(CREDS, JSON.stringify(raw, null, 2));
+  fs.chmodSync(CREDS, 0o600);
+  return { ok: true, clientId: conf.client_id };
+}
+
+/** Forget the connection. Credentials stay so reconnecting is one click. */
+export function disconnect() {
+  fs.rmSync(TOKEN, { force: true });
+  return { ok: true };
+}
+
+export function status() {
+  return { hasCredentials: hasCredentials(), connected: isConfigured(), redirect: REDIRECT };
+}
+
+/**
+ * Consent, split so it can be driven from the dashboard as well as the CLI.
+ *
+ * The caller needs the URL back *before* the flow finishes — a browser cannot be
+ * told to visit a page by a request that is still blocking on that visit — so
+ * this returns the URL immediately alongside a promise for the rest.
+ */
+export function beginAuthorisation() {
   if (!hasCredentials()) throw new Error(`No credentials at ${CREDS}.\n${SETUP_HELP}`);
   const client = loadClient();
   const url = client.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: SCOPES });
 
-  console.log('\n  Open this URL and grant access:\n\n  ' + url + '\n');
-
-  const code = await new Promise((resolve, reject) => {
+  const completed = new Promise((resolve, reject) => {
     const server = http.createServer((req, res) => {
       const u = new URL(req.url, REDIRECT);
       if (u.pathname !== '/oauth2callback') { res.writeHead(404); return res.end(); }
       const c = u.searchParams.get('code');
+      const err = u.searchParams.get('error');
       res.writeHead(200, { 'Content-Type': 'text/html' });
-      res.end('<body style="font:16px system-ui;padding:40px">Connected. You can close this tab.</body>');
+      res.end(`<body style="font:16px system-ui;padding:40px;background:#0f1216;color:#e6edf3">${
+        c ? 'Connected. You can close this tab and go back to the dashboard.' : `Not connected: ${err || 'no code returned'}`
+      }</body>`);
       server.close();
-      c ? resolve(c) : reject(new Error('No code returned'));
+      c ? resolve(c) : reject(new Error(err || 'No code returned'));
     });
+    server.on('error', reject);
     server.listen(5179);
     setTimeout(() => { server.close(); reject(new Error('Timed out waiting for consent')); }, 300_000);
+  }).then(async code => {
+    const { tokens } = await client.getToken(code);
+    fs.mkdirSync(path.dirname(TOKEN), { recursive: true });
+    fs.writeFileSync(TOKEN, JSON.stringify(tokens, null, 2));
+    fs.chmodSync(TOKEN, 0o600);
+    return { ok: true };
   });
 
-  const { tokens } = await client.getToken(code);
-  fs.mkdirSync(path.dirname(TOKEN), { recursive: true });
-  fs.writeFileSync(TOKEN, JSON.stringify(tokens, null, 2));
-  return { ok: true };
+  return { url, completed };
+}
+
+/** One-time browser consent, terminal flavour. */
+export async function authorise() {
+  const { url, completed } = beginAuthorisation();
+  console.log('\n  Open this URL and grant access:\n\n  ' + url + '\n');
+  return completed;
 }
 
 async function accessToken() {

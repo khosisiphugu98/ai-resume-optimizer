@@ -5,14 +5,21 @@ export const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '
 export const REPO = path.resolve(ROOT, '..');
 
 export const PATHS = {
-  db: path.join(ROOT, 'data/pipeline.sqlite'),
+  // Overridable so the tests never touch the real pipeline. They seed jobs and
+  // clear the rate ledger, and that ledger is the daily cap that keeps LinkedIn
+  // from flagging the account — running the suite must not reset it.
+  db: process.env.APPLY_BOT_DB || path.join(ROOT, 'data/pipeline.sqlite'),
   chromeProfile: path.join(ROOT, 'data/chrome-profile'),
   artifacts: path.join(ROOT, 'artifacts'),
-  stop: path.join(ROOT, 'STOP'),
+  // Overridable for the same reason as the db: with the real kill switch on,
+  // every canApply test fails for a reason that has nothing to do with the code.
+  stop: process.env.APPLY_BOT_STOP || path.join(ROOT, 'STOP'),
   optimiser: 'https://khosisiphugu98.github.io/ai-resume-optimizer/',
 };
 
-export const SERVER = { port: 5175 };
+// Overridable for the same reason as the db path: a verification run must not
+// have to take the port from a dashboard that is already open and working.
+export const SERVER = { port: Number(process.env.APPLY_BOT_PORT) || 5175 };
 
 // Run mode — see docs/APPLY_BOT_PLAN.md §7.5. Phase 1 ships observe only.
 export const MODES = ['observe', 'review', 'auto'];

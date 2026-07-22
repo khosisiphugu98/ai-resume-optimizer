@@ -72,6 +72,9 @@ export const GENERIC = {
   fileInput: ['input[type=file][name*="resume" i]', 'input[type=file][name*="cv" i]', 'input[type=file]'],
   submit: ['button[type=submit]', 'input[type=submit]', 'button:has-text("Submit")', 'button:has-text("Apply")'],
   success: [/thank you|application (has been )?(received|submitted)|successfully applied/i],
+  // An unknown form is the case the accessibility collector exists for: no native
+  // controls, a form in a shadow root, or labels that are only labels visually.
+  a11y: true,
   requiresReview: true,   // never auto-submit an unknown form
 };
 

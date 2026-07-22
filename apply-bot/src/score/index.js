@@ -1,9 +1,46 @@
-import { db, updateJob } from '../db.js';
+import { db, updateJob, getSetting, setSetting, bumpRate, todayRates } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { loadProfile, summariseForLLM, normaliseSkill } from '../profile.js';
 import { callLLM, hasKey } from '../llm.js';
 
+/** The number that was picked out of the air. Now only the default (§8.4). */
 export const THRESHOLD = 65;
+
+/**
+ * The threshold in force. Lives in `settings` so the operator can move it from
+ * the dashboard once the calibration report gives them a reason to — retuning
+ * should not require editing a source file and restarting.
+ */
+export function currentThreshold() {
+  const stored = Number(getSetting('fit_threshold'));
+  return Number.isFinite(stored) && stored > 0 && stored <= 100 ? stored : THRESHOLD;
+}
+
+export function setThreshold(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < 0 || n > 100) throw new Error('threshold must be between 0 and 100');
+  setSetting('fit_threshold', n);
+  return n;
+}
+
+// --- audit sampling (§8.6) --------------------------------------------------
+//
+// The threshold decides what gets applied to, which decides the data used to set
+// the threshold. Jobs below it are never observed, so a false negative leaves no
+// trace anywhere — and a report built only on jobs that cleared the bar will
+// happily recommend raising it, forever, on evidence that looks good precisely
+// because everything underneath was never tried.
+//
+// The fix is to deliberately let a few through. One in twenty, capped at two a
+// day, labelled separately, and excluded from the headline rate.
+export const AUDIT = { rate: 0.05, dailyCap: 2, floor: 40, reason: 'audit sample' };
+
+/** Injectable so the tests can assert the rate without depending on chance. */
+export function shouldAuditSample(score, threshold, random = Math.random) {
+  if (score < AUDIT.floor || score >= threshold) return false;
+  if ((todayRates().audit_samples || 0) >= AUDIT.dailyCap) return false;
+  return random() < AUDIT.rate;
+}
 
 const SYSTEM = `You score how well one candidate fits one job posting.
 
@@ -48,6 +85,28 @@ export function heuristicScore(job, profile) {
   };
 }
 
+/**
+ * Examples of what actually converted for this candidate (§8.7).
+ *
+ * Cheap, and it grounds the model in real results rather than generic notions of
+ * fit — "Marketing Analyst at a fintech got an interview" is worth more than any
+ * amount of prompt about weighing seniority. Regenerated from labelled outcomes
+ * and kept in `settings`, so refreshing it is not a code change.
+ */
+export function fewShotBlock() {
+  const raw = getSetting('score_examples');
+  if (!raw) return '';
+  try {
+    const { examples } = JSON.parse(raw);
+    if (!examples?.length) return '';
+    return 'HOW PAST APPLICATIONS ACTUALLY WENT (this candidate, real outcomes)\n' +
+      examples.map(e => `- ${e.title} at ${e.company} (scored ${e.score}) — ${e.label}`).join('\n') +
+      '\n\n';
+  } catch {
+    return '';
+  }
+}
+
 export async function scoreJob(job, profile) {
   const h = heuristicScore(job, profile);
 
@@ -74,6 +133,7 @@ export async function scoreJob(job, profile) {
     { role: 'system', content: SYSTEM },
     { role: 'user', content:
         `CANDIDATE PROFILE\n${summariseForLLM(profile)}\n\n` +
+        fewShotBlock() +
         `JOB: ${job.title} at ${job.company} (${job.location})\n\n` +
         `DESCRIPTION\n${String(job.jd_text).slice(0, 6000)}` },
   ], { maxTokens: 400 });
@@ -87,14 +147,28 @@ export async function scoreJob(job, profile) {
   };
 }
 
-export async function runScoring({ limit = 30 } = {}) {
+export async function runScoring({ limit = 30, audit = true, random = Math.random } = {}) {
   const profile = loadProfile();
+  const threshold = currentThreshold();
   const jobs = db.prepare(`SELECT * FROM jobs WHERE status = 'enriched' ORDER BY id LIMIT ?`).all(limit);
-  let scored = 0, rejected = 0;
+  let scored = 0, rejected = 0, sampled = 0;
+
+  let deferred = 0;
 
   for (const job of jobs) {
     try {
       const r = await scoreJob(job, profile);
+
+      // The heuristic measures how much of the profile a posting happens to
+      // mention, which is not a fit judgement and cannot clear the threshold on
+      // a normal posting. Rejecting on it would quietly discard the entire
+      // pipeline, so a degraded score is recorded and the job waits for a real
+      // one instead of being thrown away.
+      if (r.degraded) {
+        updateJob(job.id, { fit_score: r.score, fit_rationale: r.rationale });
+        deferred++;
+        continue;
+      }
 
       // A blocker disqualifies regardless of score.
       if (r.blockers.length) {
@@ -104,13 +178,30 @@ export async function runScoring({ limit = 30 } = {}) {
         });
         rejected++;
         emit({ jobId: job.id, stage: 'score', message: `Rejected (blocker: ${r.blockers[0]}) — ${job.title} @ ${job.company}` });
-      } else if (r.score < THRESHOLD) {
-        updateJob(job.id, {
-          fit_score: r.score, fit_rationale: r.rationale,
-          status: 'rejected', reject_reason: `fit ${r.score} < ${THRESHOLD}`,
-        });
-        rejected++;
-        emit({ jobId: job.id, stage: 'score', message: `Rejected (fit ${r.score}) — ${job.title} @ ${job.company}` });
+      } else if (r.score < threshold) {
+        // Occasionally let one through anyway. Without a sample of what happens
+        // below the line, the threshold can only ever be validated against jobs
+        // that already cleared it.
+        if (audit && shouldAuditSample(r.score, threshold, random)) {
+          updateJob(job.id, {
+            fit_score: r.score, fit_rationale: r.rationale,
+            status: 'scored', reject_reason: AUDIT.reason,
+          });
+          bumpRate('audit_samples');
+          sampled++;
+          emit({
+            jobId: job.id, stage: 'score',
+            message: `Audit sample (fit ${r.score}, below ${threshold}) — ${job.title} @ ${job.company}. ` +
+              `Applied to deliberately so the threshold has evidence from below it.`,
+          });
+        } else {
+          updateJob(job.id, {
+            fit_score: r.score, fit_rationale: r.rationale,
+            status: 'rejected', reject_reason: `fit ${r.score} < ${threshold}`,
+          });
+          rejected++;
+          emit({ jobId: job.id, stage: 'score', message: `Rejected (fit ${r.score}) — ${job.title} @ ${job.company}` });
+        }
       } else {
         updateJob(job.id, { fit_score: r.score, fit_rationale: r.rationale, status: 'scored' });
         scored++;
@@ -122,6 +213,18 @@ export async function runScoring({ limit = 30 } = {}) {
     emitBoard();
   }
 
-  emit({ stage: 'score', message: `Scoring complete — ${scored} passed, ${rejected} rejected (threshold ${THRESHOLD})` });
-  return { scored, rejected };
+  if (deferred) {
+    emit({
+      stage: 'score', level: 'warn',
+      message: `${deferred} job(s) held unscored — there is no OpenAI key, and the keyword fallback is not a fit judgement. ` +
+               `Add a key in the dashboard and run scoring again to rank them.`,
+    });
+  }
+
+  emit({
+    stage: 'score',
+    message: `Scoring complete — ${scored} passed, ${rejected} rejected, ${deferred} held` +
+      (sampled ? `, ${sampled} audit sample(s)` : '') + ` (threshold ${threshold})`,
+  });
+  return { scored, rejected, deferred, sampled };
 }

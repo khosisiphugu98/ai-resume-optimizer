@@ -1,9 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS } from '../config.js';
+import { PATHS, SELECTORS } from '../config.js';
+import { bumpRate } from '../db.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
-import { collectFieldsInPage, fillField } from './fields.js';
-import { resolveForm } from '../answer/resolver.js';
+import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
+import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
+import { runWizard, buttonByName, stepSignature, firstVisible, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
+import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import { detectVendor } from './adapters/index.js';
 
@@ -13,14 +16,6 @@ async function shot(page, jobId, label) {
   const p = path.join(dir, `${Date.now()}-${label}.png`);
   await page.screenshot({ path: p, fullPage: true }).catch(() => {});
   return p;
-}
-
-async function firstVisible(scope, selectors) {
-  for (const sel of selectors) {
-    const loc = scope.locator(sel).first();
-    if (await loc.count().catch(() => 0) && await loc.isVisible().catch(() => false)) return loc;
-  }
-  return null;
 }
 
 /**
@@ -41,6 +36,59 @@ export async function formScope(page, vendor) {
 }
 
 /**
+ * Where the form is when `formScope` cannot see it — a form built from
+ * `div[role="textbox"]`, or one inside a web component, contains no native
+ * controls at all, so counting inputs finds nothing.
+ *
+ * Picks the frame with the most accessible form controls rather than the first
+ * with any, because a page often carries a stray search box in the header.
+ */
+export async function a11yScope(page) {
+  let best = null;
+  for (const frame of page.frames()) {
+    const nodes = await frame.evaluate(collectA11yInPage, 'body').catch(() => []);
+    const fillable = nodes.filter(n => n.role !== 'file' && n.name);
+    if (fillable.length && (!best || fillable.length > best.count)) {
+      best = { frame, rootSelector: 'body', count: fillable.length };
+    }
+  }
+  return best;
+}
+
+const fromA11y = n => ({ ...toFieldSpec(n), collector: 'a11y', role: n.role });
+
+/**
+ * Collect the current step's fields.
+ *
+ * The DOM collector runs first: it is faster, deterministic, and right for the
+ * native-control forms that make up most vendor boards. The a11y collector is the
+ * fallback for everything else, and finding fewer than two fillable fields is the
+ * signal that the form is not made of native controls at all.
+ */
+export async function collectFields(frame, rootSelector, vendor) {
+  if (!vendor.a11y) {
+    const dom = await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
+    const fillable = dom.filter(f => f.kind !== 'file' && f.question);
+    if (fillable.length >= 2) return { mode: 'dom', items: dom.map(fromDomField) };
+  }
+  const nodes = await frame.evaluate(collectA11yInPage, rootSelector).catch(() => []);
+  const items = nodes.filter(n => n.name || n.role === 'file').map(fromA11y);
+  if (items.length) return { mode: 'a11y', items };
+
+  // Nothing from either collector — report the DOM result so the caller's error
+  // describes an empty form rather than an a11y miss.
+  const dom = await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
+  return { mode: 'dom', items: dom.map(fromDomField) };
+}
+
+/** Apply one value, whichever collector found the control. */
+export function fillCollected(frame, item, value) {
+  return item.collector === 'a11y'
+    ? fillA11yField(frame, item.node, value)
+    : fillField(frame, item.field, value);
+}
+
+/**
  * Follow LinkedIn's Apply button out to the real ATS. It usually opens a new tab
  * behind a redirect shim, so we wait for the popup and let it settle on its final
  * URL rather than trusting the first href.
@@ -49,10 +97,17 @@ export async function resolveExternalUrl(page, job) {
   if (job.external_apply_url) return job.external_apply_url;
 
   await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+  // A signed-in posting view, and therefore chargeable against the pageview cap
+  // that keeps the account under LinkedIn's radar. Counting it here matters
+  // because a board full of unresolved external jobs spends one of these each.
+  bumpRate('linkedin_pageviews');
   await page.waitForTimeout(2000);
   await assertNoChallenge(page);
 
-  const applyBtn = await firstVisible(page, ['.jobs-apply-button', 'button.jobs-apply-button--top-card']);
+  // Must come from SELECTORS: the new server-driven UI ships hashed class names,
+  // so `.jobs-apply-button` matches nothing on a rolled-out account and every
+  // external job would fail here as "posting may have closed".
+  const applyBtn = await firstVisible(page, SELECTORS.detailApplyBtn);
   if (!applyBtn) throw new Error('No apply button — posting may have closed');
 
   const ctx = page.context();
@@ -82,99 +137,105 @@ export async function resolveExternalUrl(page, job) {
  */
 export async function applyExternal(page, job, ctx, { submit = false, resumePath = null } = {}) {
   const screenshots = [];
-  const filled = [];
 
   const url = job.external_apply_url;
   if (!url) throw new Error('No resolved external apply URL');
 
   const vendor = detectVendor(url);
   if (vendor.deferred) {
-    return { outcome: 'manual', vendor: vendor.vendor, reason: vendor.why, url, filled, screenshots };
+    return { outcome: 'manual', vendor: vendor.vendor, reason: vendor.why, url, filled: [], screenshots };
   }
 
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(3000);
   screenshots.push(await shot(page, job.id, `${vendor.vendor}-open`));
 
-  const scope = await formScope(page, vendor);
+  // A form with no native controls is invisible to formScope's input count, so
+  // falling back to the accessibility tree is what makes an unknown React
+  // careers site reachable at all.
+  const scope = (await formScope(page, vendor)) || (await a11yScope(page));
   if (!scope) throw new Error(`No application form found on ${vendor.vendor} page`);
 
   const { frame, rootSelector } = scope;
-  const fields = await frame.evaluate(collectFieldsInPage, rootSelector);
+  const answerCtx = { ...ctx, ats: vendor.vendor };
 
-  const fileFields = fields.filter(f => f.kind === 'file');
-  const formFields = fields.filter(f => f.kind !== 'file' && f.question);
+  const first = await collectFields(frame, rootSelector, vendor);
+  if (!first.items.length) throw new Error(`Form on ${vendor.vendor} had no fillable fields`);
 
-  if (!formFields.length && !fileFields.length) {
-    throw new Error(`Form on ${vendor.vendor} had no fillable fields`);
-  }
+  // Uploads are handled here rather than through the answer resolver, and inside
+  // collect rather than once up front — a wizard can put an attachment slot on
+  // any step, and several boards parse the resume and prefill the rest of the
+  // form from it, which is worth having happen before anything is resolved.
+  const uploaded = [];
+  const uploadedUids = new Set();
 
-  // Resume upload first — several boards parse it and prefill the rest.
-  for (const f of fileFields) {
-    if (!resumePath) continue;
-    try {
-      await fillField(frame, f, resumePath);
-      filled.push({ question: f.question || 'Resume', value: path.basename(resumePath), tier: 'resume', kind: 'file' });
-      await page.waitForTimeout(2500);
-    } catch { /* optional attachment slots are common */ }
-  }
+  const collect = async () => {
+    const { items } = await collectFields(frame, rootSelector, vendor);
 
-  // Re-read fields — an autofilled form has different values, and some boards
-  // reveal extra questions only after the resume is parsed.
-  const refreshed = await frame.evaluate(collectFieldsInPage, rootSelector);
-  const toResolve = refreshed.filter(f => f.kind !== 'file' && f.question);
+    for (const item of items) {
+      if (item.role !== 'file' || !resumePath || uploadedUids.has(item.uid)) continue;
+      uploadedUids.add(item.uid);
+      try {
+        await fillCollected(frame, item, resumePath);
+        uploaded.push({
+          uid: item.uid, question: item.question || 'Resume',
+          value: path.basename(resumePath), tier: 'resume', kind: 'file',
+        });
+        await page.waitForTimeout(2500);
+      } catch { /* optional attachment slots are common */ }
+    }
 
-  const { resolved, parked } = await resolveForm(toResolve, { ...ctx, ats: vendor.vendor });
+    return items.filter(i => i.role !== 'file' && i.question);
+  };
 
-  if (parked.length) {
+  const result = await runWizard({
+    submit: submit && !vendor.requiresReview,
+    collect,
+
+    resolve: items => resolveFormBatch(items, answerCtx),
+    fill: (item, value) => fillCollected(frame, item, value),
+
+    // A button named "Submit" ends the form. A button named "Continue" never
+    // does, whatever its type — on a multi-step form the Next button is usually
+    // `type=submit` as well, and the vendor's submit selector would match it and
+    // file a half-finished application as though it were complete.
+    findTerminal: async () => {
+      const named = await buttonByName(frame, TERMINAL_NAME);
+      if (named) return named;
+      if (await buttonByName(frame, ADVANCE_NAME)) return null;
+      return firstVisible(frame, vendor.submit);
+    },
+    findAdvance: () => buttonByName(frame, ADVANCE_NAME),
+    signature: stepSignature,
+    onStep: async ({ step }) => {
+      screenshots.push(await shot(page, job.id, `${vendor.vendor}-step-${step}`));
+    },
+  });
+
+  const filled = [...uploaded, ...result.filled];
+
+  if (result.outcome === 'parked') {
     return {
-      outcome: 'parked', vendor: vendor.vendor, url, filled, screenshots,
-      parked: parked.map(p => ({
+      outcome: 'parked', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps,
+      parked: result.parked.map(p => ({
         question: p.question, questionNorm: normaliseQuestion(p.question),
         fieldType: p.fieldType, options: p.options, reason: p.reason, tier: p.tier,
       })),
     };
   }
 
-  for (const r of resolved) {
-    if (r.status !== 'ok') continue;
-    const field = toResolve.find(f => f.question === r.question);
-    if (!field) continue;
-    // Don't clobber a value the board autofilled correctly from the resume.
-    if (field.currentValue && String(field.currentValue).trim() === String(r.value).trim()) {
-      filled.push({ question: r.question, value: r.value, tier: 'prefilled', kind: field.kind });
-      continue;
-    }
-    try {
-      const landed = await fillField(frame, field, r.value);
-      filled.push({ question: r.question, value: landed, tier: r.tier, kind: field.kind, probable: !!r.probable });
-    } catch (err) {
-      return {
-        outcome: 'parked', vendor: vendor.vendor, url, filled, screenshots,
-        parked: [{
-          question: r.question, questionNorm: normaliseQuestion(r.question),
-          fieldType: r.fieldType, options: field.options,
-          reason: `could not apply "${r.value}": ${err.message}`, tier: 'fill-error',
-        }],
-      };
-    }
-  }
-
-  screenshots.push(await shot(page, job.id, `${vendor.vendor}-filled`));
+  if (result.outcome === 'stuck') throw new Error(result.reason);
 
   // An unknown form is never auto-submitted, whatever the mode.
-  if (!submit || vendor.requiresReview) {
+  if (result.outcome === 'ready') {
     return {
-      outcome: 'ready', vendor: vendor.vendor, url, filled, screenshots,
+      outcome: 'ready', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps,
       heldForReview: vendor.requiresReview && submit ? 'generic adapter never auto-submits' : null,
     };
   }
 
-  const submitBtn = await firstVisible(frame, vendor.submit);
-  if (!submitBtn) throw new Error(`No submit button found on ${vendor.vendor}`);
-
   const before = page.url();
-  await submitBtn.click();
+  await result.terminal.click();
   await page.waitForTimeout(5000);
 
   const evidence = await shot(page, job.id, `${vendor.vendor}-submitted`);
@@ -184,7 +245,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const confirmed = vendor.success.some(re => re.test(body)) || page.url() !== before;
   if (!confirmed) throw new Error('Clicked submit but saw no confirmation');
 
-  return { outcome: 'submitted', vendor: vendor.vendor, url, filled, screenshots, evidence };
+  return { outcome: 'submitted', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps, evidence };
 }
 
 export { ChallengeDetected };
