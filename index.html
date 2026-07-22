@@ -7,7 +7,7 @@
     <!-- Content Security Policy: restricts where scripts/data can go -->
     <meta http-equiv="Content-Security-Policy" content="
         default-src 'none';
-        script-src 'sha256-afHUX1GrfA+6oFzglC8NoKU6UzHBHf1MJ8dt6RTh4OA=' https://cdnjs.cloudflare.com;
+        script-src 'sha256-BEuuc7mEyi43SSWOC6twF9DYldtitn7w1rAyxpLwe+E=' https://cdnjs.cloudflare.com;
         style-src 'unsafe-inline' https://cdnjs.cloudflare.com https://fonts.googleapis.com;
         font-src https://cdnjs.cloudflare.com https://fonts.gstatic.com;
         img-src 'self' data: blob:;
@@ -176,6 +176,18 @@
         .keyword-included { background-color: #27ae60; }
         .keyword-missing { background-color: #e74c3c; }
         .keyword-added { color: #27ae60; font-size: 10px; margin-left: 10px; }
+        .keyword-confirm-panel { margin-top: 15px; padding: 12px; background: #fff8ea; border: 1px solid #f0c674; border-radius: 6px; }
+        .keyword-confirm-panel h3 { font-size: 13px; color: #7a5c00; margin-bottom: 6px; }
+        .keyword-confirm-panel .keyword-confirm-note { font-size: 11px; color: #7a5c00; margin-bottom: 10px; line-height: 1.5; }
+        .keyword-confirm-list { max-height: 220px; overflow-y: auto; margin-bottom: 10px; }
+        .keyword-confirm-item { display: flex; align-items: center; margin-bottom: 5px; padding: 5px; background: white; border-radius: 3px; border: 1px solid #eee; }
+        .keyword-confirm-item label { flex-grow: 1; font-size: 11px; margin-left: 8px; cursor: pointer; }
+        .keyword-confirm-actions { display: flex; gap: 8px; }
+        .keyword-confirm-continue, .keyword-confirm-skip { font-size: 11px; padding: 5px 12px; border-radius: 3px; border: none; cursor: pointer; }
+        .keyword-confirm-continue { background: #27ae60; color: white; }
+        .keyword-confirm-skip { background: #95a5a6; color: white; }
+        .diff-item.flagged { border-color: #e67e22; background: #fff6ec; }
+        .diff-flag-badge { display: inline-block; font-size: 9px; font-weight: 700; color: #e67e22; background: #fff0dc; border: 1px solid #e67e22; border-radius: 3px; padding: 1px 6px; margin-bottom: 4px; }
         .upload-section { margin-bottom: 20px; padding: 15px; background: #f0f7ff; border-radius: 8px; border: 1px dashed #3498db; }
         .upload-section h3 { font-size: 14px; margin-bottom: 8px; color: #2c3e50; }
         .upload-section p { font-size: 11px; margin-bottom: 10px; color: #666; }
@@ -302,6 +314,16 @@
         <div id="keyword-summary" style="margin-top: 10px; font-size: 11px;"></div>
     </div>
 
+    <div id="keyword-confirm-panel" class="keyword-confirm-panel" style="display: none;">
+        <h3>⚠ Confirm skills before we add them</h3>
+        <div class="keyword-confirm-note">The job description mentions these skills, but they don't appear anywhere in your resume. Only check the ones you genuinely have experience with — we will never add a skill you haven't confirmed to your resume or work history.</div>
+        <div id="keyword-confirm-list" class="keyword-confirm-list"></div>
+        <div class="keyword-confirm-actions">
+            <button class="keyword-confirm-continue" id="keyword-confirm-continue">Continue with checked skills</button>
+            <button class="keyword-confirm-skip" id="keyword-confirm-skip">Skip — I don't have any of these</button>
+        </div>
+    </div>
+
     <div id="diff-view-panel" class="diff-view" style="display: none;">
         <h3>Review Changes
             <span class="diff-actions">
@@ -393,6 +415,6 @@
         </div>
     </div>
 
-    <script src="resume.js" integrity="sha256-afHUX1GrfA+6oFzglC8NoKU6UzHBHf1MJ8dt6RTh4OA=" crossorigin="anonymous"></script>
+    <script src="resume.js" integrity="sha256-BEuuc7mEyi43SSWOC6twF9DYldtitn7w1rAyxpLwe+E=" crossorigin="anonymous"></script>
 </body>
 </html>

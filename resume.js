@@ -736,6 +736,157 @@ function displayKeywordStatus(analysis) {
     document.getElementById('keyword-status').style.display = 'block';
 }
 
+// =============================================
+// Confirmed-skills allowlist — the durable source of truth for what the candidate
+// has actually vouched for. Persisted in localStorage so a confirmation made once
+// (interactively) carries to every later run, and so the apply-bot can seed it from
+// the master profile and run the whole gate non-interactively. Entries are raw skill
+// / keyword strings; matching is done by stem so "managing" ~ "managed".
+// =============================================
+function getConfirmedSkillsAllowlist() {
+    try { return JSON.parse(localStorage.getItem('confirmedSkills') || '[]'); }
+    catch { return []; }
+}
+
+function addToConfirmedAllowlist(keywords) {
+    const current = getConfirmedSkillsAllowlist();
+    const seen = new Set(current.map(normalizeAndStem));
+    for (const k of keywords) {
+        const stem = normalizeAndStem(k);
+        if (stem && !seen.has(stem)) { current.push(k); seen.add(stem); }
+    }
+    try { localStorage.setItem('confirmedSkills', JSON.stringify(current)); } catch { /* storage full/blocked */ }
+}
+
+// Which of the missing keywords are already covered by the allowlist (stem match).
+function allowlistedMissing(missingKeywords) {
+    const allow = new Set(getConfirmedSkillsAllowlist().map(normalizeAndStem));
+    return missingKeywords.filter(k => allow.has(normalizeAndStem(k)));
+}
+
+// =============================================
+// GUARDRAIL: keyword confirmation gate
+// missingKeywords (from analyzeKeywordIntegration) are keywords that appear NOWHERE in the
+// resume — not in the summary, skills, or any bullet. Historically these were fed straight
+// to the AI to weave into experience bullets and auto-added to the skills list, which means
+// the optimizer would silently claim the candidate has skills/tools they never mentioned
+// having. This panel makes that an explicit, opt-in, per-keyword human decision instead of
+// an AI judgment call. Returns a Promise resolving to the array of keywords the user confirmed.
+//
+// Non-interactive mode (window.__AUTO_CONFIRM_SKILLS__, set by the apply-bot): resolves
+// immediately against the persisted allowlist with NO modal — so the automated pipeline
+// only ever adds skills the candidate has already vouched for in their master profile, and
+// never blocks waiting for a click that will never come.
+// =============================================
+function renderKeywordConfirmPanel(missingKeywords) {
+    if (window.__AUTO_CONFIRM_SKILLS__) {
+        // Headless/bot path: confirm exactly the allowlisted subset, nothing else.
+        return Promise.resolve(allowlistedMissing(missingKeywords));
+    }
+
+    return new Promise(resolve => {
+        const panel = document.getElementById('keyword-confirm-panel');
+        const list = document.getElementById('keyword-confirm-list');
+        list.innerHTML = '';
+        // Pre-check anything the candidate has confirmed before, so a returning user
+        // isn't re-ticking the same skills every run.
+        const preConfirmed = new Set(allowlistedMissing(missingKeywords).map(normalizeAndStem));
+        const entries = missingKeywords.map((k, i) => {
+            const item = document.createElement('div');
+            item.className = 'keyword-confirm-item';
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.id = `kw-confirm-${i}`;
+            checkbox.checked = preConfirmed.has(normalizeAndStem(k));
+            const label = document.createElement('label');
+            label.setAttribute('for', checkbox.id);
+            label.textContent = k; // textContent only — never innerHTML for AI-sourced strings
+            item.appendChild(checkbox);
+            item.appendChild(label);
+            list.appendChild(item);
+            return { checkbox, keyword: k };
+        });
+
+        panel.style.display = 'block';
+        panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        const continueBtn = document.getElementById('keyword-confirm-continue');
+        const skipBtn = document.getElementById('keyword-confirm-skip');
+
+        function finish(confirmed) {
+            continueBtn.removeEventListener('click', onContinue);
+            skipBtn.removeEventListener('click', onSkip);
+            panel.style.display = 'none';
+            // Remember this decision so it carries to future runs (and to the bot's allowlist).
+            if (confirmed.length) addToConfirmedAllowlist(confirmed);
+            resolve(confirmed);
+        }
+        function onContinue() {
+            finish(entries.filter(e => e.checkbox.checked).map(e => e.keyword));
+        }
+        function onSkip() { finish([]); }
+
+        continueBtn.addEventListener('click', onContinue);
+        skipBtn.addEventListener('click', onSkip);
+    });
+}
+
+// =============================================
+// GUARDRAIL: fabrication detector
+// Even for confirmed-true keywords, a model can still invent a plausible-looking metric
+// ("increased sales by 40%", "led a team of 12") that was never in the original text.
+// This is a cheap, deterministic check: any digit sequence in the enhanced text that
+// wasn't in the original is flagged for mandatory manual review.
+// =============================================
+// Spelled-out numbers ("forty percent", "a dozen direct reports") don't match \d, so a
+// model steered (deliberately or not) toward prose numbers would slip past a digits-only
+// check. Map common number words to their digit form before comparing.
+const NUMBER_WORDS = {
+    zero: '0', one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7',
+    eight: '8', nine: '9', ten: '10', eleven: '11', twelve: '12', dozen: '12', thirteen: '13',
+    fourteen: '14', fifteen: '15', sixteen: '16', seventeen: '17', eighteen: '18', nineteen: '19',
+    twenty: '20', thirty: '30', forty: '40', fifty: '50', sixty: '60', seventy: '70', eighty: '80',
+    ninety: '90', hundred: '100', thousand: '1000', million: '1000000'
+};
+
+function introducesNewNumbers(original, enhanced) {
+    const extractNumbers = str => {
+        const digits = (String(str).match(/\d[\d,.]*\+?/g) || []).map(n => n.replace(/,/g, ''));
+        const words = (String(str).toLowerCase().match(/\b[a-z]+\b/g) || [])
+            .filter(w => w in NUMBER_WORDS).map(w => NUMBER_WORDS[w]);
+        return [...digits, ...words];
+    };
+    const originalNums = new Set(extractNumbers(original));
+    return extractNumbers(enhanced).some(n => !originalNums.has(n));
+}
+
+// =============================================
+// GUARDRAIL: keyword-smuggling detector
+// The section/summary prompts still include the raw job description as context (so the
+// model understands the target role), which means a model can mention a JD skill on its
+// own initiative even when it wasn't told to — bypassing the confirmation gate entirely.
+// This flags any extracted keyword that isn't in the confirmed set but shows up as new
+// text in the enhancement anyway.
+// =============================================
+function computeUnauthorizedKeywords(allKeywords, confirmedMissing) {
+    const confirmedStems = new Set(confirmedMissing.map(k => normalizeAndStem(k)));
+    return allKeywords.filter(k => !confirmedStems.has(normalizeAndStem(k)));
+}
+
+function introducesUnauthorizedKeyword(original, enhanced, unauthorizedKeywords) {
+    const originalNorm = normalizeKeyword(original);
+    const enhancedNorm = normalizeKeyword(enhanced);
+    return unauthorizedKeywords.some(k => {
+        const kn = normalizeKeyword(k);
+        if (!kn) return false;
+        // Word-boundary match (not .includes()) so short acronyms like "AI" or "ML" are
+        // matched as whole words, not silently exempted, while still avoiding false
+        // positives against substrings inside unrelated words (e.g. "ai" inside "email").
+        const pattern = new RegExp(`\\b${kn.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`);
+        return pattern.test(enhancedNorm) && !pattern.test(originalNorm);
+    });
+}
+
 function getResumeContent() {
     const summary = document.getElementById('summary-text')?.textContent || '';
     const experience = {};
@@ -768,11 +919,22 @@ function buildSectionQueue() {
 
 function buildSectionPrompt(section, missingKeywords, jobDesc) {
     const keywordList = missingKeywords.join(', ');
-    return `You are a professional resume writer. Enhance the bullet points for this specific job role to naturally incorporate relevant keywords. Keep all content truthful and professional. Do not fabricate experience or invent responsibilities not implied by the existing bullets.
+    return `You are a professional resume writer. Enhance the bullet points for this specific job role to naturally incorporate relevant keywords.
+
+The candidate has personally confirmed they have real, genuine experience with every keyword listed below — your job is ONLY to phrase that existing experience more effectively for this role, not to decide whether they actually have the skill.
+
+STRICT RULES — you will be rejected if you break these:
+- Do not invent, estimate, or add ANY number, percentage, dollar amount, team size, timeframe, or other metric that is not already present in the original bullet. Rephrasing "managed campaigns" into "managed campaigns, boosting ROI by 40%" is forbidden — the 40% does not exist in the source text.
+- Do not add tools, technologies, employers, certifications, or responsibilities beyond the confirmed keywords and what the original bullet already states.
+- Do not imply a level of seniority, ownership, or scope (e.g. "led a team", "owned the P&L") that the original bullet does not already state.
+- Only weave in a keyword if you can do so as a natural rephrasing of what the bullet already describes — never as a new, separate claim bolted onto the sentence.
+- If a keyword cannot be honestly integrated into a given bullet without adding a new claim, leave that bullet out of your response entirely.
+- The "Target Job Description Context" below is for understanding the role's tone and priorities ONLY. It is NOT a source of additional keywords. Do not mention, allude to, or functionally describe any tool, platform, technology, methodology, or skill from that context unless it is also in the "Confirmed keywords" list above, verbatim. Never substitute a generic description (e.g. "modern orchestration tooling", "advanced CRM platforms") to imply a specific unconfirmed tool without naming it — that is the same violation as naming it directly.
+- When you do use a confirmed keyword, use its exact wording from the list above rather than a paraphrase or synonym, so the integration is unambiguous.
 
 Job Role: ${section.jobTitle} at ${section.company} (${section.date})
 
-Keywords to integrate (use only those genuinely relevant to this role):
+Confirmed keywords to integrate (candidate has verified they have this experience):
 ${keywordList}
 
 Target Job Description Context:
@@ -789,9 +951,18 @@ Only include bullets that genuinely benefit from keyword integration. Omit bulle
 
 function buildSummaryPrompt(summaryText, missingKeywords, jobDesc) {
     const keywordList = missingKeywords.join(', ');
-    return `You are a professional resume writer. Enhance this professional summary to naturally incorporate relevant keywords while keeping it concise (2-4 sentences max) and truthful.
+    return `You are a professional resume writer. Enhance this professional summary to naturally incorporate relevant keywords while keeping it concise (2-4 sentences max) and strictly truthful.
 
-Keywords to integrate (only those relevant to the person's background):
+The candidate has personally confirmed they have real, genuine experience with every keyword listed below.
+
+STRICT RULES — you will be rejected if you break these:
+- Do not invent, estimate, or add ANY number, percentage, dollar amount, years-of-experience figure, or other metric that is not already present in the current summary.
+- Do not add employers, job titles, certifications, or achievements that are not already present in the current summary.
+- Only integrate a keyword if it fits as a natural rephrasing of claims already made in the summary.
+- The "Target Job Description Context" below is for tone only, NOT a source of additional keywords. Do not mention or functionally describe any tool/skill from it that isn't in the confirmed keyword list, even generically.
+- Use each confirmed keyword's exact wording from the list above rather than a paraphrase or synonym.
+
+Confirmed keywords to integrate (candidate has verified they have this experience):
 ${keywordList}
 
 Target Job Description Context:
@@ -868,7 +1039,15 @@ document.getElementById('optimize-btn').addEventListener('click', async function
     const kwCount = parseInt(document.getElementById('keyword-count').value) || 15;
     if (!jobDesc) { showMessage('Paste job description', 'error'); return; }
     if (!activeApiKey()) { showMessage('Configure API key', 'error'); document.getElementById('api-key-container').style.display = 'block'; return; }
+    // Guard against double-submit: a rapid second click would spawn a concurrent run
+    // sharing the same confirm-panel DOM and pendingDiffs global.
+    if (this.disabled) return;
+    this.disabled = true;
     document.getElementById('loading').style.display = 'block';
+    // Completion signal for headless drivers (apply-bot). Cleared now, set once the
+    // whole run resolves one way or the other, so the bot never has to race the diff
+    // panel — which may legitimately never appear when there is nothing to add.
+    window.__optimizeDone = null;
     try {
         // --- PHASE 1 FIX: Snapshot DOM before touching anything ---
         // This is the undo buffer. If anything goes wrong mid-write,
@@ -890,8 +1069,30 @@ document.getElementById('optimize-btn').addEventListener('click', async function
         document.getElementById('loading-details').textContent = 'Analyzing resume...';
         const analysis = await analyzeKeywordIntegration(extractedKeywords);
         displayKeywordStatus(analysis);
+
+        // GUARDRAIL: keywords in analysis.missingKeywords are entirely absent from the
+        // resume (summary, skills, and every bullet). Never let the AI weave a skill/tool
+        // into someone's work history — or add it to the skills list — unless the person
+        // has confirmed they actually have it. This is the only real defense against
+        // fabricated experience; prompt wording alone doesn't reliably stop it.
+        let confirmedMissing = [];
+        if (analysis.missingKeywords.length > 0) {
+            document.getElementById('loading').style.display = 'none';
+            confirmedMissing = await renderKeywordConfirmPanel(analysis.missingKeywords);
+            document.getElementById('loading').style.display = 'block';
+        }
+
+        // Missing skills the candidate did NOT confirm this run. Surfaced to the
+        // apply-bot (via window.__optimizeDone) so the dashboard can offer them as
+        // "confirm you have this" suggestions — never added to the resume here.
+        // Soft/generic terms ("collaboration", "fast-paced") are dropped; only
+        // tool/skill-shaped keywords are worth asking about.
+        const confirmedStemSet = new Set(confirmedMissing.map(normalizeAndStem));
+        const unconfirmedSkills = analysis.missingKeywords.filter(k =>
+            !confirmedStemSet.has(normalizeAndStem(k)) && classifyKeywordTier(k) !== 'soft');
+
         document.getElementById('loading-details').textContent = 'Optimizing with AI...';
-        await optimizeResumeWithAI(jobDesc, extractedKeywords, analysis);
+        await optimizeResumeWithAI(jobDesc, extractedKeywords, confirmedMissing);
         const updatedAnalysis = await analyzeKeywordIntegration(extractedKeywords);
         displayKeywordStatus(updatedAnalysis);
         // Only re-run auto-fit if content actually grew beyond A4
@@ -905,21 +1106,42 @@ document.getElementById('optimize-btn').addEventListener('click', async function
         // Sprint 5: Render match score based on post-optimization keyword analysis
         renderMatchScoreUI(updatedAnalysis);
         const pendingCount = pendingDiffs.length;
+        const flaggedCount = pendingDiffs.filter(d => d.flagged).length;
         showMessage(
             `Optimized! ${updatedAnalysis.includedKeywords.length}/${extractedKeywords.length} keywords integrated.` +
             (pendingCount > 0 ? ` Review ${pendingCount} suggested changes below.` : ''),
             'success'
         );
-    } catch (e) { showMessage(`Error: ${e.message}`, 'error'); }
-    finally { document.getElementById('loading').style.display = 'none'; }
+        window.__optimizeDone = {
+            ok: true,
+            diffCount: pendingCount,
+            flaggedCount,
+            confirmedSkills: confirmedMissing,
+            unconfirmedSkills,
+            matchScore: updatedAnalysis.inclusionRate,
+        };
+    } catch (e) {
+        showMessage(`Error: ${e.message}`, 'error');
+        window.__optimizeDone = { ok: false, error: e.message };
+    }
+    finally { document.getElementById('loading').style.display = 'none'; this.disabled = false; }
 });
 
-async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
-    const missing = analysis.missingKeywords;
+async function optimizeResumeWithAI(jobDesc, keywords, confirmedMissing) {
+    // GUARDRAIL: confirmedMissing is the subset of missing keywords the user has
+    // explicitly confirmed they have real experience with (see renderKeywordConfirmPanel).
+    // Anything not confirmed here is never sent to the AI for bullet/summary rewriting
+    // and never auto-added to the skills list.
+    const missing = confirmedMissing;
     if (missing.length === 0) { highlightExistingKeywords(keywords); return; }
     const model = document.getElementById('ai-model').value;
     // Sanitize keyword strings — never trust AI output in DOM/prompt context
     const safeMissing = missing.map(k => String(k).replace(/[<>"']/g, ''));
+    // GUARDRAIL: the prompt still includes the raw job description as context, so the model
+    // can see (and could spontaneously mention) JD keywords the user never confirmed having.
+    // Anything from the extracted keyword list that isn't in the confirmed set is unauthorized —
+    // if it shows up as new text in an enhancement, that's smuggled, unverified experience.
+    const unauthorizedKeywords = computeUnauthorizedKeywords(keywords, missing);
 
     try {
         // Sprint 2: per-section parallel calls — no 8000-char cap, no 30-keyword limit
@@ -931,7 +1153,7 @@ async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
         const sectionResults = await runParallelSectionCalls(sectionQueue, safeMissing, jobDesc, model);
 
         // Sprint 4: Collect diffs and show review panel instead of auto-applying
-        pendingDiffs = collectDiffs(sectionQueue, sectionResults);
+        pendingDiffs = collectDiffs(sectionQueue, sectionResults, unauthorizedKeywords);
         renderDiffView(pendingDiffs);
 
         // Summary call — separate, runs after sections complete
@@ -947,8 +1169,17 @@ async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
                 if (summaryResult.summary) {
                     const currentLen = summaryEl.textContent.length;
                     // Only apply if new summary is at least 80% as long (prevents AI compression)
-                    if (summaryResult.summary.length >= currentLen * 0.8) {
+                    const longEnough = summaryResult.summary.length >= currentLen * 0.8;
+                    // GUARDRAIL: the summary is applied directly with no diff review, so it
+                    // gets the strictest checks — skip entirely if it introduces any number/metric
+                    // (years of experience, %, $, team size, etc.) or any unconfirmed keyword
+                    // that wasn't already present in the original summary.
+                    const fabricatedMetric = introducesNewNumbers(summaryEl.textContent, summaryResult.summary);
+                    const smuggledKeyword = introducesUnauthorizedKeyword(summaryEl.textContent, summaryResult.summary, unauthorizedKeywords);
+                    if (longEnough && !fabricatedMetric && !smuggledKeyword) {
                         summaryEl.textContent = summaryResult.summary;
+                    } else if (fabricatedMetric || smuggledKeyword) {
+                        console.warn('Summary enhancement skipped — introduced a number/metric or an unconfirmed keyword not in the original summary.');
                     }
                 }
             } catch (e) {
@@ -956,11 +1187,14 @@ async function optimizeResumeWithAI(jobDesc, keywords, analysis) {
             }
         }
 
-        // Sprint 3: Surface still-missing keywords directly in skills section
-        // (runs after diffs are collected, before final analysis)
+        // Surface confirmed-but-still-unplaced keywords directly in the skills section.
+        // GUARDRAIL: only ever adds keywords from `missing` (the user-confirmed set) —
+        // never the full postAnalysis.missingKeywords, which would include unconfirmed,
+        // possibly-untrue skills the user never vouched for.
         const postAnalysis = await analyzeKeywordIntegration(keywords);
-        if (postAnalysis.missingKeywords.length > 0) {
-            addKeywordsToSkillsSection(postAnalysis.missingKeywords);
+        const confirmedStillMissing = postAnalysis.missingKeywords.filter(k => missing.includes(k));
+        if (confirmedStillMissing.length > 0) {
+            addKeywordsToSkillsSection(confirmedStillMissing);
         }
 
         highlightExistingKeywords(keywords);
@@ -1222,7 +1456,7 @@ async function readPDFFile(file) {
 
     const prompt = `Extract structured resume/CV data from these images. Return ONLY valid JSON with this structure:
 {"name":"","title":"","summary":"","contact":{"email":"","phone":"","location":"","linkedin":"","website":"","portfolio":""},"skills":{"categories":[{"name":"","items":[]}]},"experience":[{"title":"","company":"","date":"","bullets":[]}],"education":[{"degree":"","institution":"","date":"","details":[]}],"languages":[],"references":[{"name":"","title":"","email":"","phone":""}],"certifications":[{"name":"","issuer":"","date":""}],"achievements":[],"projects":[{"name":"","description":"","bullets":[]}]}
-CRITICAL: Use EXACT text. Return valid JSON only, no markdown.`;
+CRITICAL: Use EXACT text as it appears in the image. You NEVER infer, guess, or fabricate information — only transcribe text that is visibly present. If a field cannot be read from the image, leave it as an empty string or empty array. Return valid JSON only, no markdown.`;
 
     const messageContent = [{ type: 'text', text: prompt }];
     pageImages.forEach(b64 => messageContent.push({ type: 'image_url', image_url: { url: `data:image/png;base64,${b64}` } }));
@@ -2018,7 +2252,7 @@ function addKeywordsToSkillsSection(missingKeywords) {
 
 // Sprint 4: Diff view — collect pending diffs, render review panel, apply on accept
 // pendingDiffs is declared at module scope above
-function collectDiffs(sectionQueue, sectionResults) {
+function collectDiffs(sectionQueue, sectionResults, unauthorizedKeywords = []) {
     const diffs = [];
     sectionQueue.forEach((section, idx) => {
         const result = sectionResults[idx];
@@ -2026,7 +2260,13 @@ function collectDiffs(sectionQueue, sectionResults) {
         const label = `${section.jobTitle}${section.company ? ' @ ' + section.company : ''}`;
         result.enhancements.forEach(e => {
             if (e.original && e.enhanced && e.original.trim() !== e.enhanced.trim()) {
-                diffs.push({ sectionId: section.sectionId, ul: section.ul, original: e.original, enhanced: e.enhanced, sectionLabel: label });
+                diffs.push({
+                    sectionId: section.sectionId, ul: section.ul, original: e.original, enhanced: e.enhanced, sectionLabel: label,
+                    // GUARDRAIL: flag invented numbers/metrics or smuggled unconfirmed keywords —
+                    // excluded from Accept All, requires individual review
+                    flagged: introducesNewNumbers(e.original, e.enhanced) ||
+                             introducesUnauthorizedKeyword(e.original, e.enhanced, unauthorizedKeywords)
+                });
             }
         });
     });
@@ -2041,10 +2281,11 @@ function renderDiffView(diffs) {
     container.innerHTML = '';
     diffs.forEach((diff, idx) => {
         const item = document.createElement('div');
-        item.className = 'diff-item';
+        item.className = diff.flagged ? 'diff-item flagged' : 'diff-item';
         item.dataset.idx = idx;
         item.innerHTML = `
             <div class="diff-section-label">${escapeHTML(diff.sectionLabel)}</div>
+            ${diff.flagged ? '<div class="diff-flag-badge">⚠ Contains a number/metric not in your original text — verify before accepting</div>' : ''}
             <div class="diff-original">&#x2212; ${escapeHTML(diff.original)}</div>
             <div class="diff-enhanced">&#x2b; ${escapeHTML(diff.enhanced)}</div>
             <div class="diff-item-actions">
@@ -2138,14 +2379,23 @@ document.getElementById('diff-items-container').addEventListener('click', functi
 document.getElementById('diff-accept-all').addEventListener('click', async function() {
     const btn = this;
     const rejectBtn = document.getElementById('diff-reject-all');
-    const pending = pendingDiffs
+    const unresolved = pendingDiffs
         .map((_, idx) => idx)
         .filter(idx => {
             const item = document.querySelector(`.diff-item[data-idx="${idx}"]`);
             return item && !item.classList.contains('accepted') && !item.classList.contains('rejected');
         });
+    // GUARDRAIL: never bulk-accept a diff that introduced a new number/metric —
+    // those require individual review via the per-item Accept/Reject buttons.
+    const pending = unresolved.filter(idx => !pendingDiffs[idx].flagged);
+    const flaggedRemaining = unresolved.filter(idx => pendingDiffs[idx].flagged);
 
-    if (pending.length === 0) return;
+    if (pending.length === 0) {
+        if (flaggedRemaining.length > 0) {
+            showMessage(`${flaggedRemaining.length} suggestion(s) contain new numbers/metrics and need individual review — see items marked ⚠ above.`, 'info');
+        }
+        return;
+    }
 
     // Disable buttons + show progress
     btn.disabled = true;
@@ -2166,11 +2416,16 @@ document.getElementById('diff-accept-all').addEventListener('click', async funct
         await new Promise(resolve => requestAnimationFrame(resolve));
     }
 
-    btn.textContent = `✓ All Applied`;
+    btn.textContent = flaggedRemaining.length > 0
+        ? `✓ Applied — ${flaggedRemaining.length} flagged item(s) still need review`
+        : `✓ All Applied`;
     btn.disabled = false;
     rejectBtn.disabled = false;
 
-    await finaliseDiffs();
+    // Only collapse the panel once every diff — including flagged ones — is resolved.
+    if (flaggedRemaining.length === 0) {
+        await finaliseDiffs();
+    }
 });
 
 document.getElementById('diff-reject-all').addEventListener('click', async function() {
