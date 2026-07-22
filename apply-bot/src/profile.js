@@ -2,7 +2,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from './config.js';
 
-const PROFILE_PATH = path.join(ROOT, 'profile/master-profile.json');
+// Overridable so tests never touch the real profile. This file is written by
+// setProfileValue/confirmSkill; without an override, any profile-writing test hits
+// the real (gitignored, un-recoverable) master profile. Mirrors PATHS.db's
+// APPLY_BOT_DB override, which exists for exactly the same reason.
+const PROFILE_PATH = process.env.APPLY_BOT_PROFILE || path.join(ROOT, 'profile/master-profile.json');
 const EXAMPLE_PATH = path.join(ROOT, 'profile.example.json');
 
 let cache = null;
@@ -58,6 +62,18 @@ const ALIASES = {
 export function normaliseSkill(s) {
   const k = String(s).toLowerCase().replace(/[^a-z0-9+#. ]/g, ' ').replace(/\s+/g, ' ').trim();
   return ALIASES[k] || k;
+}
+
+/**
+ * Names of every confirmed skill — the resume-tailoring allowlist. The web
+ * optimiser is seeded with these so it only ever weaves a skill into the resume
+ * that the candidate has vouched for here. Years are irrelevant for this purpose,
+ * so a skill confirmed without a years value still counts.
+ */
+export function confirmedSkillNames(profile) {
+  return Object.entries(profile.skills || {})
+    .filter(([n, m]) => !n.startsWith('_') && m && typeof m === 'object' && m.confirmed)
+    .map(([n]) => n);
 }
 
 /** Work authorisation for a country code. Only ever from the profile. */
@@ -139,10 +155,36 @@ export function setProfileValue(dotPath, value, { confirm = true } = {}) {
   return { path: dotPath, value: node[leaf], remaining: unconfirmed(p).length };
 }
 
+/**
+ * Confirm a skill straight from a dashboard suggestion — creating the entry if it
+ * doesn't exist yet. Years are optional: a skill can be true for the resume without
+ * the candidate committing to a number, and a null-years skill still parks any
+ * years-of-experience question (skillYears requires a number), so this can never
+ * make the bot fabricate a duration.
+ */
+export function confirmSkill(name, years = null) {
+  const clean = String(name).trim();
+  if (!clean) throw new Error('a skill name is required');
+  const p = loadProfile({ fresh: true });
+  p.skills = p.skills || {};
+
+  // Reuse an existing entry's casing if this skill is already listed.
+  const want = normaliseSkill(clean);
+  const existingKey = Object.keys(p.skills).find(k => !k.startsWith('_') && normaliseSkill(k) === want);
+  const key = existingKey || clean;
+
+  const yrs = (years === '' || years == null) ? null : Number(years);
+  p.skills[key] = { years: Number.isFinite(yrs) ? yrs : null, confirmed: true };
+
+  fs.writeFileSync(PROFILE_PATH, JSON.stringify(p, null, 2) + '\n');
+  cache = p;
+  return { skill: key, years: p.skills[key].years };
+}
+
 export function summariseForLLM(profile) {
   const skills = Object.entries(profile.skills || {})
     .filter(([n, m]) => !n.startsWith('_') && m?.confirmed)
-    .map(([n, m]) => `${n} (${m.years}y)`);
+    .map(([n, m]) => typeof m.years === 'number' ? `${n} (${m.years}y)` : n);
   return [
     `Name: ${profile.identity?.firstName} ${profile.identity?.lastName}`,
     `Location: ${profile.identity?.city}, ${profile.identity?.country}`,

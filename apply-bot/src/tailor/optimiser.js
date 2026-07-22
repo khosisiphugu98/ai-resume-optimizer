@@ -5,7 +5,8 @@ import { getContext, attachScreencast, stopRequested, humanDelay } from '../brow
 import { db, updateJob } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { extractPdfText, validateResumePdf } from '../../scripts/extract-text.mjs';
-import { loadProfile } from '../profile.js';
+import { loadProfile, confirmedSkillNames } from '../profile.js';
+import { recordSkillSuggestions } from '../db.js';
 
 export const SEED_RESUME = path.join(ROOT, 'seed/Khosi_Siphugu_Resume (Marketing Analyst) (1).pdf');
 
@@ -126,22 +127,41 @@ export async function tailorForJob(page, job, profile) {
   }
 
   await page.fill(SEL.jd, job.jd_text || '');
+  await page.evaluate(() => { window.__optimizeDone = null; });
   await page.click(SEL.optimise);
 
-  // The optimiser fires parallel per-section AI calls; 3 minutes is generous but
-  // a stall here otherwise wedges the whole pipeline.
-  const appeared = await page.waitForSelector(SEL.diffPanel, { state: 'visible', timeout: 180_000 })
-    .then(() => true).catch(() => false);
+  // Wait on the optimiser's own completion signal, not the diff panel. The skill
+  // confirmation gate now runs first and, in bot mode, confirms only the skills the
+  // master profile vouches for — so a run with nothing to add legitimately produces
+  // NO diff panel. Racing the panel would time out on exactly those (safe) runs.
+  // The optimiser fires parallel per-section AI calls, so 3 minutes is generous.
+  await page.waitForFunction(() => window.__optimizeDone != null, { timeout: 180_000 })
+    .catch(() => { throw new Error('Optimisation timed out — no completion signal from the optimiser'); });
 
-  if (!appeared) {
+  const done = await page.evaluate(() => window.__optimizeDone);
+  if (!done.ok) {
     const err = await optimiserError(page);
-    throw new Error(err ? `Optimisation failed: ${err}` : 'Optimisation timed out with no diff panel');
+    throw new Error(`Optimisation failed: ${done.error || err || 'unknown error'}`);
   }
 
-  await page.click(SEL.acceptAll);
-  await page.waitForSelector(SEL.diffPanel, { state: 'hidden', timeout: 60_000 }).catch(() => {});
+  // Apply the reviewed changes. "Accept All" deliberately excludes diffs the
+  // fabrication guard flagged (invented metrics / smuggled unconfirmed skills), so
+  // those are simply dropped rather than shipped — the safe direction for an
+  // unattended run. Skip the click entirely when there is nothing to apply.
+  if (done.diffCount > 0) {
+    await page.click(SEL.acceptAll);
+    // The panel only auto-collapses when every diff is resolved; flagged ones stay
+    // pending by design, so wait on the button's applied state instead of the panel.
+    await page.waitForFunction(() => {
+      const b = document.getElementById('diff-accept-all');
+      return b && !b.disabled && /✓/.test(b.textContent || '');
+    }, { timeout: 60_000 }).catch(() => {});
+  }
 
-  const matchScore = await page.textContent(SEL.matchScore).catch(() => null);
+  const unconfirmedSkills = Array.isArray(done.unconfirmedSkills) ? done.unconfirmedSkills : [];
+  const matchScore = done.matchScore != null
+    ? String(done.matchScore)
+    : await page.textContent(SEL.matchScore).catch(() => null);
 
   // Highlights are a review aid, never something to send to an employer.
   //
@@ -223,6 +243,7 @@ export async function tailorForJob(page, job, profile) {
     matchScore: matchScore ? parseInt(matchScore, 10) : null,
     chars: check.chars,
     skillsFound: check.skillsFound.length,
+    unconfirmedSkills,
   };
 }
 
@@ -232,7 +253,20 @@ export async function runTailoring({ limit = 10 } = {}) {
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
 
+  // Seed the optimiser's skill-confirmation gate. __AUTO_CONFIRM_SKILLS__ makes the
+  // gate resolve non-interactively (no modal to hang on), and it confirms ONLY skills
+  // present in this allowlist — the profile's confirmed skills. Anything the job wants
+  // that isn't vouched for here is skipped and reported back as a suggestion, never
+  // written into the resume. addInitScript re-runs on every navigation, so it is in
+  // place before resume.js executes on each page load.
+  const allowlist = confirmedSkillNames(profile);
+  await page.addInitScript(skills => {
+    window.__AUTO_CONFIRM_SKILLS__ = true;
+    try { localStorage.setItem('confirmedSkills', JSON.stringify(skills)); } catch {}
+  }, allowlist);
+
   await seedDefaultResume(page);
+  emit({ stage: 'tailor', message: `Auto-confirm allowlist seeded — ${allowlist.length} confirmed skill(s)` });
 
   const jobs = db.prepare(
     `SELECT * FROM jobs WHERE status = 'scored' ORDER BY fit_score DESC, id LIMIT ?`
@@ -248,6 +282,15 @@ export async function runTailoring({ limit = 10 } = {}) {
       const r = await tailorForJob(page, job, profile);
       updateJob(job.id, { status: 'tailored', resume_path: r.path });
       done++;
+
+      // Skills this job asked for that the candidate hasn't vouched for. They were
+      // NOT added to the resume; they surface in the dashboard so the candidate can
+      // confirm the ones that are actually true, which then flow into future runs.
+      const suggested = recordSkillSuggestions(r.unconfirmedSkills || []);
+      if (suggested > 0) {
+        emit({ jobId: job.id, stage: 'tailor', message: `${suggested} skill suggestion(s) queued for your review` });
+      }
+
       emit({
         jobId: job.id, stage: 'tailor',
         message: `Tailored → ${path.basename(r.path)} (${r.chars} chars of text${r.matchScore ? `, match ${r.matchScore}` : ''})`,
