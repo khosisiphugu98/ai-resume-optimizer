@@ -65,18 +65,35 @@ export const SEARCHES = [
 ];
 
 // Seniority band: analyst/associate/mid. Above-band applications waste budget.
-export const REJECT_TITLE = /\b(senior|snr|lead|principal|staff|head of|director|vp|chief|manager of|c[teofm]o)\b/i;
-
-// §2.3 — the highest-leverage filter. Applied before any LLM spend.
-export const AUTH_BLOCKERS = [
-  /must be (legally )?(authorized|authorised|eligible) to work in the (us|u\.s\.|united states|uk|united kingdom|eu)/i,
-  /no (visa )?sponsorship/i,
-  /(we are )?unable to sponsor/i,
-  /without (the need for )?sponsorship/i,
-  /must (be|reside|live) (based )?in the (us|united states|uk|united kingdom)/i,
-  /us[- ]based (candidates )?only/i,
-  /work authorization in the (us|united states) is required/i,
+// The word list is the editable source of truth (see src/reject-criteria.js —
+// the operator tunes it from the Rejected column). REJECT_TITLE is the compiled
+// default kept for reference and any caller that wants the untouched baseline.
+export const SENIORITY_TERMS = [
+  'senior', 'snr', 'lead', 'principal', 'staff', 'head of',
+  'director', 'vp', 'chief', 'manager of', 'cto', 'ceo', 'cfo', 'coo', 'cmo',
 ];
+export const REJECT_TITLE = new RegExp(`\\b(${SENIORITY_TERMS.join('|')})\\b`, 'i');
+
+// Title families worth an LLM score — a posting outside these is off-target and
+// gated for free before any spend (see score/index.js heuristicScore).
+export const ROLE_FAMILY_TERMS = [
+  'analyst', 'analytics', 'growth', 'marketing', 'adops', 'ad operations',
+  'campaign', 'gtm', 'martech', 'revenue operations', 'programmatic', 'data',
+];
+
+// §2.3 — the highest-leverage filter. Applied before any LLM spend. Each default
+// carries a plain-language label so the criteria widget can list it in words;
+// `source` is the regex the matcher actually runs.
+export const AUTH_BLOCKER_DEFS = [
+  { label: 'Must be authorised to work in the US/UK/EU', source: 'must be (legally )?(authorized|authorised|eligible) to work in the (us|u\\.s\\.|united states|uk|united kingdom|eu)' },
+  { label: 'No visa sponsorship', source: 'no (visa )?sponsorship' },
+  { label: 'Unable to sponsor', source: '(we are )?unable to sponsor' },
+  { label: 'Without sponsorship', source: 'without (the need for )?sponsorship' },
+  { label: 'Must be based/reside in the US/UK', source: 'must (be|reside|live) (based )?in the (us|united states|uk|united kingdom)' },
+  { label: 'US-based candidates only', source: 'us[- ]based (candidates )?only' },
+  { label: 'US work authorisation required', source: 'work authorization in the (us|united states) is required' },
+];
+export const AUTH_BLOCKERS = AUTH_BLOCKER_DEFS.map(d => new RegExp(d.source, 'i'));
 
 export const ZA_LOCATIONS = /south africa|johannesburg|cape town|durban|pretoria|sandton|gauteng|western cape|midrand|centurion/i;
 export const OPEN_REMOTE = /\b(emea|africa|worldwide|anywhere|globally|remote[- ]first|any (time)?zone)\b/i;

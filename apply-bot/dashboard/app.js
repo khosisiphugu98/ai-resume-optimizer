@@ -27,7 +27,11 @@ async function refreshBoard() {
 
   $('#board').innerHTML = COLUMNS.map(([key, label]) => {
     const jobs = byStatus[key] || [];
-    return `<div class="col"><h2>${label}<span>${jobs.length}</span></h2>${
+    // The Rejected column carries the editor for the criteria that fill it.
+    const head = key === 'rejected'
+      ? `<span class="hleft">${label}<button class="colcrit" title="View and edit rejection criteria">criteria</button></span>`
+      : label;
+    return `<div class="col"><h2>${head}<span>${jobs.length}</span></h2>${
       jobs.slice(0, 60).map(cardHtml).join('') || '<div style="color:#56606d;font-size:11px;padding:6px 2px">—</div>'
     }</div>`;
   }).join('');
@@ -519,6 +523,82 @@ document.addEventListener('click', async e => {
   })).json();
   if (r.error) return addEvent({ ts: new Date().toISOString(), stage: 'score', level: 'warn', message: r.error });
   refreshCalibration();
+});
+
+// --- Rejection criteria editor (opens from the Rejected column) --------------
+
+function critChip(group, e) {
+  if (e.source === 'default' && !e.active) {
+    return `<span class="crit-chip off" title="switched off — click ＋ to restore">${esc(e.label)}` +
+      `<button data-crit="add" data-group="${group}" data-term="${esc(e.term)}" title="restore">＋</button></span>`;
+  }
+  const cls = e.source === 'custom' ? 'crit-chip custom' : 'crit-chip';
+  const title = e.source === 'custom' ? 'your term — remove' : 'switch off';
+  return `<span class="${cls}">${esc(e.label)}` +
+    `<button data-crit="remove" data-group="${group}" data-term="${esc(e.term)}" title="${title}">×</button></span>`;
+}
+
+function critGroup(g) {
+  return `<div class="crit-grp" data-group="${g.key}">
+    <h4>${esc(g.label)}${g.edited ? ` <button class="crit-reset" data-crit="reset">reset to defaults</button>` : ''}</h4>
+    <p>${esc(g.hint)}</p>
+    <div class="crit-chips">${g.entries.map(e => critChip(g.key, e)).join('') || '<span class="crit-def">none — this gate is off</span>'}</div>
+    <form class="crit-add" data-group="${g.key}">
+      <input name="term" placeholder="Add a term…" autocomplete="off">
+      <button type="submit">Add</button>
+    </form>
+  </div>`;
+}
+
+async function renderCriteria() {
+  const d = await (await fetch('/api/reject-criteria')).json();
+  $('#criteriaBody').innerHTML = `
+    <h2>Rejection criteria</h2>
+    <p class="crit-intro">The gates that move a job to <b>Rejected</b>. Edits apply on the next
+      discovery and scoring run — they don't re-judge jobs already on the board.</p>
+    <div class="crit-grp">
+      <h4>Fit score threshold</h4>
+      <p>A scored job below this number is rejected. Everything below runs <em>before</em> scoring, for free.</p>
+      <div class="crit-thr">
+        <input id="critThr" type="number" min="0" max="100" value="${d.threshold}">
+        <button data-crit="threshold">Set</button>
+        <span class="crit-def">default ${d.defaultThreshold}</span>
+      </div>
+    </div>
+    ${d.groups.map(critGroup).join('')}`;
+}
+
+async function postCriteria(payload) {
+  const r = await (await fetch('/api/reject-criteria', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })).json();
+  if (r.error) {
+    addEvent({ ts: new Date().toISOString(), stage: 'score', level: 'warn', message: r.error });
+    return;
+  }
+  renderCriteria();
+}
+
+document.addEventListener('click', e => {
+  if (e.target.closest('.colcrit')) { renderCriteria(); $('#criteria').classList.add('open'); return; }
+  if (e.target.id === 'criteriaClose') { $('#criteria').classList.remove('open'); return; }
+
+  const btn = e.target.closest('#criteriaBody [data-crit]');
+  if (!btn) return;
+  const action = btn.dataset.crit;
+  if (action === 'threshold') return void postCriteria({ action, value: Number($('#critThr').value) });
+  const group = btn.dataset.group || btn.closest('.crit-grp')?.dataset.group;
+  if (action === 'reset') return void postCriteria({ action, group });
+  postCriteria({ action, group, term: btn.dataset.term });
+});
+
+document.addEventListener('submit', e => {
+  const f = e.target.closest('.crit-add');
+  if (!f) return;
+  e.preventDefault();
+  const term = f.term.value.trim();
+  if (term) postCriteria({ action: 'add', group: f.dataset.group, term });
 });
 
 // Live browser frames.

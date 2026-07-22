@@ -2,6 +2,7 @@ import { db, updateJob, getSetting, setSetting, bumpRate, todayRates } from '../
 import { emit, emitBoard } from '../bus.js';
 import { loadProfile, summariseForLLM, normaliseSkill } from '../profile.js';
 import { callLLM, hasKey } from '../llm.js';
+import { roleFamiliesRe } from '../reject-criteria.js';
 
 /** The number that was picked out of the air. Now only the default (§8.4). */
 export const THRESHOLD = 65;
@@ -72,9 +73,9 @@ export function heuristicScore(job, profile) {
   const hits = skills.filter(s => jd.includes(s));
   const overlap = skills.length ? hits.length / skills.length : 0;
 
-  // Title relevance against the tiers the searches target.
-  const titleRelevant = /analyst|analytics|growth|marketing|adops|ad operations|campaign|gtm|martech|revenue operations|programmatic|data/i
-    .test(job.title || '');
+  // Title relevance against the tiers the searches target. The families are
+  // operator-editable from the Rejected column (src/reject-criteria.js).
+  const titleRelevant = roleFamiliesRe().test(job.title || '');
 
   return {
     overlap,

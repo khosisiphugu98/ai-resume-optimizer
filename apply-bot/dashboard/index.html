@@ -322,6 +322,59 @@
   .set .msg { font-size: 11px; margin-top: 7px; }
   .set .msg.ok { color: var(--ok); } .set .msg.err { color: var(--err); }
   .set code { background: #0d1117; border: 1px solid var(--line); border-radius: 3px; padding: 0 4px; font-size: 10px; }
+
+  /* The Rejected column owns the criteria that fill it, so its editor opens from
+     the column header — a quiet link, not a button competing with the cards. */
+  .col h2 .colcrit {
+    background: none; border: 0; color: var(--faint); cursor: pointer;
+    font: inherit; font-size: 9px; text-transform: uppercase; letter-spacing: .6px;
+    text-decoration: underline; text-underline-offset: 2px; padding: 0; margin-left: 6px;
+  }
+  .col h2 .colcrit:hover { color: var(--accent); }
+  .col h2 .hleft { display: flex; align-items: center; }
+
+  /* Criteria editor — same right-drawer language as Settings. */
+  #criteria {
+    position: fixed; inset: 0 0 0 auto; width: 480px; background: var(--panel);
+    border-left: 1px solid var(--line); padding: 18px; overflow-y: auto;
+    transform: translateX(100%); transition: transform .18s ease; z-index: 30;
+  }
+  #criteria.open { transform: none; }
+  #criteriaClose { position: absolute; top: 14px; right: 16px; background: none; border: 0; color: var(--dim); font-size: 20px; cursor: pointer; }
+  #criteria h2 { font-size: 15px; margin: 0 0 4px; }
+  .crit-intro { color: var(--dim); font-size: 11px; line-height: 1.55; margin: 0 0 6px; }
+  .crit-grp { border-top: 1px solid var(--line); padding: 14px 0; }
+  .crit-grp:last-child { padding-bottom: 4px; }
+  .crit-grp h4 { margin: 0 0 3px; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  .crit-grp p { margin: 0 0 9px; color: var(--dim); font-size: 11px; line-height: 1.5; }
+  .crit-reset { background: none; border: 0; color: var(--faint); cursor: pointer; font: inherit; font-size: 10px; text-decoration: underline; padding: 0; }
+  .crit-reset:hover { color: var(--accent); }
+  .crit-thr { display: flex; gap: 6px; align-items: center; }
+  .crit-thr input {
+    width: 62px; background: #0d1117; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--ink); padding: 4px 7px; font: inherit; font-size: 12px;
+  }
+  .crit-thr button, .crit-add button {
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 5px; padding: 4px 11px; cursor: pointer; font: inherit; font-size: 11px; flex: 0 0 auto;
+  }
+  .crit-thr button:hover, .crit-add button:hover { border-color: var(--accent); }
+  .crit-def { color: var(--faint); font-size: 10px; }
+  .crit-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 8px; }
+  .crit-chip {
+    display: inline-flex; align-items: center; gap: 2px; font-size: 11px;
+    padding: 2px 4px 2px 8px; border-radius: 20px; border: 1px solid var(--line); color: var(--ink);
+  }
+  .crit-chip.custom { border-color: #23472b; color: var(--ok); }
+  .crit-chip.off { color: var(--faint); border-style: dashed; text-decoration: line-through; }
+  .crit-chip button { background: none; border: 0; color: inherit; cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; opacity: .6; }
+  .crit-chip button:hover { opacity: 1; }
+  .crit-chip.off button { text-decoration: none; opacity: .8; }
+  .crit-add { display: flex; gap: 5px; }
+  .crit-add input {
+    flex: 1; min-width: 0; background: #0d1117; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--ink); padding: 5px 8px; font: inherit; font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -432,6 +485,7 @@
 
 <div id="drawer"><button id="close">×</button><div id="drawerBody"></div></div>
 <div id="settings"><button id="settingsClose">×</button><div id="settingsBody"></div></div>
+<div id="criteria"><button id="criteriaClose">×</button><div id="criteriaBody"></div></div>
 <div id="lightbox"><img alt=""></div>
 <script src="app.js"></script>
 </body>

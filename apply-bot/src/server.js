@@ -20,6 +20,7 @@ import * as gmail from './email/gmail.js';
 import { applySecretsToEnv, setSecret, secretsStatus } from './secrets.js';
 import { calibrationReport, buildFewShot } from './score/calibrate.js';
 import { currentThreshold, setThreshold, THRESHOLD, AUDIT } from './score/index.js';
+import { criteriaForUi, addCriterion, removeCriterion, resetGroup } from './reject-criteria.js';
 
 applySecretsToEnv();
 
@@ -132,6 +133,14 @@ const routes = {
     defaultThreshold: THRESHOLD,
     auditRate: AUDIT.rate,
     auditCap: AUDIT.dailyCap,
+  }),
+
+  // Everything the Rejected column's criteria widget renders. The threshold is
+  // owned by score/index.js and merged in here so the widget shows one picture.
+  '/api/reject-criteria': (req, res) => json(res, {
+    threshold: currentThreshold(),
+    defaultThreshold: THRESHOLD,
+    groups: criteriaForUi(),
   }),
 
   '/api/job': (req, res, url) => {
@@ -484,6 +493,34 @@ const server = http.createServer(async (req, res) => {
     }
     emitBoard();
     return json(res, { threshold: currentThreshold() });
+  }
+
+  // Add, drop or reset a rejection criterion, or move the fit threshold — the
+  // whole Rejected-column widget posts here. Everything takes effect on the next
+  // discovery/scoring run; nothing re-judges jobs already on the board.
+  if (url.pathname === '/api/reject-criteria' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { action, group, term, value } = JSON.parse(body || '{}');
+    try {
+      if (action === 'add') {
+        const t = addCriterion(group, term);
+        emit({ stage: 'score', message: `Reject criterion added — "${t}" (${group}); applies on the next run` });
+      } else if (action === 'remove') {
+        const t = removeCriterion(group, term);
+        emit({ stage: 'score', message: `Reject criterion removed — "${t}" (${group}); applies on the next run` });
+      } else if (action === 'reset') {
+        resetGroup(group);
+        emit({ stage: 'score', message: `Reject criteria reset to defaults — ${group}` });
+      } else if (action === 'threshold') {
+        const n = setThreshold(value);
+        emit({ stage: 'score', message: `Fit threshold set to ${n} — takes effect on the next scoring run` });
+      } else {
+        return json(res, { error: 'action must be add, remove, reset or threshold' }, 400);
+      }
+    } catch (err) {
+      return json(res, { error: err.message }, 400);
+    }
+    return json(res, { threshold: currentThreshold(), defaultThreshold: THRESHOLD, groups: criteriaForUi() });
   }
 
   // Edit the search list. Takes effect on the next discovery run — nothing here

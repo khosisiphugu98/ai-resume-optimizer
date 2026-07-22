@@ -1,7 +1,7 @@
 import {
-  SELECTORS, LINKEDIN, CAPS, REJECT_TITLE,
-  AUTH_BLOCKERS, ZA_LOCATIONS, OPEN_REMOTE,
+  SELECTORS, LINKEDIN, CAPS, ZA_LOCATIONS, OPEN_REMOTE,
 } from '../config.js';
+import { titleRejectRe, authBlockerMatch } from '../reject-criteria.js';
 import {
   getContext, attachScreencast, assertNoChallenge, stopRequested,
   humanDelay, textOf, ChallengeDetected,
@@ -26,15 +26,14 @@ function buildSearchUrl({ keywords, location, remote, easyApplyOnly }) {
 
 /** Cheap pre-filter — runs before any LLM spend. Returns a reject reason or null. */
 export function preFilter({ title, location, jd }) {
-  if (title && REJECT_TITLE.test(title)) return 'seniority: above band';
+  if (title && titleRejectRe().test(title)) return 'seniority: above band';
 
   const hay = `${location || ''} ${jd || ''}`;
   const inZA = ZA_LOCATIONS.test(location || '') || ZA_LOCATIONS.test(jd || '');
   if (!inZA) {
-    const blocker = AUTH_BLOCKERS.find(re => re.test(hay));
     // The single highest-leverage filter (§2.3): a US-only remote role is not a
     // near-miss, it is impossible, and it would otherwise eat most of the budget.
-    if (blocker && !OPEN_REMOTE.test(hay)) return 'work authorisation: not open to South Africa';
+    if (authBlockerMatch(hay) && !OPEN_REMOTE.test(hay)) return 'work authorisation: not open to South Africa';
   }
   return null;
 }
