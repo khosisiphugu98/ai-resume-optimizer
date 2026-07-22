@@ -630,6 +630,35 @@ export function unblockJob(id) {
   return { job, restoredTo: to };
 }
 
+/**
+ * Reverse a rejection. Puts a job back as far along as its data has earned, so it
+ * resumes rather than restarts:
+ *   - a fit-threshold rejection → 'scored'. This is the operator overriding a soft
+ *     gate: the job scored below the line, and re-scoring would only reproduce that,
+ *     so it resumes at 'scored' and proceeds.
+ *   - anything else → back into the pipeline for a fresh look: 'enriched' if its JD
+ *     was fetched, otherwise 'discovered' to fetch it first. A hard blocker (a
+ *     missing qualification, a work-authorisation wall) is re-evaluated on the next
+ *     scoring run rather than bypassed straight into the auto-apply path — it too
+ *     carries a fit_score, so it must not be mistaken for a threshold override.
+ * A job whose company is still blocked is refused: it would otherwise slip past the
+ * veto, since scoring and apply don't re-check the blocklist. Unblock the company
+ * instead. Returns null if the job isn't rejected.
+ */
+export function unrejectJob(id) {
+  const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(id);
+  if (!job || job.status !== 'rejected') return null;
+  if (isCompanyBlocked(job.company)) {
+    throw new Error(`${job.company} is blocked — unblock the company to consider its jobs again`);
+  }
+  const fitThreshold = /^fit\s/.test(job.reject_reason || '');   // "fit 40 < 65" — score/index.js
+  const to = fitThreshold ? 'scored'
+           : job.jd_text ? 'enriched'
+           : 'discovered';
+  db.prepare(`UPDATE jobs SET status = ?, reject_reason = NULL WHERE id = ?`).run(to, id);
+  return { job, restoredTo: to };
+}
+
 /** Blocks the company and sweeps every live job already on the board for it. */
 export function blockCompany(company, reason = 'blocked by you') {
   const norm = normCompany(company);

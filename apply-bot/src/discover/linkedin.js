@@ -143,8 +143,12 @@ export async function runDiscovery({ searches = activeSearches(), maxPerSearch =
       }
 
       for (const card of cards.slice(0, maxPerSearch)) {
-        const reason = preFilter({ title: card.title, location: card.location })
-          || (isCompanyBlocked(card.company) ? `blocked company: ${card.company}` : null);
+        // Only an explicit veto turns a job away at discovery. Seniority and
+        // work-authorisation are deferred to enrich (recordEnrichment), where the
+        // real title, location and full JD are known — a search card carries a
+        // title and often nothing else, which is too thin to reject on. A blocked
+        // company is the one exception: it is your decision, not a heuristic.
+        const reason = isCompanyBlocked(card.company) ? `blocked company: ${card.company}` : null;
         const id = upsertJob({ ...card, tier: search.tier, search_keywords: search.keywords });
         if (!id) continue;                       // already known — dedupe on (source, external_id)
 
@@ -173,7 +177,8 @@ export async function runDiscovery({ searches = activeSearches(), maxPerSearch =
   emit({
     stage: 'discover',
     level: selectorMisses === searches.length ? 'error' : 'info',
-    message: `Discovery complete — ${found} cards seen, ${kept} new kept, ${rejected} pre-filtered out`,
+    message: `Discovery complete — ${found} cards seen, ${kept} new kept, ${rejected} from blocked companies` +
+      ` (seniority and work-authorisation are judged at enrich now, with the full JD)`,
   });
   emitBoard();
   return { found, kept, rejected };

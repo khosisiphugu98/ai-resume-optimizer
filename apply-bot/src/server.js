@@ -6,7 +6,7 @@ import { ROOT, SERVER, CAPS, PATHS } from './config.js';
 import {
   boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, releaseAnswered,
   allSearches, addSearch, setSearchEnabled, deleteSearch,
-  blockJob, unblockJob, blockCompany, unblockCompany, blockedCompanies,
+  blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, blockedCompanies,
   pendingOutcomes, setOutcome, autoTimeoutOutcomes, outcomeSummary,
   OUTCOME_STATES, OUTCOME_TIMEOUT_DAYS,
   listSkillSuggestions, dismissSkillSuggestion, removeSkillSuggestion,
@@ -528,6 +528,10 @@ const server = http.createServer(async (req, res) => {
         const r = unblockJob(Number(id));
         if (!r) return json(res, { error: 'not blocked' }, 400);
         emit({ jobId: r.job.id, stage: 'control', message: `Unblocked — back to "${r.restoredTo}"` });
+      } else if (action === 'unreject') {
+        const r = unrejectJob(Number(id));
+        if (!r) return json(res, { error: 'not rejected' }, 400);
+        emit({ jobId: r.job.id, stage: 'control', message: `Un-rejected — ${r.job.title} @ ${r.job.company} back to "${r.restoredTo}"` });
       } else if (action === 'block-company') {
         const r = blockCompany(company, reason || 'blocked by you');
         emit({
@@ -540,7 +544,7 @@ const server = http.createServer(async (req, res) => {
         if (!unblockCompany(company)) return json(res, { error: 'not blocked' }, 400);
         emit({ stage: 'control', message: `${company} unblocked — their postings will be considered again` });
       } else {
-        return json(res, { error: 'action must be block, unblock, block-company or unblock-company' }, 400);
+        return json(res, { error: 'action must be block, unblock, unreject, block-company or unblock-company' }, 400);
       }
     } catch (err) {
       return json(res, { error: err.message }, 400);

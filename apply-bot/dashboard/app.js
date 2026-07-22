@@ -95,10 +95,12 @@ async function openDrawer(id) {
   // at the top where it can be found in a hurry rather than buried under the JD.
   const actions = job.status === 'blocked'
     ? `<button class="unblock" data-block="unblock">Unblock — put it back in "${esc(job.blocked_from || 'tailored')}"</button>`
-    : BLOCKABLE.includes(job.status)
-      ? `<button class="block" data-block="block">Block this application</button>
-         <button class="block quiet" data-block="block-company">Block ${esc(job.company) || 'this company'}</button>`
-      : '';
+    : job.status === 'rejected'
+      ? `<button class="unblock" data-block="unreject">Un-reject — put it back in the pipeline</button>`
+      : BLOCKABLE.includes(job.status)
+        ? `<button class="block" data-block="block">Block this application</button>
+           <button class="block quiet" data-block="block-company">Block ${esc(job.company) || 'this company'}</button>`
+        : '';
 
   $('#drawerBody').innerHTML = `
     <h2>${esc(job.title)}</h2>

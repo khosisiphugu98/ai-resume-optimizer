@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import {
   db, upsertJob, updateJob, queueEmail,
   allSearches, activeSearches, addSearch, setSearchEnabled, deleteSearch,
-  blockJob, unblockJob, blockCompany, unblockCompany, isCompanyBlocked, blockedCompanies,
+  blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, isCompanyBlocked, blockedCompanies,
 } from '../src/db.js';
 
 let pass = 0, fail = 0;
@@ -161,6 +161,71 @@ test('blocking twice is harmless', () => {
   blockJob(id);
   assert.equal(blockJob(id).alreadyBlocked, true);
   assert.equal(unblockJob(id).restoredTo, 'tailored');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nun-rejecting a job');
+reset();
+
+const seedReject = ({ reason = 'seniority: above band', jd = null, fit = null } = {}) => {
+  const id = seedJob({ status: 'discovered' });
+  updateJob(id, { status: 'rejected', reject_reason: reason, jd_text: jd, fit_score: fit });
+  return id;
+};
+
+test('a fit-scored rejection is an override — it goes straight back to scored', () => {
+  reset();
+  // Re-scoring would only reproduce the verdict it is being rescued from, so a job
+  // that was already read and scored resumes at 'scored' and proceeds to tailoring.
+  const id = seedReject({ reason: 'fit 40 < 65', jd: 'A real description.', fit: 40 });
+  const r = unrejectJob(id);
+  assert.equal(r.restoredTo, 'scored');
+  assert.equal(db.prepare('SELECT status FROM jobs WHERE id = ?').get(id).status, 'scored');
+});
+
+test('a hard-blocker rejection is re-evaluated, not bypassed into apply', () => {
+  reset();
+  // Scoring records a fit_score before rejecting on a blocker, so it must NOT be
+  // treated as a fit-threshold override — it goes back to 'enriched' to be re-scored
+  // (and re-blocked if the blocker still holds), never straight to 'scored'/apply.
+  const id = seedReject({ reason: 'blocker: requires US work authorization', jd: 'A real description.', fit: 55 });
+  assert.equal(unrejectJob(id).restoredTo, 'enriched');
+});
+
+test('an enriched-but-unscored rejection goes back to enriched, to be judged on merit', () => {
+  reset();
+  const id = seedReject({ reason: 'work authorisation: not open to South Africa', jd: 'US only.' });
+  assert.equal(unrejectJob(id).restoredTo, 'enriched');
+});
+
+test('a rejection from before the JD was ever fetched goes back to discovered', () => {
+  reset();
+  const id = seedReject({ reason: 'blocked company: Acme' });   // no jd, no score
+  assert.equal(unrejectJob(id).restoredTo, 'discovered');
+});
+
+test('the reject reason is cleared, so the card stops reading as rejected', () => {
+  reset();
+  const id = seedReject({ reason: 'fit 0 < 65', jd: 'x', fit: 0 });
+  unrejectJob(id);
+  assert.equal(db.prepare('SELECT reject_reason FROM jobs WHERE id = ?').get(id).reject_reason, null);
+});
+
+test('un-rejecting a still-blocked company is refused — unblock the company first', () => {
+  reset();
+  const id = seedJob({ company: 'Hire Feed', status: 'discovered' });
+  updateJob(id, { status: 'rejected', reject_reason: 'blocked company: Hire Feed' });
+  blockCompany('Hire Feed');
+  // Otherwise it would slip past the veto, since scoring and apply never re-check the blocklist.
+  assert.throws(() => unrejectJob(id), /blocked/i);
+  assert.equal(db.prepare('SELECT status FROM jobs WHERE id = ?').get(id).status, 'rejected');
+});
+
+test('a job that was not rejected is left alone', () => {
+  reset();
+  const id = seedJob({ status: 'tailored' });
+  assert.equal(unrejectJob(id), null);
+  assert.equal(unrejectJob(999999), null);
 });
 
 // ---------------------------------------------------------------------------

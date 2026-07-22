@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>apply-bot · where every bit of data lives</title>
+<style>
+  :root {
+    --bg: #0f1216; --panel: #161b22; --panel-2: #1c2430; --line: #262d38;
+    --ink: #e6edf3; --dim: #8b949e; --faint: #56606d;
+    --accent: #2f81f7; --ok: #3fb950; --warn: #d29922; --err: #f85149;
+    --sql: #7c5cff; --file: #26a69a; --mem: #d29922; --ext: #f85149;
+    --tierA: #3fb950; --tierB: #2f81f7; --tierC: #a371f7; --tierD: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: .86em;
+    background: #0d1117; border: 1px solid var(--line); border-radius: 4px; padding: 1px 5px; color: #c9d4e0; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 40px 24px 96px; }
+
+  header { margin-bottom: 8px; }
+  header h1 { font-size: 27px; margin: 0 0 6px; letter-spacing: -.4px; }
+  header p { color: var(--dim); margin: 0; max-width: 74ch; }
+  .banner {
+    margin: 22px 0 34px; padding: 12px 16px; border-radius: 8px;
+    background: linear-gradient(90deg, rgba(248,81,73,.09), rgba(248,81,73,.02));
+    border: 1px solid #4d2226; color: #f0b3b0; font-size: 13px;
+  }
+  .banner b { color: #ff9d97; }
+
+  h2.sec {
+    font-size: 12px; text-transform: uppercase; letter-spacing: 1.4px; color: var(--faint);
+    margin: 52px 0 18px; padding-bottom: 9px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  h2.sec span { color: var(--dim); text-transform: none; letter-spacing: 0; font-size: 12px; font-weight: 400; }
+
+  /* ---- pipeline ---- */
+  .flow { display: flex; flex-direction: column; gap: 10px; }
+  .stage {
+    display: grid; grid-template-columns: 150px 1fr; gap: 16px; align-items: stretch;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  }
+  .stage .head {
+    padding: 14px 16px; border-right: 1px solid var(--line); background: var(--panel-2);
+    display: flex; flex-direction: column; gap: 6px; justify-content: center;
+  }
+  .stage .head .n { font-size: 10px; color: var(--faint); letter-spacing: 1px; }
+  .stage .head .name { font-size: 15px; font-weight: 600; }
+  .stage .head .eng { font-size: 11px; color: var(--dim); }
+  .stage .body { padding: 12px 16px; display: flex; flex-direction: column; gap: 7px; }
+  .io { display: grid; grid-template-columns: 68px 1fr; gap: 10px; align-items: baseline; font-size: 12.5px; }
+  .io .lbl { font-size: 10px; letter-spacing: .5px; text-transform: uppercase; text-align: right; padding-top: 1px; }
+  .io.r .lbl { color: var(--dim); }
+  .io.w .lbl { color: var(--ok); }
+  .io .val { color: var(--ink); }
+  .io .val .m { color: var(--dim); }
+  .arrow { text-align: center; color: var(--faint); font-size: 13px; line-height: 1; margin: -4px 0; }
+
+  .pin { display: inline-block; border-radius: 4px; padding: 0 6px; font-size: 11px; font-weight: 600;
+    border: 1px solid; margin: 1px 3px 1px 0; white-space: nowrap; }
+  .pin.sql  { color: #b9a8ff; border-color: #3d3168; background: rgba(124,92,255,.10); }
+  .pin.file { color: #6fd6c8; border-color: #1f5049; background: rgba(38,166,154,.10); }
+  .pin.mem  { color: #e5c46b; border-color: #4a3a12; background: rgba(210,153,34,.10); }
+  .pin.ext  { color: #ff9d97; border-color: #4d2226; background: rgba(248,81,73,.10); }
+  .pin.evt  { color: var(--dim); border-color: var(--line); background: #0d1117; }
+
+  .changed { border-color: var(--ok) !important; box-shadow: 0 0 0 1px rgba(63,185,80,.25); }
+  .tagnew { color: var(--ok); border: 1px solid #23472b; border-radius: 20px; font-size: 10px;
+    padding: 1px 8px; letter-spacing: .3px; }
+
+  /* ---- store cards ---- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+  .store { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 0; overflow: hidden; }
+  .store .top { padding: 12px 15px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 9px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .dot.sql { background: var(--sql); } .dot.file { background: var(--file); }
+  .dot.mem { background: var(--mem); } .dot.ext { background: var(--ext); }
+  .store .top .t { font-weight: 600; font-size: 14px; }
+  .store .top .path { font-size: 11px; color: var(--faint); font-family: ui-monospace, Menlo, monospace; }
+  .store .rows { padding: 6px 0; }
+  .store .row { padding: 8px 15px; border-bottom: 1px solid #1b212b; }
+  .store .row:last-child { border-bottom: none; }
+  .store .row .k { font-family: ui-monospace, Menlo, monospace; font-size: 12px; color: #c9d4e0; }
+  .store .row .d { font-size: 12px; color: var(--dim); margin-top: 2px; }
+  .flags { margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .flag { font-size: 10px; letter-spacing: .3px; padding: 0 6px; border-radius: 3px; border: 1px solid var(--line); color: var(--faint); }
+  .flag.pii { color: #ff9d97; border-color: #4d2226; }
+  .flag.secret { color: #e5c46b; border-color: #4a3a12; }
+  .flag.git { color: var(--dim); }
+  .flag.egress { color: #b9a8ff; border-color: #3d3168; }
+
+  .legend { display: flex; gap: 20px; flex-wrap: wrap; margin: -4px 0 4px; font-size: 12.5px; color: var(--dim); }
+  .legend .li { display: flex; align-items: center; gap: 7px; }
+
+  .note { color: var(--faint); font-size: 12px; margin-top: 26px; text-align: center; }
+  .foot { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>apply-bot — where every bit of data is stored &amp; used</h1>
+  <p>One machine, one process. The pipeline reads and writes exactly the stores below; nothing else
+     persists. Everything is local except four outbound calls (in <span style="color:#ff9d97">red</span>),
+     which are the only times any of your data leaves this computer.</p>
+</header>
+
+<div class="banner">
+  <b>No network exposure.</b> The dashboard server binds to <code>127.0.0.1:5175</code> only and has
+  <b>no authentication</b> — it holds an OpenAI key and can act in your name, so it is never meant to be
+  reachable from anywhere but this machine.
+</div>
+
+<div class="legend">
+  <div class="li"><span class="dot sql"></span> SQLite table</div>
+  <div class="li"><span class="dot file"></span> File on disk</div>
+  <div class="li"><span class="dot mem"></span> In-memory / process</div>
+  <div class="li"><span class="dot ext"></span> External service (data egress)</div>
+  <div class="li"><span class="io r" style="display:inline"><span class="lbl" style="color:var(--dim)">reads</span></span> &nbsp;/&nbsp; <span class="io w" style="display:inline"><span class="lbl" style="color:var(--ok)">writes</span></span></div>
+</div>
+
+<!-- =================== PIPELINE =================== -->
+<h2 class="sec">The pipeline <span>each stage, and what it reads &amp; writes as data moves through it</span></h2>
+
+<div class="flow">
+
+  <div class="stage">
+    <div class="head"><div class="n">SOURCE</div><div class="name">Saved searches</div><div class="eng">dashboard · config seed</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val">The 17 seeded titles &times; locations (Tier A–D). <span class="m">Seeded once from <code>config.SEARCHES</code>, then editable in the dashboard.</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val"><span class="pin sql">searches</span> <span class="pin sql">blocked_companies</span></div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 1</div><div class="name">Discover</div><div class="eng">signed-in browser</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><span class="pin sql">searches</span> <span class="pin ext">LinkedIn (search results)</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">New job cards as <code>status=discovered</code> &nbsp;<span class="pin sql">jobs</span> &nbsp; pageview counter <span class="pin sql">rate_ledger</span> <span class="pin evt">events</span></div></div>
+      <div class="io r"><div class="lbl" style="color:var(--ok)">changed</div><div class="val"><span class="tagnew">NEW</span> No longer rejects on the card title. A blocked company is still filtered here; every other posting flows on to enrichment so it is judged with context.</div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage changed">
+    <div class="head"><div class="n">STAGE 2</div><div class="name">Enrich</div><div class="eng">guest HTTP · no browser</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><code>jobs[discovered]</code> <span class="pin sql">jobs</span> &nbsp; <span class="pin ext">LinkedIn guest endpoint (full JD)</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">JD text, apply route/email, real title &amp; company &nbsp;<span class="pin sql">jobs.jd_text</span> &nbsp; guest-fetch counter <span class="pin sql">rate_ledger</span> <span class="pin evt">events</span></div></div>
+      <div class="io r"><div class="lbl" style="color:var(--ok)">rejects</div><div class="val"><span class="tagnew">NEW HOME OF REJECTION</span> Seniority, work-authorisation and blocklist filters run <em>here</em> now — against the real title, location, JD and criteria, not a thin card.</div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 3</div><div class="name">Score fit</div><div class="eng">OpenAI</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><code>jobs[enriched]</code> + JD <span class="pin sql">jobs</span> &nbsp; your facts <span class="pin file">master-profile.json</span> &nbsp; <span class="pin ext">OpenAI API</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val"><code>fit_score</code>, rationale, → <code>scored</code> / <code>rejected</code> <span class="pin sql">jobs</span> &nbsp; audit-sample counter <span class="pin sql">rate_ledger</span></div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 4</div><div class="name">Tailor</div><div class="eng">optimiser web app · browser</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><code>jobs[scored]</code> + JD <span class="pin sql">jobs</span> &nbsp; profile <span class="pin file">master-profile.json</span> &nbsp; <span class="pin ext">resume optimiser (GitHub Pages)</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">Tailored PDF <span class="pin file">artifacts/resumes/</span> &nbsp; <code>resume_path</code>, → <code>tailored</code> <span class="pin sql">jobs</span> &nbsp; unconfirmed skills asked for <span class="pin sql">skill_suggestions</span></div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 5</div><div class="name">Apply</div><div class="eng">browser: Easy Apply / ATS</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><code>jobs[tailored]</code>, PDF, <span class="pin sql">answers</span> bank, <span class="pin file">profile</span> &nbsp; <span class="pin ext">LinkedIn / ATS sites</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">Attempt + filled fields + step shots <span class="pin sql">applications</span> <span class="pin file">artifacts/screenshots/</span> &nbsp; unanswerable questions <span class="pin sql">parked_questions</span> &nbsp; status → <code>submitted</code>/<code>awaiting_review</code>/<code>awaiting_answers</code> <span class="pin sql">jobs</span> &nbsp; daily counters <span class="pin sql">rate_ledger</span></div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 5b</div><div class="name">Email channel</div><div class="eng">Gmail</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val"><code>jobs[tailored, apply_type=email]</code> + PDF &nbsp; <span class="pin file">google-token.json</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">Held draft (auto-sends unless cancelled) <span class="pin sql">outbox</span> → on send <span class="pin ext">Gmail API</span> + <span class="pin sql">applications</span></div></div>
+    </div>
+  </div>
+  <div class="arrow">▼</div>
+
+  <div class="stage">
+    <div class="head"><div class="n">STAGE 6</div><div class="name">Outcomes &amp; calibration</div><div class="eng">dashboard · human</div></div>
+    <div class="body">
+      <div class="io r"><div class="lbl">reads</div><div class="val">Sent <span class="pin sql">applications</span> + their <code>fit_score</code> <span class="pin sql">jobs</span></div></div>
+      <div class="io w"><div class="lbl">writes</div><div class="val">Employer verdict <code>outcome_state</code> <span class="pin sql">applications</span> &nbsp; learned answers <span class="pin sql">answers</span> &nbsp; confirmed facts <span class="pin file">master-profile.json</span> &nbsp; fit threshold <span class="pin sql">settings</span></div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =================== SQLITE =================== -->
+<h2 class="sec">SQLite — the operational database <span><code>apply-bot/data/pipeline.sqlite</code> · WAL mode · 11 tables</span></h2>
+<div class="grid">
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">jobs</span><span class="path">the board</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">status, tier, fit_score, reject_reason</div><div class="d">Every posting and where it is in the pipeline. Drives all 15 board columns.</div></div>
+      <div class="row"><div class="k">jd_text, apply_type, apply_email, external_apply_url</div><div class="d">Fetched at enrich; read by score, tailor and apply.</div></div>
+      <div class="row"><div class="k">resume_path, blocked_from</div><div class="d">Pointer to the tailored PDF; the status to restore a block to.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">applications</span><span class="path">what was sent</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">channel, resume_path, submitted_at, outcome</div><div class="d">One row per submit attempt across all three channels.</div></div>
+      <div class="row"><div class="k">filled_json, screenshots_json, step_count</div><div class="d">Exactly what the bot typed, for the review queue to approve.</div></div>
+      <div class="row"><div class="k">outcome_state, outcome_at</div><div class="d">What the <em>employer</em> did — the only signal calibration can use.<div class="flags"><span class="flag pii">may hold answers</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">answers</span><span class="path">the answer bank</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">question_norm → answer_value</div><div class="d">Learned Q&amp;A, normalised. An approved answer is reused so the same question never needs reviewing twice.</div></div>
+      <div class="row"><div class="k">human_verified, source, confidence</div><div class="d">Whether a person vouched for it; profile / human / llm_approved.<div class="flags"><span class="flag pii">PII</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">events</span><span class="path">the live log</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">ts, stage, level, message, job_id</div><div class="d">Every line you see stream in the dashboard. Tailed over SSE so a split-process run still shows progress.</div></div>
+      <div class="row"><div class="k">screenshot_path</div><div class="d">Link to a step image in <code>artifacts/</code>.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">rate_ledger</span><span class="path">the daily caps</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">linkedin_easy, external_ats, email</div><div class="d">Per-channel counts, keyed by date. Only Easy Apply carries LinkedIn ban risk.</div></div>
+      <div class="row"><div class="k">linkedin_pageviews, guest_fetches, audit_samples, challenges_hit</div><div class="d">Guest fetches are unauthenticated, so counted apart from signed-in pageviews.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">settings</span><span class="path">key / value</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">mode</div><div class="d">observe / review / auto.</div></div>
+      <div class="row"><div class="k">fit_threshold, score_examples, searches_seeded</div><div class="d">The score gate, few-shot examples built from real outcomes, and the one-time seed flag.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">parked_questions</span><span class="path">what blocks a job</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">job_id, question_norm, options_json, reason</div><div class="d">A job can block on several at once. Answering one in the dashboard releases every job waiting on it.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">skill_suggestions</span><span class="path">skills to confirm</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">skill_norm, job_count, status</div><div class="d">Skills postings asked for that you haven't confirmed. Never auto-added to a resume — they queue for you to confirm or dismiss.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">outbox</span><span class="path">held email drafts</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">to_addr, subject, body, send_after, status</div><div class="d">Email is the one irreversible channel — drafts sit here and auto-send unless cancelled inside the hold window.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">searches</span><span class="path">what to look for</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">keywords, location, tier, enabled</div><div class="d">The source of truth for discovery. <code>config.SEARCHES</code> only seeds this once and is never read again.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot sql"></span><span class="t">blocked_companies</span><span class="path">the never-apply list</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">company_norm, reason</div><div class="d">Checked at discovery and again at enrich. Blocking one sweeps every live job for it and cancels held drafts.</div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =================== FILES =================== -->
+<h2 class="sec">Files on disk <span>all under <code>apply-bot/</code> · everything sensitive is gitignored</span></h2>
+<div class="grid">
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">master-profile.json</span><span class="path">profile/</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">name, contact, work history, answers</div><div class="d">Your facts. Unconfirmed fields are invisible to the bot on purpose — it parks rather than guesses.
+        <div class="flags"><span class="flag pii">PII</span><span class="flag git">gitignored</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">secrets.json</span><span class="path">profile/ · chmod 600</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">OPENAI_API_KEY</div><div class="d">Loaded into <code>process.env</code> at server start. The dashboard never reads it back — only whether it's set and the last 4 chars.
+        <div class="flags"><span class="flag secret">secret</span><span class="flag git">gitignored</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">google-credentials.json · google-token.json</span><span class="path">profile/</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">OAuth client + access/refresh token</div><div class="d">The Gmail connection. Credentials are chmod 600. Used only to send application emails and read their replies.
+        <div class="flags"><span class="flag secret">secret</span><span class="flag git">gitignored</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">chrome-profile/</span><span class="path">data/</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">LinkedIn session cookies</div><div class="d">A persistent Chrome profile you log into by hand, once. The bot never sees your password or handles 2FA.
+        <div class="flags"><span class="flag secret">session</span><span class="flag git">gitignored</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">artifacts/</span><span class="path">resumes/ · screenshots/ · emails/</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">Tailored PDFs, step screenshots, email drafts</div><div class="d">Generated output. Served read-only to the drawer, and only from inside this folder.
+        <div class="flags"><span class="flag pii">PII in resumes</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot file"></span><span class="t">STOP</span><span class="path">apply-bot/ (when present)</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">kill switch sentinel</div><div class="d">A file whose mere presence halts every stage before its next action. Toggled by the dashboard's Stop button.</div></div>
+    </div>
+  </div>
+
+</div>
+
+<!-- =================== MEMORY + EXTERNAL =================== -->
+<h2 class="sec">In-memory &amp; outbound <span>lives only while the process runs, or leaves the machine entirely</span></h2>
+<div class="grid">
+
+  <div class="store">
+    <div class="top"><span class="dot mem"></span><span class="t">process &amp; in-memory</span><span class="path">Node server</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">running</div><div class="d">Which stage is active — the single-flight lock. One browser stage at a time, because two LinkedIn sessions on one account is how accounts get flagged.</div></div>
+      <div class="row"><div class="k">bus (EventEmitter)</div><div class="d">In-process event + live-frame bus. Feeds the SSE log and the WebSocket browser view.</div></div>
+      <div class="row"><div class="k">process.env.OPENAI_API_KEY, gmailAddress</div><div class="d">Key mirrored from <code>secrets.json</code>; the connected Gmail address, cached.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot ext"></span><span class="t">LinkedIn</span><span class="path">outbound</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">guest endpoint (HTTP, unauthenticated)</div><div class="d">Enrichment. No session, no pageview budget — just a job id in, JD out.<div class="flags"><span class="flag egress">egress: job ids</span></div></div></div>
+      <div class="row"><div class="k">signed-in browser</div><div class="d">Discovery &amp; Easy Apply, through your own logged-in session.</div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot ext"></span><span class="t">OpenAI API</span><span class="path">outbound</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">JD text + your profile facts</div><div class="d">Sent to score fit and to draft answers. Without a key, scoring falls back to keyword matching and jobs are held, not ranked.<div class="flags"><span class="flag egress">egress: JD + profile</span></div></div></div>
+    </div>
+  </div>
+
+  <div class="store">
+    <div class="top"><span class="dot ext"></span><span class="t">Gmail API &amp; resume optimiser</span><span class="path">outbound</span></div>
+    <div class="rows">
+      <div class="row"><div class="k">Gmail</div><div class="d">Sends application emails from your account and reads their replies.<div class="flags"><span class="flag egress">egress: your emails</span></div></div></div>
+      <div class="row"><div class="k">resume optimiser (GitHub Pages)</div><div class="d">The web app tailoring drives in a browser to produce each PDF.<div class="flags"><span class="flag egress">egress: resume content</span></div></div></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="foot">
+  Generated for the apply-bot pipeline. The two <span style="color:var(--ok)">green-outlined</span> stages above
+  reflect the change moving rejection out of Discover and into Enrich, so a job is only turned away once its
+  full description has been read.
+</div>
+
+</div>
+</body>
+</html>

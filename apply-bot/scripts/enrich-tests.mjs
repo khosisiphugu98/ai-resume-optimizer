@@ -159,6 +159,13 @@ test('a South African posting survives the authorisation filter', () => {
   }), null);
 });
 
+test('a senior title still parks in the pre-filter, for enrich to apply with context', () => {
+  // The filter itself is unchanged — it is *where* it runs that moved. It no longer
+  // fires at discovery off a bare card; recordEnrichment calls it once the real
+  // title, location and JD are known. So the reason is still produced here.
+  assert.equal(preFilter({ title: 'Head of Growth', location: 'Johannesburg' }), 'seniority: above band');
+});
+
 test('parseDocTitle keeps pipes that belong to the title', () => {
   assert.deepEqual(
     parseDocTitle('Visual Content Analyst | $70/hr Remote | Acme | LinkedIn'),
