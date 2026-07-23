@@ -66,6 +66,25 @@ endpoint over plain HTTP, so it needs no browser, no session and no pageview
 budget, and it keeps working while another stage has the browser. Only
 `login`, `check`, `discover`, `seed`, `tailor` and `apply` need Chrome.
 
+### Running autonomously
+
+`npm run run` is a single discover/enrich pass — it stops on its own. To keep the
+whole pipeline moving without you, use `npm run auto` (or the toggle in the
+dashboard control bar). It loops the full sequence —
+`discover → enrich → score → tailor → apply → email → replies` — then waits the
+between-cycle interval (15 min by default; set `auto_interval_ms` in settings) and
+goes again, until you stop it.
+
+It adds no new policy: the daily caps, the operating-hours window and the run mode
+still gate every application from inside the stages, so **`auto` in observe mode
+still applies to nothing** — it discovers, enriches, scores and tailors on repeat,
+and stops short of submitting until you switch to review or auto mode. Stages never
+run two at a time, so it never fights a manual dashboard button over the browser.
+
+The kill switch pauses the loop rather than ending it: turn STOP on and it parks
+before its next stage; clear it and the same loop resumes. Because it was left on
+is remembered, restarting the dashboard resumes it too.
+
 ## Commands
 
 | Command | Does |
@@ -74,6 +93,7 @@ budget, and it keeps working while another stage has the browser. Only
 | `npm run check` | Session status, today's rates, current mode |
 | `npm run serve` | Dashboard only |
 | `npm run run` | Dashboard + one discover/enrich pass |
+| `npm run auto` | Dashboard + the full pipeline on repeat until stopped |
 | `npm run discover` | Discovery only |
 | `npm run enrich [n]` | Fetch JDs, resolve apply routes (no browser, no session) |
 | `npm run apply [mode] [n] [--now]` | Apply via Easy Apply and external ATS |

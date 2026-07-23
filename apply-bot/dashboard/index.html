@@ -51,6 +51,7 @@
   #controls button:disabled { opacity: .4; cursor: not-allowed; }
   #killswitch { border-color: #4d2226 !important; color: var(--err) !important; }
   #killswitch.on { background: var(--err) !important; color: #2b0b0d !important; }
+  #autopilot.on { border-color: var(--ok) !important; color: var(--ok) !important; }
   .chip { font-size: 11px; padding: 3px 9px; border-radius: 20px; border: 1px solid var(--line); cursor: pointer; }
   .chip.on { color: var(--ok); border-color: #23472b; }
   .chip.off { color: var(--warn); border-color: #4a3a12; }
@@ -414,6 +415,7 @@
   </span>
   <span class="spacer"></span>
   <span id="runState"></span>
+  <button id="autopilot" title="Run the whole pipeline continuously — discover through apply — until stopped">Run continuously</button>
   <button id="settingsBtn" title="Settings">⚙<span id="settingsDot" hidden></span></button>
   <button id="killswitch">Stop everything</button>
 </div>

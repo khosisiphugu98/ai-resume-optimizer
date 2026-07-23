@@ -58,6 +58,9 @@ async function refreshBoard() {
   $('#killswitch').classList.toggle('on', !!d.stopped);
   $('#killswitch').textContent = d.stopped ? 'Resume' : 'Stop everything';
 
+  $('#autopilot').classList.toggle('on', !!d.auto);
+  $('#autopilot').textContent = d.auto ? 'Running continuously…' : 'Run continuously';
+
   for (const b of document.querySelectorAll('#modes button')) b.classList.toggle('on', b.dataset.mode === d.mode);
 }
 
@@ -796,6 +799,16 @@ document.addEventListener('click', async e => {
   if (e.target.id === 'killswitch') {
     const on = e.target.textContent !== 'Resume';
     await fetch('/api/stop', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on }),
+    });
+    refreshBoard();
+    return;
+  }
+
+  if (e.target.id === 'autopilot') {
+    const on = !e.target.classList.contains('on');
+    await fetch('/api/auto', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ on }),
     });

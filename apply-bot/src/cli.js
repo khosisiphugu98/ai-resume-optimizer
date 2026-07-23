@@ -73,6 +73,12 @@ const commands = {
     await startServer();
   },
 
+  /** Dashboard + the autonomous loop: discover → enrich → score → tailor → apply → email → replies, on repeat until stopped. */
+  async auto() {
+    await startServer({ auto: true });
+    emit({ stage: 'auto', message: `Autonomous mode — running continuously in ${getSetting('mode', 'observe')} mode. Ctrl+C or the kill switch to stop.` });
+  },
+
   async profile() {
     const { loadProfile, unconfirmed } = await import('./profile.js');
     const p = loadProfile();
@@ -198,6 +204,7 @@ if (!commands[cmd]) {
     npm run check       Verify session, show rates and mode
     npm run serve       Dashboard only  → http://localhost:5175
     npm run run         Dashboard + one discover/enrich pass
+    npm run auto        Dashboard + the full pipeline on repeat until stopped
     npm run discover    Discovery only
     npm run enrich [n]  Fetch JDs and resolve apply routes
     npm run searches    List configured searches

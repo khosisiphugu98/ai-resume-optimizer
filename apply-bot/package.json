@@ -5,10 +5,12 @@
   "scripts": {
     "test": "node scripts/run-tests.mjs",
     "test:e2e": "node scripts/pipeline-e2e.mjs",
+    "test:auto": "node scripts/auto-e2e.mjs",
     "login": "node src/cli.js login",
     "check": "node src/cli.js check",
     "serve": "node src/cli.js serve",
     "run": "node src/cli.js run",
+    "auto": "node src/cli.js auto",
     "discover": "node src/cli.js discover",
     "enrich": "node src/cli.js enrich",
     "searches": "node src/cli.js searches",

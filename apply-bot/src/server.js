@@ -21,6 +21,7 @@ import { applySecretsToEnv, setSecret, secretsStatus } from './secrets.js';
 import { calibrationReport, buildFewShot } from './score/calibrate.js';
 import { currentThreshold, setThreshold, THRESHOLD, AUDIT } from './score/index.js';
 import { criteriaForUi, addCriterion, removeCriterion, resetGroup } from './reject-criteria.js';
+import { createOrchestrator } from './orchestrator.js';
 
 applySecretsToEnv();
 
@@ -49,6 +50,7 @@ const routes = {
     caps: CAPS,
     mode: getSetting('mode', 'observe'),
     stopped: fs.existsSync(PATHS.stop),
+    auto: getSetting('auto') === '1',
     running,
     profileReady: profileExists() && unconfirmed(loadProfile({ fresh: true })).length === 0,
     secrets: secretsStatus(),
@@ -112,6 +114,7 @@ const routes = {
       unconfirmed: profileExists() ? unconfirmed(loadProfile({ fresh: true })).length : null,
     },
     caps: CAPS,
+    auto: getSetting('auto') === '1',
     paths: { profileDir: path.join(ROOT, 'profile'), artifacts: PATHS.artifacts },
   }),
 
@@ -201,6 +204,46 @@ const STAGES = {
   replies:  async () => { const m = await import('./email/outbox.js'); await m.checkReplies(); },
 };
 
+/**
+ * Run one stage under the shared lock. Both the dashboard's /api/run button and
+ * the autonomous loop go through here, so the single-owner browser profile only
+ * ever has one stage using it.
+ *
+ * Returns `{ ran: false }` when the lock is already held — the loop's signal to
+ * wait and retry rather than skip the stage. A stage that throws is caught and
+ * logged; the caller still sees `ran: true`, because it did run, it just failed,
+ * and one failed stage must not take the whole loop down with it.
+ */
+async function runStage(stage) {
+  if (running) return { ran: false, running };
+  running = stage;
+  emit({ stage, message: `Started: ${stage}` });
+  emitBoard();
+  try {
+    await STAGES[stage]();
+    return { ran: true };
+  } catch (err) {
+    emit({ stage, level: 'error', message: `${stage} failed: ${err.message}` });
+    return { ran: true, error: err.message };
+  } finally {
+    running = null;
+    emit({ stage, message: `Finished: ${stage}` });
+    emitBoard();
+  }
+}
+
+// The autonomous loop sequences the same stages through the same lock, so it can
+// never collide with a manual run over the browser profile. It pauses itself on
+// STOP and resumes when the switch clears.
+const orchestrator = createOrchestrator({ runStage });
+
+/** Persist the auto flag and start/stop the loop to match it. */
+function setAuto(on) {
+  setSetting('auto', on ? '1' : '');
+  if (on) orchestrator.start();
+  else orchestrator.stop();
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${SERVER.port}`);
 
@@ -252,18 +295,9 @@ const server = http.createServer(async (req, res) => {
       return json(res, { error: 'kill switch is on — clear it first' }, 409);
     }
 
-    running = stage;
-    emit({ stage, message: `Started: ${stage}` });
-    emitBoard();
-
-    STAGES[stage]()
-      .catch(err => emit({ stage, level: 'error', message: `${stage} failed: ${err.message}` }))
-      .finally(() => {
-        running = null;
-        emit({ stage, message: `Finished: ${stage}` });
-        emitBoard();
-      });
-
+    // Fire and forget — the dashboard follows progress on the event stream. The
+    // lock, the start/finish events and the error handling all live in runStage.
+    runStage(stage);
     return json(res, { started: stage });
   }
 
@@ -336,6 +370,25 @@ const server = http.createServer(async (req, res) => {
     const { mode } = JSON.parse(body || '{}');
     setSetting('mode', mode);
     return json(res, { mode });
+  }
+
+  // Toggle the autonomous loop. Enabling while the kill switch is on is allowed —
+  // the loop just parks itself until STOP clears — but saying so is clearer than
+  // silently starting a loop that does nothing.
+  if (url.pathname === '/api/auto' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { on } = JSON.parse(body || '{}');
+    setAuto(!!on);
+    const stopped = !!on && fs.existsSync(PATHS.stop);
+    emit({
+      stage: 'auto',
+      level: on ? 'info' : 'warn',
+      message: on
+        ? (stopped ? 'Autonomous loop enabled — parked until the kill switch clears' : 'Autonomous loop enabled — running the full pipeline continuously')
+        : 'Autonomous loop disabled — it will stop after the current stage',
+    });
+    emitBoard();
+    return json(res, { auto: !!on });
   }
 
   // Answering one parked question releases every job that was only waiting on it.
@@ -630,7 +683,7 @@ bus.on('frame', data => {
   }
 });
 
-export function startServer() {
+export function startServer({ auto = false } = {}) {
   return new Promise(resolve => {
     // Loopback only. This server takes an OpenAI key and Gmail credentials and
     // can fire off applications in your name — it has no auth because it is not
@@ -670,6 +723,10 @@ export function startServer() {
           emitBoard();
         }
       }, 60_000).unref?.();
+
+      // Start the autonomous loop when asked explicitly (`npm run auto`) or when a
+      // previous session left it on — "until stopped" means a restart resumes it.
+      if (auto || getSetting('auto') === '1') setAuto(true);
 
       resolve(server);
     });
