@@ -27,6 +27,7 @@ const SUITES = [
   'enrich-tests.mjs',
   'searches-tests.mjs',
   'settings-tests.mjs',
+  'orchestrator-tests.mjs',
 ];
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-bot-test-'));
