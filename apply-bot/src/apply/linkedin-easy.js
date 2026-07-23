@@ -3,14 +3,21 @@ import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
 import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
-import { runWizard, stepSignature, firstVisible } from './wizard.js';
+import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 
 const MODAL = [
+  // Verified live on the server-driven UI: the Easy Apply modal is a native
+  // <dialog> element with a hashed class and NO role attribute. `[role="dialog"]`
+  // is an attribute selector, so it misses it entirely — a native <dialog> has an
+  // *implicit* dialog role but no role *attribute*. Match the tag. This is why the
+  // run kept dying as "modal did not open" on a modal that was right there.
+  'dialog',
   '.jobs-easy-apply-modal',
   'div[data-test-modal][role="dialog"]',
   '.artdeco-modal--layer-default',
+  'div[role="dialog"][aria-label*="apply" i]',
 ];
 
 const BTN = {
@@ -32,6 +39,17 @@ async function modalSelector(page) {
     if (await loc.count() && await loc.isVisible().catch(() => false)) return sel;
   }
   return null;
+}
+
+/** Poll for the Easy Apply modal — it animates in and can take a beat to mount. */
+async function waitForModal(page, timeout = 8000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const sel = await modalSelector(page);
+    if (sel) return sel;
+    if (Date.now() >= deadline) return null;
+    await page.waitForTimeout(300);
+  }
 }
 
 async function shot(page, jobId, label) {
@@ -71,20 +89,40 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
   const uploadedUids = new Set();
 
   await page.goto(job.url, { waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(2200);
   await assertNoChallenge(page);
 
-  const applyBtn = await firstVisible(page, BTN.apply);
-  if (!applyBtn) throw new Error('No apply button on the job page — posting may have closed');
+  // Poll: the top card (and its Apply button) hydrates after first paint, so a
+  // single check a fixed moment after navigation loses the race on an open
+  // posting and reports it closed.
+  const applyBtn = await waitForFirstVisible(page, BTN.apply, { timeout: 10_000 });
+  if (!applyBtn) {
+    const ctx = await captureFailureContext(page, shot, job.id, 'no-apply-button');
+    throw new Error(
+      `No apply button after 10s — posting may have closed, or the selector broke. ` +
+      `url=${ctx.url} title="${ctx.title}" buttons=[${ctx.buttons.join(' | ')}]`);
+  }
 
   const label = (await applyBtn.innerText().catch(() => '')) || '';
   if (!/easy apply/i.test(label)) throw new Error(`Not an Easy Apply posting (button reads "${label.trim()}")`);
 
   await applyBtn.click();
-  await page.waitForTimeout(2000);
 
-  const opened = await modalSelector(page);
-  if (!opened) throw new Error('Easy Apply modal did not open');
+  const opened = await waitForModal(page, 8000);
+  if (!opened) {
+    const ctx = await captureFailureContext(page, shot, job.id, 'modal-did-not-open');
+    throw new Error(
+      `Easy Apply modal did not open within 8s after clicking Apply. ` +
+      `url=${ctx.url} title="${ctx.title}" buttons=[${ctx.buttons.join(' | ')}]`);
+  }
+
+  // The modal's first step renders progressively — the <dialog> mounts before its
+  // footer button does. Verified live: the wizard's first findAdvance would race
+  // that render and abandon a perfectly good form as "step 1 has no next control".
+  // Wait for a footer control (or, failing that, an input) to actually be there.
+  for (let i = 0; i < 16; i++) {
+    if ((await buttonByName(page, ADVANCE_NAME)) || (await buttonByName(page, TERMINAL_NAME))) break;
+    await page.waitForTimeout(500);
+  }
   screenshots.push(await shot(page, job.id, 'step-0-open'));
 
   try {
@@ -117,8 +155,14 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       collect,
       resolve: items => resolveFormBatch(items, ctx),
       fill: (item, value) => fillField(page, item.field, value),
-      findTerminal: () => firstVisible(page, BTN.submit),
-      findAdvance: async () => (await firstVisible(page, BTN.next)) || (await firstVisible(page, BTN.review)),
+      // Verified live: the Next button is just <button>Next</button> — no
+      // aria-label, no data attribute — so the aria-label selectors in BTN.next
+      // match nothing. Find the footer controls by accessible name (text), the
+      // way the external adapter does, and keep the old selectors as a fallback
+      // for accounts still on the classic UI.
+      findTerminal: async () => (await buttonByName(page, TERMINAL_NAME)) || firstVisible(page, BTN.submit),
+      findAdvance: async () => (await buttonByName(page, ADVANCE_NAME))
+        || (await firstVisible(page, BTN.next)) || firstVisible(page, BTN.review),
       signature: stepSignature,
       onStep: async ({ step }) => {
         // Don't silently start following companies.

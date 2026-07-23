@@ -5,7 +5,7 @@ import { bumpRate } from '../db.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
 import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
 import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
-import { runWizard, buttonByName, stepSignature, firstVisible, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
+import { runWizard, buttonByName, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import { detectVendor } from './adapters/index.js';
@@ -101,14 +101,20 @@ export async function resolveExternalUrl(page, job) {
   // that keeps the account under LinkedIn's radar. Counting it here matters
   // because a board full of unresolved external jobs spends one of these each.
   bumpRate('linkedin_pageviews');
-  await page.waitForTimeout(2000);
   await assertNoChallenge(page);
 
   // Must come from SELECTORS: the new server-driven UI ships hashed class names,
   // so `.jobs-apply-button` matches nothing on a rolled-out account and every
-  // external job would fail here as "posting may have closed".
-  const applyBtn = await firstVisible(page, SELECTORS.detailApplyBtn);
-  if (!applyBtn) throw new Error('No apply button — posting may have closed');
+  // external job would fail here as "posting may have closed". Poll rather than
+  // check once — the top card (and its Apply button) hydrates after first paint,
+  // so a single check moments after navigation loses the race on an open posting.
+  const applyBtn = await waitForFirstVisible(page, SELECTORS.detailApplyBtn, { timeout: 10_000 });
+  if (!applyBtn) {
+    const ctx = await captureFailureContext(page, shot, job.id, 'no-apply-button');
+    throw new Error(
+      `No apply button after 10s — posting may have closed, or the selector broke. ` +
+      `url=${ctx.url} title="${ctx.title}" buttons=[${ctx.buttons.join(' | ')}]`);
+  }
 
   const ctx = page.context();
   const popupPromise = ctx.waitForEvent('page', { timeout: 20_000 }).catch(() => null);

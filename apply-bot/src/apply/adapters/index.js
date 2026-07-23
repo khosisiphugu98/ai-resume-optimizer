@@ -56,7 +56,10 @@ export const VENDORS = [
 
 /** Vendors we deliberately do not automate yet — routed to a manual checklist. */
 export const DEFERRED = [
-  { vendor: 'workday', match: url => /myworkdayjobs\.com|workday\.com/i.test(url),
+  // myworkdaysite.com is Workday's other tenant domain (verified live: AB InBev's
+  // careers site resolves there). Without it the posting fell through to the
+  // generic adapter and failed as "no form found" instead of routing to manual.
+  { vendor: 'workday', match: url => /myworkdayjobs\.com|myworkdaysite\.com|workday\.com/i.test(url),
     why: 'Workday requires a per-tenant account and a multi-page wizard' },
   { vendor: 'taleo', match: url => /taleo\.net|tbe\.taleo\.net/i.test(url),
     why: 'Taleo requires an account and uses legacy nested frames' },

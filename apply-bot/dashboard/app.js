@@ -24,14 +24,18 @@ async function refreshBoard() {
 
   const byStatus = {};
   for (const j of d.jobs) (byStatus[j.status] ||= []).push(j);
+  // True per-status totals from the DB, so a bulk column that the board caps
+  // (discovered/rejected/expired) still reports its real size in the header.
+  const totals = Object.fromEntries((d.counts || []).map(c => [c.status, c.n]));
 
   $('#board').innerHTML = COLUMNS.map(([key, label]) => {
     const jobs = byStatus[key] || [];
+    const total = totals[key] ?? jobs.length;
     // The Rejected column carries the editor for the criteria that fill it.
     const head = key === 'rejected'
       ? `<span class="hleft">${label}<button class="colcrit" title="View and edit rejection criteria">criteria</button></span>`
       : label;
-    return `<div class="col"><h2>${head}<span>${jobs.length}</span></h2>${
+    return `<div class="col"><h2>${head}<span>${total}</span></h2>${
       jobs.slice(0, 60).map(cardHtml).join('') || '<div style="color:#56606d;font-size:11px;padding:6px 2px">—</div>'
     }</div>`;
   }).join('');

@@ -108,6 +108,11 @@ addColumn('jobs', 'tailored_at', 'TEXT');
 // Where a blocked job came from, so unblocking puts it back in the pipeline at
 // the stage it had reached rather than at the start.
 addColumn('jobs', 'blocked_from', 'TEXT');
+// How many times apply has tried this job. A single transient failure (a posting
+// that was slow to render, a popup that lost the race) used to strand a job in
+// apply_failed forever, because the apply queue only reads 'tailored'/'approved'.
+// The apply stage now re-queues apply_failed jobs up to APPLY_MAX_ATTEMPTS.
+addColumn('jobs', 'apply_attempts', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('applications', 'filled_json', 'TEXT');
 addColumn('applications', 'screenshots_json', 'TEXT');
 addColumn('applications', 'step_count', 'INTEGER');
@@ -185,13 +190,30 @@ export function todayRates() {
          challenges_hit: 0, guest_fetches: 0, audit_samples: 0 };
 }
 
+// The three bulky terminal buckets grow without bound (discovery keeps adding to
+// them), so a single LIMIT over all statuses lets them push the small, active
+// pipeline statuses — tailored, apply_failed, awaiting_review — clean off the
+// board. Those are exactly the ones the operator is watching. So: every
+// non-bulk job is always returned in full, and only the bulk buckets are capped.
+const BOARD_BULK_STATUSES = ['discovered', 'rejected', 'expired'];
+
 export function boardSnapshot() {
-  const jobs = db.prepare(`
-    SELECT id, title, company, location, tier, apply_type, ats_vendor, fit_score,
-           reject_reason, parked_question, status, url, discovered_at
-    FROM jobs ORDER BY discovered_at DESC LIMIT 400`).all();
+  const cols = `id, title, company, location, tier, apply_type, ats_vendor, fit_score,
+                reject_reason, parked_question, status, url, discovered_at`;
+  const placeholders = BOARD_BULK_STATUSES.map(() => '?').join(',');
+
+  const active = db.prepare(`
+    SELECT ${cols} FROM jobs
+    WHERE status NOT IN (${placeholders})
+    ORDER BY discovered_at DESC`).all(...BOARD_BULK_STATUSES);
+
+  const bulk = db.prepare(`
+    SELECT ${cols} FROM jobs
+    WHERE status IN (${placeholders})
+    ORDER BY discovered_at DESC LIMIT 400`).all(...BOARD_BULK_STATUSES);
+
   const counts = db.prepare('SELECT status, COUNT(*) n FROM jobs GROUP BY status').all();
-  return { jobs, counts, rates: todayRates() };
+  return { jobs: [...active, ...bulk], counts, rates: todayRates() };
 }
 
 export function recentEvents(limit = 200) {

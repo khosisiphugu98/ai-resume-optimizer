@@ -8,6 +8,12 @@ import { detectVendor } from './adapters/index.js';
 import { canApply, recordApplication, currentMode, applicationGap } from './rate.js';
 import { AUDIT } from '../score/index.js';
 
+// A posting that fails this many times stays in apply_failed and stops being
+// re-queued. High enough to ride out transient failures, low enough that a
+// genuinely-dead posting (closed, unresolvable form) does not burn the browser
+// and pageview budget on every cycle forever.
+export const APPLY_MAX_ATTEMPTS = 3;
+
 /** Persist an attempt so the dashboard can show exactly what was filled. */
 function recordAttempt(job, channel, result, outcome) {
   const info = db.prepare(`
@@ -57,12 +63,18 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
 
-  // Approved-for-submit first, then freshly tailored.
+  // Approved-for-submit first, then freshly tailored, then a bounded retry of
+  // anything that previously failed. Without the last bucket a job that failed
+  // once — often for a transient reason (a slow-rendering posting, a lost popup
+  // race) — sits in apply_failed forever, because nothing ever selects it again.
   const jobs = db.prepare(`
     SELECT * FROM jobs
-    WHERE apply_type IN ('easy_apply', 'external') AND status IN ('approved', 'tailored')
-    ORDER BY CASE status WHEN 'approved' THEN 0 ELSE 1 END, fit_score DESC, id
-    LIMIT ?`).all(limit);
+    WHERE apply_type IN ('easy_apply', 'external')
+      AND (status IN ('approved', 'tailored')
+           OR (status = 'apply_failed' AND apply_attempts < ?))
+    ORDER BY CASE status WHEN 'approved' THEN 0 WHEN 'tailored' THEN 1 ELSE 2 END,
+             fit_score DESC, id
+    LIMIT ?`).all(APPLY_MAX_ATTEMPTS, limit);
 
   if (!jobs.length) {
     emit({ stage: 'apply', message: 'No jobs ready to apply to — tailor some first' });
@@ -93,11 +105,14 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     // An approved job always submits, whatever the global mode.
     const shouldSubmit = mode === 'auto' || job.status === 'approved';
     stats.attempted++;
+    const attemptNo = (job.apply_attempts || 0) + 1;
+    updateJob(job.id, { apply_attempts: attemptNo });
 
     try {
+      const retrySuffix = job.status === 'apply_failed' ? `, retry ${attemptNo}/${APPLY_MAX_ATTEMPTS}` : '';
       emit({
         jobId: job.id, stage: 'apply',
-        message: `${shouldSubmit ? 'Applying' : 'Preparing'} — ${job.title} @ ${job.company} [${channel}] (${gate.remaining} left today)`,
+        message: `${shouldSubmit ? 'Applying' : 'Preparing'} — ${job.title} @ ${job.company} [${channel}] (${gate.remaining} left today${retrySuffix})`,
       });
 
       const answerCtx = {
@@ -166,7 +181,12 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
       }
       updateJob(job.id, { status: 'apply_failed', reject_reason: err.message.slice(0, 200) });
       stats.failed++;
-      emit({ jobId: job.id, stage: 'apply', level: 'error', message: `Failed: ${err.message}` });
+      const exhausted = attemptNo >= APPLY_MAX_ATTEMPTS;
+      emit({
+        jobId: job.id, stage: 'apply', level: 'error',
+        message: `Failed: ${err.message}` +
+          (exhausted ? ` — giving up after ${attemptNo} attempts (won't retry automatically)` : ` — will retry next cycle (${attemptNo}/${APPLY_MAX_ATTEMPTS})`),
+      });
     }
 
     emitBoard();

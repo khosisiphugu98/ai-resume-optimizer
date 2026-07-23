@@ -116,10 +116,17 @@ export const SELECTORS = {
     '[data-sdui-component*="aboutTheJob"]',
     '#job-details', '.jobs-description__content', '.jobs-box__html-content',
   ],
+  // Verified live on the rolled-out server-driven UI: the apply control is an
+  // <a> (role=null) whose aria-label is the full "Apply on company website" /
+  // "Easy Apply to <job>" phrase, while its visible TEXT is just "Apply". Every
+  // selector must therefore match the aria-label on ANY element — constraining to
+  // `button` or `[role=button]` (as the old list did) misses the anchor entirely,
+  // which is why the whole external channel failed as "posting may have closed".
   detailApplyBtn: [
-    'button[aria-label*="Apply to this job" i]',
-    'button[aria-label*="Apply on company website" i]',
-    '[aria-label*="pply"][role="button"]',
+    '[aria-label*="Apply on company website" i]',
+    '[aria-label*="Easy Apply" i]',
+    '[aria-label*="Apply to this job" i]',
+    'a[aria-label*="pply" i]', 'button[aria-label*="pply" i]', '[aria-label*="pply"][role="button"]',
     '.jobs-apply-button', 'button.jobs-apply-button--top-card',
   ],
   detailTitle: ['.job-details-jobs-unified-top-card__job-title', '.jobs-unified-top-card__job-title'],
