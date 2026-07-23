@@ -182,3 +182,39 @@ export async function firstVisible(scope, selectors) {
   }
   return null;
 }
+
+/**
+ * Like firstVisible, but polls until something shows or the timeout elapses.
+ *
+ * LinkedIn's server-driven UI hydrates the top card — including the Apply button —
+ * after the initial paint, so a single check a fixed moment after navigation is a
+ * race the runner keeps losing: the button is simply not there yet, and the run
+ * dies as "posting may have closed" on a posting that is perfectly open.
+ */
+export async function waitForFirstVisible(scope, selectors, { timeout = 10_000, interval = 400 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const hit = await firstVisible(scope, selectors);
+    if (hit) return hit;
+    if (Date.now() >= deadline) return null;
+    await new Promise(r => setTimeout(r, interval));
+  }
+}
+
+/**
+ * A screenshot plus the page's own account of itself, for when an expected
+ * control never appears. A bare "no apply button" says nothing about whether the
+ * posting closed, the selector broke, or a login wall came up — this captures
+ * enough to tell those apart without a live session.
+ */
+export async function captureFailureContext(page, shot, jobId, label) {
+  const [screenshot, url, title, buttons] = await Promise.all([
+    shot(page, jobId, label).catch(() => null),
+    Promise.resolve(page.url()),
+    page.title().catch(() => ''),
+    page.evaluate(() => Array.from(document.querySelectorAll('button, a[role="button"], [aria-label*="pply" i]'))
+      .map(b => (b.getAttribute('aria-label') || b.textContent || '').trim())
+      .filter(Boolean).slice(0, 12)).catch(() => []),
+  ]);
+  return { screenshot, url, title, buttons };
+}
