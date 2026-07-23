@@ -720,3 +720,85 @@ export function expireStaleParked(days = 14) {
   return db.prepare(`UPDATE jobs SET status = 'expired'
                      WHERE status = 'awaiting_answers' AND parked_at < ?`).run(cutoff).changes;
 }
+
+// ---------------------------------------------------------------------------
+// Adaptive agent, Phase 1 — capture (docs/APPLY_BOT_ADAPTIVE_AGENT_PHASE1.md).
+//
+// A raw *observation* of an unknown application page at the moment it defeated
+// the deterministic flow (no form found, no fillable fields, or a wizard that
+// would not advance). This is the dataset the LLM planner (Phase 2) is built
+// against — deliberately separate from the future `page_plans` cache, which
+// holds *solved, replayable* structures rather than failures.
+//
+// Keyed by a host+control fingerprint and upserted: the auto loop re-hits the
+// same dead postings on every cycle, and appending a row each time would bury
+// the distinct shapes we actually want to see under duplicates.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS page_captures (
+  id              INTEGER PRIMARY KEY,
+  -- Soft pointer, not a foreign key: a capture is an observational log entry and
+  -- must not be blocked (or cascade-deleted) by the referenced job's lifecycle.
+  job_id          INTEGER,
+  captured_at     TEXT NOT NULL,
+  first_seen_at   TEXT NOT NULL,
+  vendor          TEXT,
+  host            TEXT,
+  url             TEXT,
+  title           TEXT,
+  fingerprint     TEXT NOT NULL,
+  failure_stage   TEXT,
+  failure_reason  TEXT,
+  control_count   INTEGER,
+  snapshot_path   TEXT,
+  screenshot_path TEXT,
+  seen_count      INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_page_captures_fp ON page_captures(fingerprint);
+`);
+
+/**
+ * Insert a capture, or bump the one already recorded for this fingerprint.
+ * Returns the row id either way, so the caller can name the snapshot files
+ * after it and (on a repeat) overwrite the previous ones in place.
+ */
+export function upsertPageCapture({ jobId = null, vendor = null, host = null, url = null,
+                                    title = null, fingerprint, failureStage = null,
+                                    failureReason = null, controlCount = null }) {
+  const existing = db.prepare('SELECT id FROM page_captures WHERE fingerprint = ?').get(fingerprint);
+  if (existing) {
+    db.prepare(`
+      UPDATE page_captures SET
+        captured_at = @now, job_id = @jobId, vendor = @vendor, host = @host, url = @url,
+        title = @title, failure_stage = @failureStage, failure_reason = @failureReason,
+        control_count = @controlCount, seen_count = seen_count + 1
+      WHERE id = @id`).run({
+      id: existing.id, now: now(), jobId, vendor, host, url, title,
+      failureStage, failureReason, controlCount,
+    });
+    return existing.id;
+  }
+  const info = db.prepare(`
+    INSERT INTO page_captures (job_id, captured_at, first_seen_at, vendor, host, url, title,
+                              fingerprint, failure_stage, failure_reason, control_count)
+    VALUES (@jobId, @now, @now, @vendor, @host, @url, @title, @fingerprint,
+            @failureStage, @failureReason, @controlCount)`).run({
+    jobId, now: now(), vendor, host, url, title, fingerprint,
+    failureStage, failureReason, controlCount,
+  });
+  return info.lastInsertRowid;
+}
+
+/** Record where the snapshot JSON and screenshot for a capture were written. */
+export function setCapturePaths(id, snapshotPath, screenshotPath) {
+  db.prepare('UPDATE page_captures SET snapshot_path = ?, screenshot_path = ? WHERE id = ?')
+    .run(snapshotPath, screenshotPath, id);
+}
+
+/** Distinct captured page shapes, newest first — the `npm run captures` view. */
+export function listPageCaptures({ limit = 200 } = {}) {
+  return db.prepare(`
+    SELECT id, host, vendor, failure_stage, control_count, seen_count,
+           captured_at, first_seen_at, fingerprint, title, url
+    FROM page_captures ORDER BY captured_at DESC LIMIT ?`).all(limit);
+}

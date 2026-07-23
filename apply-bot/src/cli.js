@@ -5,7 +5,7 @@ import { getContext, closeContext, isLoggedIn, attachScreencast, closeBrowserOnE
 import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
 import { emit } from './bus.js';
-import { getSetting, setSetting, todayRates, allSearches, blockedCompanies } from './db.js';
+import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures } from './db.js';
 
 const cmd = process.argv[2];
 
@@ -165,6 +165,28 @@ const commands = {
     console.log('\n  Add, disable or remove these in the dashboard\'s Search terms panel.\n');
   },
 
+  async captures() {
+    const rows = listPageCaptures();
+    if (!rows.length) {
+      console.log('\n  No unknown-page captures yet. They accrue as the apply stage hits');
+      console.log('  application pages no vendor adapter can fill.\n');
+      return;
+    }
+    const age = ts => {
+      const h = Math.round((Date.now() - new Date(ts).getTime()) / 36e5);
+      return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+    };
+    console.log(`\n  ${rows.length} distinct unsolved page shape(s), newest first:\n`);
+    for (const r of rows) {
+      console.log(
+        `  ${(r.host || '?').padEnd(32)} ${String(r.vendor || '').padEnd(10)} ` +
+        `${String(r.failure_stage || '').padEnd(9)} ${String(r.control_count ?? 0).padStart(3)} ctrl  ` +
+        `×${String(r.seen_count).padStart(3)}  ${age(r.captured_at).padStart(4)} ago  [${r.fingerprint.slice(0, 8)}]`,
+      );
+    }
+    console.log('\n  Snapshots (a11y tree + DOM + screenshot) live under data/agent-snapshots/<fp>/.\n');
+  },
+
   async stop() {
     fs.writeFileSync(PATHS.stop, new Date().toISOString());
     console.log('STOP file written — all runs will halt before their next action.');
@@ -208,6 +230,7 @@ if (!commands[cmd]) {
     npm run discover    Discovery only
     npm run enrich [n]  Fetch JDs and resolve apply routes
     npm run searches    List configured searches
+    npm run captures    List unknown application pages the apply flow couldn't fill
     npm run stop        Write the kill switch
     npm run resume      Clear the kill switch
     npm run mode [m]    Get/set observe | review | auto
