@@ -670,7 +670,14 @@ const server = http.createServer(async (req, res) => {
   if (!full.startsWith(DASH) || !fs.existsSync(full)) {
     res.writeHead(404); return res.end('Not found');
   }
-  res.writeHead(200, { 'Content-Type': MIME[path.extname(full)] || 'text/plain' });
+  // No caching for the dashboard. It ships as loose files that change whenever
+  // the code does, and there's no build step to fingerprint them — so without
+  // this a browser will keep running a stale app.js after an update (which is
+  // how a freshly added control, like the autopilot button, silently no-ops).
+  res.writeHead(200, {
+    'Content-Type': MIME[path.extname(full)] || 'text/plain',
+    'Cache-Control': 'no-store, must-revalidate',
+  });
   fs.createReadStream(full).pipe(res);
 });
 
