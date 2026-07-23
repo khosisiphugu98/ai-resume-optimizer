@@ -27,6 +27,7 @@ const SUITES = [
   'enrich-tests.mjs',
   'searches-tests.mjs',
   'settings-tests.mjs',
+  'capture-tests.mjs',
   'orchestrator-tests.mjs',
 ];
 

@@ -6,6 +6,7 @@ import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
 import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
+import { captureUnsolvedPage } from './agent/capture.js';
 
 const MODAL = [
   // Verified live on the server-driven UI: the Easy Apply modal is a native
@@ -191,6 +192,10 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
     }
 
     if (result.outcome === 'stuck') {
+      // Capture before abandoning — abandon() closes the modal, after which the
+      // stuck form is gone. Easy Apply is a known vendor, but a form that won't
+      // advance is exactly the unanswerable-structure case the planner learns from.
+      await captureUnsolvedPage(page, { job, vendor: 'linkedin_easy', stage: 'stuck', reason: result.reason });
       await abandon(page);
       throw new Error(result.reason);
     }

@@ -9,6 +9,7 @@ import { runWizard, buttonByName, stepSignature, firstVisible, waitForFirstVisib
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import { detectVendor } from './adapters/index.js';
+import { captureUnsolvedPage } from './agent/capture.js';
 
 async function shot(page, jobId, label) {
   const dir = path.join(PATHS.artifacts, 'screenshots', String(jobId));
@@ -160,13 +161,21 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   // falling back to the accessibility tree is what makes an unknown React
   // careers site reachable at all.
   const scope = (await formScope(page, vendor)) || (await a11yScope(page));
-  if (!scope) throw new Error(`No application form found on ${vendor.vendor} page`);
+  if (!scope) {
+    await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'no-form',
+      reason: `No application form found on ${vendor.vendor} page` });
+    throw new Error(`No application form found on ${vendor.vendor} page`);
+  }
 
   const { frame, rootSelector } = scope;
   const answerCtx = { ...ctx, ats: vendor.vendor };
 
   const first = await collectFields(frame, rootSelector, vendor);
-  if (!first.items.length) throw new Error(`Form on ${vendor.vendor} had no fillable fields`);
+  if (!first.items.length) {
+    await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'no-fields',
+      reason: `Form on ${vendor.vendor} had no fillable fields` });
+    throw new Error(`Form on ${vendor.vendor} had no fillable fields`);
+  }
 
   // Uploads are handled here rather than through the answer resolver, and inside
   // collect rather than once up front — a wizard can put an attachment slot on
@@ -230,7 +239,10 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     };
   }
 
-  if (result.outcome === 'stuck') throw new Error(result.reason);
+  if (result.outcome === 'stuck') {
+    await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'stuck', reason: result.reason });
+    throw new Error(result.reason);
+  }
 
   // An unknown form is never auto-submitted, whatever the mode.
   if (result.outcome === 'ready') {

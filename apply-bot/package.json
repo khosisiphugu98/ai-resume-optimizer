@@ -14,6 +14,7 @@
     "discover": "node src/cli.js discover",
     "enrich": "node src/cli.js enrich",
     "searches": "node src/cli.js searches",
+    "captures": "node src/cli.js captures",
     "stop": "node src/cli.js stop",
     "resume": "node src/cli.js resume",
     "mode": "node src/cli.js mode",
