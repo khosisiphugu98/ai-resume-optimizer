@@ -1,24 +1,35 @@
 import {
   SELECTORS, LINKEDIN, CAPS, ZA_LOCATIONS, OPEN_REMOTE,
+  DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED,
 } from '../config.js';
 import { titleRejectRe, authBlockerMatch } from '../reject-criteria.js';
 import {
   getContext, attachScreencast, assertNoChallenge, stopRequested,
   humanDelay, textOf, ChallengeDetected,
 } from '../browser.js';
-import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked } from '../db.js';
+import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked, getSetting } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { looksLikeEmailApplication } from '../email/extract.js';
 import { fetchGuestPosting, seniorityReject } from './jd-fetch.js';
 
-function buildSearchUrl({ keywords, location, remote, easyApplyOnly }) {
+/** The date-posted window in force, resolved from the setting with a safe fallback. */
+export function activeDatePostedWindow() {
+  const key = getSetting('date_posted', DEFAULT_DATE_POSTED);
+  return DATE_POSTED_WINDOWS.find(w => w.key === key)
+    || DATE_POSTED_WINDOWS.find(w => w.key === DEFAULT_DATE_POSTED);
+}
+
+export function buildSearchUrl({ keywords, location, remote, easyApplyOnly }) {
   const p = new URLSearchParams({
     keywords,
     location,
-    f_TPR: 'r86400',   // last 24h — keeps volume sane and freshness high
     sortBy: 'DD',
     f_E: '2,3,4',      // entry / associate / mid-senior — matches the band in §2.2
   });
+  // How far back to look — operator-set from the gear, defaulting to the past
+  // month so the pool is deep rather than same-day thin. "Any time" omits f_TPR.
+  const win = activeDatePostedWindow();
+  if (win?.seconds) p.set('f_TPR', `r${win.seconds}`);
   if (remote) p.set('f_WT', '2');
   if (easyApplyOnly) p.set('f_AL', 'true');
   return `${LINKEDIN.searchBase}?${p}`;
@@ -110,6 +121,8 @@ export async function runDiscovery({ searches = activeSearches(), maxPerSearch =
   const ctx = await getContext();
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
+
+  emit({ stage: 'discover', message: `Looking at postings from the ${activeDatePostedWindow().label.toLowerCase()}` });
 
   let found = 0, kept = 0, rejected = 0, selectorMisses = 0;
 
