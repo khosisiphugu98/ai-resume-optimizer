@@ -10,6 +10,29 @@ import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import { detectVendor } from './adapters/index.js';
 import { captureUnsolvedPage } from './agent/capture.js';
+import { runAgent } from './agent/index.js';
+
+/**
+ * Map an adaptive-agent result into the standard applyExternal return. The agent
+ * is fill-only, so a solved page comes back as 'ready' (held for review) or
+ * 'parked' — never 'submitted'.
+ */
+function agentReturn(a, { vendor, url, screenshots }) {
+  const base = {
+    vendor: vendor.vendor, url, filled: a.filled, screenshots, steps: a.steps,
+    agent: { kind: a.planKind, fingerprint: a.fingerprint },
+  };
+  if (a.outcome === 'parked') {
+    return {
+      outcome: 'parked', ...base,
+      parked: (a.parked || []).map(p => ({
+        question: p.question, questionNorm: normaliseQuestion(p.question),
+        fieldType: p.fieldType, options: p.options, reason: p.reason, tier: p.tier,
+      })),
+    };
+  }
+  return { outcome: 'ready', ...base, heldForReview: 'adaptive agent never auto-submits' };
+}
 
 async function shot(page, jobId, label) {
   const dir = path.join(PATHS.artifacts, 'screenshots', String(jobId));
@@ -162,6 +185,11 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   // careers site reachable at all.
   const scope = (await formScope(page, vendor)) || (await a11yScope(page));
   if (!scope) {
+    const agent = await runAgent(page, {
+      job, ctx: { ...ctx, ats: vendor.vendor }, resumePath,
+      stage: 'no-form', reason: `No application form found on ${vendor.vendor} page`,
+    });
+    if (agent) return agentReturn(agent, { vendor, url, screenshots });
     await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'no-form',
       reason: `No application form found on ${vendor.vendor} page` });
     throw new Error(`No application form found on ${vendor.vendor} page`);
@@ -172,6 +200,11 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
 
   const first = await collectFields(frame, rootSelector, vendor);
   if (!first.items.length) {
+    const agent = await runAgent(page, {
+      job, ctx: answerCtx, resumePath,
+      stage: 'no-fields', reason: `Form on ${vendor.vendor} had no fillable fields`,
+    });
+    if (agent) return agentReturn(agent, { vendor, url, screenshots });
     await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'no-fields',
       reason: `Form on ${vendor.vendor} had no fillable fields` });
     throw new Error(`Form on ${vendor.vendor} had no fillable fields`);
@@ -240,6 +273,10 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   }
 
   if (result.outcome === 'stuck') {
+    const agent = await runAgent(page, {
+      job, ctx: answerCtx, resumePath, stage: 'stuck', reason: result.reason,
+    });
+    if (agent) return agentReturn(agent, { vendor, url, screenshots });
     await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'stuck', reason: result.reason });
     throw new Error(result.reason);
   }

@@ -228,9 +228,9 @@ async function refreshReview() {
   $('#rvCount').textContent = items.length || '';
   if (!items.length) return;
 
-  $('#review').innerHTML = items.map(({ job, filled, screenshots, steps }) => `
+  $('#review').innerHTML = items.map(({ job, filled, screenshots, steps, agent }) => `
     <div class="rv" data-id="${job.id}">
-      <h4>${esc(job.title)}</h4>
+      <h4>${esc(job.title)}${agent ? ` <span class="tier agent" title="Filled by the adaptive agent (${esc(agent)})">agent</span>` : ''}</h4>
       <div class="co">${esc(job.company)} · ${esc(job.location) || '—'} · fit ${job.fit_score ?? '—'} · ${steps} step${steps === 1 ? '' : 's'}</div>
       <table>${filled.map(f => `<tr>
         <td class="q">${esc(f.question)}</td>
@@ -706,6 +706,27 @@ async function renderSettings() {
     </div>
 
     <div class="set">
+      <h4>Adaptive agent ${badge(s.agent.enabled, 'on', 'off')}</h4>
+      <p>When the normal flow can't fill an unknown application page, an LLM reads
+         the page and fills it — <b>fill-only, never submits</b>, held for review.
+         Uses Claude if a key is set below, otherwise falls back to OpenAI gpt-4o.</p>
+      <label class="row" style="gap:8px;margin-bottom:8px">
+        <input type="checkbox" id="agentEnabled"${s.agent.enabled ? ' checked' : ''} style="width:auto">
+        Enable (fill-only escalation)
+      </label>
+      <input id="anthropicKey" type="password" placeholder="sk-ant-..." autocomplete="off">
+      <div class="row">
+        <button class="primary" id="anthropicSave">Save Claude key</button>
+        ${s.agent.anthropic ? '<button class="quiet" id="anthropicClear">Remove</button>' : ''}
+      </div>
+      <div class="note">${s.agent.anthropic
+        ? `Claude connected ${esc(s.agent.anthropicHint || '')} — planner uses claude-opus-4-8.`
+        : 'No Claude key — the planner falls back to gpt-4o (needs the OpenAI key above).'}
+        Stored in <code>profile/secrets.json</code>, chmod 600.</div>
+      <div id="anthropicMsg" class="msg"></div>
+    </div>
+
+    <div class="set">
       <h4>Daily caps</h4>
       <p>Per-channel limits, reset at midnight. Only Easy Apply carries LinkedIn
          risk. Edit in <code>src/config.js</code>.</p>
@@ -721,16 +742,27 @@ async function openSettings() {
   $('#settings').classList.add('open');
 }
 
-// The date-posted window is the one setting saved on change rather than on a
-// button — it is a single choice, and there is nothing to confirm.
+// Settings saved on change rather than on a button — single choices with
+// nothing to confirm.
 document.addEventListener('change', async e => {
-  if (e.target.id !== 'datePosted') return;
-  const r = await (await fetch('/api/settings', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ datePosted: e.target.value }),
-  })).json();
-  if (r.error) return setMsg('#datePostedMsg', r.error, 'err');
-  setMsg('#datePostedMsg', 'Saved — applies on the next discovery run.', 'ok');
+  if (e.target.id === 'datePosted') {
+    const r = await (await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ datePosted: e.target.value }),
+    })).json();
+    if (r.error) return setMsg('#datePostedMsg', r.error, 'err');
+    return setMsg('#datePostedMsg', 'Saved — applies on the next discovery run.', 'ok');
+  }
+  if (e.target.id === 'agentEnabled') {
+    await fetch('/api/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agentEnabled: e.target.checked }),
+    });
+    await renderSettings();
+    return setMsg('#anthropicMsg', e.target.checked
+      ? 'Agent enabled — it escalates unknown pages on the next apply run (fill-only).'
+      : 'Agent disabled.', 'ok');
+  }
 });
 
 document.addEventListener('click', async e => {
@@ -761,6 +793,29 @@ document.addEventListener('click', async e => {
     await renderSettings();
     setMsg('#openaiMsg', 'Key removed.', 'ok');
     refreshBoard();
+    return;
+  }
+
+  if (id === 'anthropicSave') {
+    const key = $('#anthropicKey').value.trim();
+    if (!key) return setMsg('#anthropicMsg', 'Paste a key first.', 'err');
+    if (!key.startsWith('sk-ant-')) return setMsg('#anthropicMsg', 'Anthropic keys start with "sk-ant-".', 'err');
+    await fetch('/api/key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key, provider: 'anthropic' }),
+    });
+    await renderSettings();
+    setMsg('#anthropicMsg', 'Saved. The agent planner will use Claude.', 'ok');
+    return;
+  }
+
+  if (id === 'anthropicClear') {
+    await fetch('/api/key', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: '', provider: 'anthropic' }),
+    });
+    await renderSettings();
+    setMsg('#anthropicMsg', 'Key removed — planner falls back to gpt-4o.', 'ok');
     return;
   }
 

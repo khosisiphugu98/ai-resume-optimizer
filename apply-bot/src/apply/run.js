@@ -26,7 +26,9 @@ function recordAttempt(job, channel, result, outcome) {
     channel,
     resume_path: job.resume_path || null,
     ats_vendor: result.vendor || job.ats_vendor || null,
-    adapter: result.vendor ? `ats:${result.vendor}` : 'linkedin-easy',
+    // The adaptive agent records which planner shape solved the page, so the
+    // review card can show it came from the agent rather than a vendor adapter.
+    adapter: result.agent ? `agent:${result.agent.kind}` : (result.vendor ? `ats:${result.vendor}` : 'linkedin-easy'),
     submitted_at: outcome === 'submitted' ? new Date().toISOString() : null,
     evidence: result.evidence || null,
     outcome,
