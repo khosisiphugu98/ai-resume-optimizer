@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 
 import {
-  db, upsertJob, updateJob, queueEmail, getSetting, setSetting,
+  db, upsertJob, updateJob, queueEmail, getSetting, setSetting, setDatePostedWindow,
   allSearches, activeSearches, addSearch, setSearchEnabled, deleteSearch,
   blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, isCompanyBlocked, blockedCompanies,
 } from '../src/db.js';
@@ -141,6 +141,22 @@ test('the window rides alongside the other filters, it does not replace them', (
   assert.match(url, /f_WT=2/);          // remote still there
   assert.match(url, /f_AL=true/);       // easy-apply still there
   assert.match(url, /sortBy=DD/);
+});
+
+test('setting a valid window persists it and reports which one, for the log', () => {
+  clearWindow();
+  const win = setDatePostedWindow('week');
+  assert.equal(win.label, 'Past week');
+  assert.equal(getSetting('date_posted'), 'week');
+  assert.equal(activeDatePostedWindow().key, 'week');
+});
+
+test('an unknown window is refused, not stored — this is what the API turns into a 400', () => {
+  clearWindow();
+  setDatePostedWindow('month');
+  assert.throws(() => setDatePostedWindow('decade'), /unknown window/i);
+  // The bad value must not have overwritten the good one.
+  assert.equal(getSetting('date_posted'), 'month');
 });
 
 clearWindow();   // leave the setting as a fresh install would have it

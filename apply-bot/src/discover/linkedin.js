@@ -122,7 +122,10 @@ export async function runDiscovery({ searches = activeSearches(), maxPerSearch =
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
 
-  emit({ stage: 'discover', message: `Looking at postings from the ${activeDatePostedWindow().label.toLowerCase()}` });
+  const win = activeDatePostedWindow();
+  emit({ stage: 'discover', message: win.seconds
+    ? `Looking at postings from the ${win.label.toLowerCase()}`
+    : 'Looking at postings from any time' });
 
   let found = 0, kept = 0, rejected = 0, selectorMisses = 0;
 
