@@ -28,6 +28,7 @@ const SUITES = [
   'searches-tests.mjs',
   'settings-tests.mjs',
   'capture-tests.mjs',
+  'agent-tests.mjs',
   'orchestrator-tests.mjs',
 ];
 

@@ -13,10 +13,15 @@ export function loadSecrets() {
 }
 
 /** Called at server start so stages spawned later see the key. */
+// Keys we mirror into the environment so stages spawned later can read them.
+// OpenAI powers scoring + field answers; Anthropic powers the adaptive agent's
+// planner (Phase 2) with OpenAI as the fallback.
+const ENV_KEYS = ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY'];
+
 export function applySecretsToEnv() {
   const s = loadSecrets();
-  if (s.OPENAI_API_KEY && !process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = s.OPENAI_API_KEY;
-  return { openai: !!process.env.OPENAI_API_KEY };
+  for (const k of ENV_KEYS) if (s[k] && !process.env[k]) process.env[k] = s[k];
+  return { openai: !!process.env.OPENAI_API_KEY, anthropic: !!process.env.ANTHROPIC_API_KEY };
 }
 
 export function setSecret(key, value) {
@@ -26,16 +31,18 @@ export function setSecret(key, value) {
   fs.mkdirSync(path.dirname(FILE), { recursive: true });
   fs.writeFileSync(FILE, JSON.stringify(s, null, 2));
   fs.chmodSync(FILE, 0o600);
-  if (key === 'OPENAI_API_KEY') {
-    if (v) process.env.OPENAI_API_KEY = v; else delete process.env.OPENAI_API_KEY;
+  if (ENV_KEYS.includes(key)) {
+    if (v) process.env[key] = v; else delete process.env[key];
   }
   return { ok: true };
 }
 
-/** Never return the key itself to the browser — only whether it is set. */
+/** Never return a key itself to the browser — only whether it is set, plus a hint. */
 export function secretsStatus() {
   return {
     openai: !!process.env.OPENAI_API_KEY,
     openaiHint: process.env.OPENAI_API_KEY ? `…${process.env.OPENAI_API_KEY.slice(-4)}` : null,
+    anthropic: !!process.env.ANTHROPIC_API_KEY,
+    anthropicHint: process.env.ANTHROPIC_API_KEY ? `…${process.env.ANTHROPIC_API_KEY.slice(-4)}` : null,
   };
 }

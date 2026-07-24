@@ -95,11 +95,15 @@ const routes = {
     json(res, jobs.map(job => {
       const app = db.prepare(
         `SELECT * FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1`).get(job.id);
+      // adapter_used like "agent:form" marks an application the adaptive agent
+      // filled — surfaced so the card can badge it and name the plan shape.
+      const adapter = app?.adapter_used || '';
       return {
         job,
         filled: app?.filled_json ? JSON.parse(app.filled_json) : [],
         screenshots: app?.screenshots_json ? JSON.parse(app.screenshots_json) : [],
         steps: app?.step_count ?? 0,
+        agent: adapter.startsWith('agent:') ? adapter.slice('agent:'.length) : null,
       };
     }));
   },
@@ -120,6 +124,14 @@ const routes = {
     discovery: {
       datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED),
       windows: DATE_POSTED_WINDOWS.map(({ key, label }) => ({ key, label })),
+    },
+    // The adaptive agent (Phase 2, fill-only). Off by default; when on, it
+    // escalates unknown application pages to the planner. Claude if a key is set,
+    // gpt-4o otherwise.
+    agent: {
+      enabled: getSetting('agent_enabled') === '1',
+      anthropic: secretsStatus().anthropic,
+      anthropicHint: secretsStatus().anthropicHint,
     },
     paths: { profileDir: path.join(ROOT, 'profile'), artifacts: PATHS.artifacts },
   }),
@@ -311,9 +323,14 @@ const server = http.createServer(async (req, res) => {
   // heuristic and answer drafting is unavailable.
   if (url.pathname === '/api/key' && req.method === 'POST') {
     const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
-    const { key } = JSON.parse(body || '{}');
-    setSecret('OPENAI_API_KEY', key || '');
-    emit({ stage: 'control', message: key ? 'OpenAI key saved — AI scoring and answer drafting enabled' : 'OpenAI key cleared' });
+    const { key, provider = 'openai' } = JSON.parse(body || '{}');
+    if (provider === 'anthropic') {
+      setSecret('ANTHROPIC_API_KEY', key || '');
+      emit({ stage: 'control', message: key ? 'Anthropic key saved — the agent planner will use Claude (gpt-4o fallback)' : 'Anthropic key cleared — agent planner falls back to gpt-4o' });
+    } else {
+      setSecret('OPENAI_API_KEY', key || '');
+      emit({ stage: 'control', message: key ? 'OpenAI key saved — AI scoring and answer drafting enabled' : 'OpenAI key cleared' });
+    }
     emitBoard();
     return json(res, secretsStatus());
   }
@@ -587,16 +604,23 @@ const server = http.createServer(async (req, res) => {
   // window it started with.
   if (url.pathname === '/api/settings' && req.method === 'POST') {
     const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
-    const { datePosted } = JSON.parse(body || '{}');
+    const { datePosted, agentEnabled } = JSON.parse(body || '{}');
     try {
       if (datePosted !== undefined) {
         const win = setDatePostedWindow(datePosted);
         emit({ stage: 'discover', message: `Job freshness set to "${win.label}" — applies on the next discovery run` });
       }
+      if (agentEnabled !== undefined) {
+        setSetting('agent_enabled', agentEnabled ? '1' : '0');
+        emit({ stage: 'apply', message: `Adaptive agent ${agentEnabled ? 'enabled' : 'disabled'} — applies on the next apply run (fill-only, never submits)` });
+      }
     } catch (err) {
       return json(res, { error: err.message }, 400);
     }
-    return json(res, { datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED) });
+    return json(res, {
+      datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED),
+      agentEnabled: getSetting('agent_enabled') === '1',
+    });
   }
 
   // Edit the search list. Takes effect on the next discovery run — nothing here

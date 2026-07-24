@@ -50,7 +50,7 @@ function pageOutline() {
 }
 
 /** Walk every frame, gathering the controls both collectors can see. */
-async function buildSnapshot(page) {
+export async function buildSnapshot(page) {
   const frames = [];
   const controls = [];
   for (const frame of page.frames()) {
