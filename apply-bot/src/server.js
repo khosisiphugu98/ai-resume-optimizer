@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { WebSocketServer } from 'ws';
-import { ROOT, SERVER, CAPS, PATHS } from './config.js';
+import { ROOT, SERVER, CAPS, PATHS, DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED } from './config.js';
 import {
   boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, releaseAnswered,
   allSearches, addSearch, setSearchEnabled, deleteSearch,
@@ -115,6 +115,12 @@ const routes = {
     },
     caps: CAPS,
     auto: getSetting('auto') === '1',
+    // What discovery searches for, window-wise. The wider it is, the deeper the
+    // pool — set from the gear, applied on the next discovery run.
+    discovery: {
+      datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED),
+      windows: DATE_POSTED_WINDOWS.map(({ key, label }) => ({ key, label })),
+    },
     paths: { profileDir: path.join(ROOT, 'profile'), artifacts: PATHS.artifacts },
   }),
 
@@ -574,6 +580,21 @@ const server = http.createServer(async (req, res) => {
       return json(res, { error: err.message }, 400);
     }
     return json(res, { threshold: currentThreshold(), defaultThreshold: THRESHOLD, groups: criteriaForUi() });
+  }
+
+  // Global discovery settings from the gear. Only the date-posted window for now.
+  // Takes effect on the next discovery run — a run already in flight keeps the
+  // window it started with.
+  if (url.pathname === '/api/settings' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { datePosted } = JSON.parse(body || '{}');
+    if (datePosted !== undefined) {
+      const win = DATE_POSTED_WINDOWS.find(w => w.key === datePosted);
+      if (!win) return json(res, { error: `unknown window "${datePosted}"` }, 400);
+      setSetting('date_posted', win.key);
+      emit({ stage: 'discover', message: `Job freshness set to "${win.label}" — applies on the next discovery run` });
+    }
+    return json(res, { datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED) });
   }
 
   // Edit the search list. Takes effect on the next discovery run — nothing here

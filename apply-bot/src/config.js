@@ -64,6 +64,20 @@ export const SEARCHES = [
   { tier: 'D', keywords: 'Web Analyst GA4', location: 'South Africa' },
 ];
 
+// How far back discovery looks — LinkedIn's f_TPR filter, in seconds. This is
+// the single knob that decides the size of the pool. A 24h window (the old
+// hardcoded default) kept freshness high but starved the board: most days it
+// returned a handful of cards, and being the first to apply is not an advantage
+// worth a thin pipeline. The default is now the past month; the operator can
+// narrow or widen it from the gear. `seconds: null` means "any time" (no filter).
+export const DATE_POSTED_WINDOWS = [
+  { key: 'day',   label: 'Past 24 hours', seconds: 86400 },
+  { key: 'week',  label: 'Past week',     seconds: 604800 },
+  { key: 'month', label: 'Past month',    seconds: 2592000 },
+  { key: 'any',   label: 'Any time',      seconds: null },
+];
+export const DEFAULT_DATE_POSTED = 'month';
+
 // Seniority band: analyst/associate/mid. Above-band applications waste budget.
 // The word list is the editable source of truth (see src/reject-criteria.js —
 // the operator tunes it from the Rejected column). REJECT_TITLE is the compiled

@@ -10,10 +10,12 @@
 import assert from 'node:assert/strict';
 
 import {
-  db, upsertJob, updateJob, queueEmail,
+  db, upsertJob, updateJob, queueEmail, getSetting, setSetting,
   allSearches, activeSearches, addSearch, setSearchEnabled, deleteSearch,
   blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, isCompanyBlocked, blockedCompanies,
 } from '../src/db.js';
+import { buildSearchUrl, activeDatePostedWindow } from '../src/discover/linkedin.js';
+import { DEFAULT_DATE_POSTED } from '../src/config.js';
 
 let pass = 0, fail = 0;
 const test = (name, fn) => {
@@ -100,6 +102,48 @@ test('each term reports how many jobs it has turned up', () => {
   updateJob(id, { search_keywords: 'Campaign Manager' });
   assert.equal(allSearches()[0].found, 1);
 });
+
+// ---------------------------------------------------------------------------
+console.log('\ndate-posted window');
+
+const clearWindow = () => db.prepare(`DELETE FROM settings WHERE key = 'date_posted'`).run();
+
+test('the default is the past month, not same-day — the pool has to be deep', () => {
+  clearWindow();
+  assert.equal(DEFAULT_DATE_POSTED, 'month');
+  assert.equal(activeDatePostedWindow().key, 'month');
+  // r2592000 = 30 days. This is the whole point of the change: 24h was starving it.
+  assert.match(buildSearchUrl({ keywords: 'Analyst', location: 'South Africa' }), /f_TPR=r2592000/);
+});
+
+test('narrowing the window to 24h is honoured on the very next URL built', () => {
+  setSetting('date_posted', 'day');
+  assert.equal(activeDatePostedWindow().key, 'day');
+  assert.match(buildSearchUrl({ keywords: 'Analyst', location: 'South Africa' }), /f_TPR=r86400/);
+});
+
+test('"any time" drops the filter entirely rather than sending an empty one', () => {
+  setSetting('date_posted', 'any');
+  assert.doesNotMatch(buildSearchUrl({ keywords: 'Analyst', location: 'South Africa' }), /f_TPR/);
+});
+
+test('a stale or bogus setting falls back to the default rather than breaking the URL', () => {
+  setSetting('date_posted', 'fortnight');   // never a valid key
+  assert.equal(activeDatePostedWindow().key, DEFAULT_DATE_POSTED);
+  assert.match(buildSearchUrl({ keywords: 'Analyst', location: 'South Africa' }), /f_TPR=r2592000/);
+});
+
+test('the window rides alongside the other filters, it does not replace them', () => {
+  setSetting('date_posted', 'week');
+  const url = buildSearchUrl({ keywords: 'GTM Engineer', location: 'European Union', remote: true, easyApplyOnly: true });
+  assert.match(url, /f_TPR=r604800/);
+  assert.match(url, /f_E=2%2C3%2C4/);   // seniority band still there
+  assert.match(url, /f_WT=2/);          // remote still there
+  assert.match(url, /f_AL=true/);       // easy-apply still there
+  assert.match(url, /sortBy=DD/);
+});
+
+clearWindow();   // leave the setting as a fresh install would have it
 
 // ---------------------------------------------------------------------------
 console.log('\nblocking one application');

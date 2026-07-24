@@ -306,10 +306,11 @@
   .set .state.off { color: var(--warn); border-color: #4a3a12; }
   .set p { margin: 0 0 9px; color: var(--dim); font-size: 11px; line-height: 1.55; }
   .set ol { margin: 0 0 9px; padding-left: 18px; color: var(--dim); font-size: 11px; line-height: 1.7; }
-  .set input, .set textarea {
+  .set input, .set textarea, .set select {
     width: 100%; background: #0d1117; border: 1px solid var(--line); border-radius: 5px;
     color: var(--ink); padding: 6px 8px; font: inherit; font-size: 12px; margin-bottom: 7px;
   }
+  .set select:hover { border-color: var(--accent); }
   .set textarea { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 10px; height: 74px; resize: vertical; }
   .set .row { display: flex; gap: 6px; align-items: center; }
   .set button {

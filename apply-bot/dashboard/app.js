@@ -694,6 +694,18 @@ async function renderSettings() {
     </div>
 
     <div class="set">
+      <h4>Job freshness</h4>
+      <p>How far back discovery looks. A wider window means a much bigger pool —
+         and you are rarely the first to apply anyway, so same-day-only was
+         leaving jobs on the table. Applies on the next discovery run.</p>
+      <select id="datePosted">
+        ${s.discovery.windows.map(w =>
+          `<option value="${esc(w.key)}"${w.key === s.discovery.datePosted ? ' selected' : ''}>${esc(w.label)}</option>`).join('')}
+      </select>
+      <div id="datePostedMsg" class="msg"></div>
+    </div>
+
+    <div class="set">
       <h4>Daily caps</h4>
       <p>Per-channel limits, reset at midnight. Only Easy Apply carries LinkedIn
          risk. Edit in <code>src/config.js</code>.</p>
@@ -708,6 +720,18 @@ async function openSettings() {
   await renderSettings();
   $('#settings').classList.add('open');
 }
+
+// The date-posted window is the one setting saved on change rather than on a
+// button — it is a single choice, and there is nothing to confirm.
+document.addEventListener('change', async e => {
+  if (e.target.id !== 'datePosted') return;
+  const r = await (await fetch('/api/settings', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ datePosted: e.target.value }),
+  })).json();
+  if (r.error) return setMsg('#datePostedMsg', r.error, 'err');
+  setMsg('#datePostedMsg', 'Saved — applies on the next discovery run.', 'ok');
+});
 
 document.addEventListener('click', async e => {
   const id = e.target.id;
