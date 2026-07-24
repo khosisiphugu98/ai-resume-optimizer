@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PATHS, SEARCHES } from './config.js';
+import { PATHS, SEARCHES, DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED } from './config.js';
 import { normaliseSkill } from './profile.js';
 
 fs.mkdirSync(path.dirname(PATHS.db), { recursive: true });
@@ -141,6 +141,18 @@ export function getSetting(key, fallback = null) {
 export function setSetting(key, value) {
   db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?)
               ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(key, String(value));
+}
+
+/**
+ * Persist the date-posted window. Throws on an unknown key rather than storing
+ * junk — the caller turns that into a 400, the same way addSearch's throws do.
+ * Returns the window so the caller can name it in the event log.
+ */
+export function setDatePostedWindow(key) {
+  const win = DATE_POSTED_WINDOWS.find(w => w.key === key);
+  if (!win) throw new Error(`unknown window "${key}"`);
+  setSetting('date_posted', win.key);
+  return win;
 }
 
 const insertJob = db.prepare(`

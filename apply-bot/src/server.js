@@ -4,7 +4,7 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { ROOT, SERVER, CAPS, PATHS, DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED } from './config.js';
 import {
-  boardSnapshot, recentEvents, db, getSetting, setSetting, parkedQueue, releaseAnswered,
+  boardSnapshot, recentEvents, db, getSetting, setSetting, setDatePostedWindow, parkedQueue, releaseAnswered,
   allSearches, addSearch, setSearchEnabled, deleteSearch,
   blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, blockedCompanies,
   pendingOutcomes, setOutcome, autoTimeoutOutcomes, outcomeSummary,
@@ -588,11 +588,13 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === '/api/settings' && req.method === 'POST') {
     const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
     const { datePosted } = JSON.parse(body || '{}');
-    if (datePosted !== undefined) {
-      const win = DATE_POSTED_WINDOWS.find(w => w.key === datePosted);
-      if (!win) return json(res, { error: `unknown window "${datePosted}"` }, 400);
-      setSetting('date_posted', win.key);
-      emit({ stage: 'discover', message: `Job freshness set to "${win.label}" — applies on the next discovery run` });
+    try {
+      if (datePosted !== undefined) {
+        const win = setDatePostedWindow(datePosted);
+        emit({ stage: 'discover', message: `Job freshness set to "${win.label}" — applies on the next discovery run` });
+      }
+    } catch (err) {
+      return json(res, { error: err.message }, 400);
     }
     return json(res, { datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED) });
   }
