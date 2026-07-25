@@ -11,6 +11,9 @@ import assert from 'node:assert/strict';
 import { validatePlan, planPage } from '../src/apply/agent/plan.js';
 import { executePlan } from '../src/apply/agent/execute.js';
 import { runAgent } from '../src/apply/agent/index.js';
+import {
+  db, setSetting, getPlan, savePlan, bumpPlanSuccess, bumpPlanFail, PLAN_DEMOTE_AT,
+} from '../src/db.js';
 
 let pass = 0, fail = 0;
 const test = async (name, fn) => {
@@ -158,6 +161,75 @@ await test('the agent is off by default — runAgent short-circuits to null', as
   const r = await runAgent(/* page */ {}, { stage: 'no-form', reason: 'test' });
   assert.equal(r, null);
 });
+
+// ---------------------------------------------------------------------------
+console.log('\nlearned plan cache (Phase 3)');
+
+const resetPlans = () => db.exec('DELETE FROM page_plans');
+
+await test('a saved plan round-trips, and a re-save overwrites and resets counters', () => {
+  resetPlans();
+  savePlan({ fingerprint: 'fp-A', host: 'x.test', plan: validPlan });
+  assert.deepEqual(getPlan('fp-A').plan, validPlan);
+  bumpPlanSuccess('fp-A'); bumpPlanFail('fp-A');
+  const other = { ...validPlan, kind: 'landing' };
+  savePlan({ fingerprint: 'fp-A', host: 'x.test', plan: other });
+  const row = getPlan('fp-A');
+  assert.equal(row.plan.kind, 'landing');
+  assert.equal(row.success_count, 0);   // reset on re-solve
+  assert.equal(row.fail_count, 0);
+});
+
+await test('a plan that keeps failing without a winning majority is withheld (demoted)', () => {
+  resetPlans();
+  savePlan({ fingerprint: 'fp-B', host: 'x.test', plan: validPlan });
+  for (let i = 0; i < PLAN_DEMOTE_AT; i++) bumpPlanFail('fp-B');
+  assert.equal(getPlan('fp-B'), null, 'a demoted plan must not be served');
+});
+
+await test('a plan with more successes than failures is still served', () => {
+  resetPlans();
+  savePlan({ fingerprint: 'fp-C', host: 'x.test', plan: validPlan });
+  for (let i = 0; i < PLAN_DEMOTE_AT + 2; i++) bumpPlanSuccess('fp-C');
+  for (let i = 0; i < PLAN_DEMOTE_AT; i++) bumpPlanFail('fp-C');
+  assert.ok(getPlan('fp-C'), 'a mostly-winning plan should keep being replayed');
+});
+
+await test('runAgent replays a cached plan with NO model call', async () => {
+  resetPlans();
+  setSetting('agent_enabled', '1');
+  savePlan({ fingerprint: 'fp-REPLAY', host: 'x.test', plan: validPlan });
+  let plannerCalls = 0;
+  const r = await runAgent({}, { stage: 'no-form', reason: 't' }, {
+    observeFn: async () => ({ host: 'x.test', fingerprint: 'fp-REPLAY' }),
+    planFn: async () => { plannerCalls++; return validPlan; },
+    executeFn: async () => ({ outcome: 'ready', filled: [{ uid: 'plan-0' }], steps: 1 }),
+  });
+  assert.equal(plannerCalls, 0, 'the planner (LLM) must not run when a cached plan fits');
+  assert.equal(r.replayed, true);
+  assert.equal(getPlan('fp-REPLAY').success_count, 1);
+});
+
+await test('a cached plan that no longer fits is re-planned, and the new plan is cached', async () => {
+  resetPlans();
+  setSetting('agent_enabled', '1');
+  savePlan({ fingerprint: 'fp-STALE', host: 'x.test', plan: validPlan });
+  let plannerCalls = 0, execCalls = 0;
+  const freshPlan = { ...validPlan, kind: 'landing' };
+  const r = await runAgent({}, { stage: 'no-form', reason: 't' }, {
+    observeFn: async () => ({ host: 'x.test', fingerprint: 'fp-STALE' }),
+    planFn: async () => { plannerCalls++; return freshPlan; },
+    // First call (cached plan) is stuck; second call (fresh plan) succeeds.
+    executeFn: async () => (++execCalls === 1
+      ? { outcome: 'stuck', filled: [], steps: 1, reason: 'did not fit' }
+      : { outcome: 'ready', filled: [], steps: 1 }),
+  });
+  assert.equal(plannerCalls, 1, 'a stale cached plan must trigger exactly one re-plan');
+  assert.equal(r.replayed, false);
+  assert.equal(getPlan('fp-STALE').plan.kind, 'landing', 'the fresh plan overwrites the stale one');
+});
+
+setSetting('agent_enabled', '0');   // leave the switch as a fresh install would
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

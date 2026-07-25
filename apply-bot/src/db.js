@@ -814,3 +814,69 @@ export function listPageCaptures({ limit = 200 } = {}) {
            captured_at, first_seen_at, fingerprint, title, url
     FROM page_captures ORDER BY captured_at DESC LIMIT ?`).all(limit);
 }
+
+// ---------------------------------------------------------------------------
+// Learned plan cache — adaptive agent Phase 3
+// (docs/APPLY_BOT_ADAPTIVE_AGENT_PHASE3.md).
+//
+// A *solved, replayable* plan for a page shape, so the second visit to a vendor's
+// form fills it with no LLM call. Kept apart from page_captures (raw failures):
+// captures are the problem set, plans are the solutions. Keyed by the same
+// host+control fingerprint, one row per shape.
+// ---------------------------------------------------------------------------
+db.exec(`
+CREATE TABLE IF NOT EXISTS page_plans (
+  id            INTEGER PRIMARY KEY,
+  fingerprint   TEXT NOT NULL UNIQUE,
+  host          TEXT,
+  plan_json     TEXT NOT NULL,
+  source        TEXT NOT NULL DEFAULT 'llm',
+  success_count INTEGER NOT NULL DEFAULT 0,
+  fail_count    INTEGER NOT NULL DEFAULT 0,
+  created_at    TEXT NOT NULL,
+  last_used_at  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_page_plans_fp ON page_plans(fingerprint);
+`);
+
+// A cached plan is withheld once it has failed this many times without a winning
+// majority of successes — it is then treated as a miss and re-planned, which
+// overwrites it. This is what lets the cache heal after a vendor DOM change.
+export const PLAN_DEMOTE_AT = 3;
+
+/** The cached plan for a shape, or null if none is stored or it has been demoted. */
+export function getPlan(fingerprint) {
+  const row = db.prepare('SELECT * FROM page_plans WHERE fingerprint = ?').get(fingerprint);
+  if (!row) return null;
+  const demoted = row.fail_count >= PLAN_DEMOTE_AT && row.success_count <= row.fail_count;
+  if (demoted) return null;
+  return { ...row, plan: JSON.parse(row.plan_json) };
+}
+
+/** Store (or replace) the working plan for a shape. A re-solve resets the counters. */
+export function savePlan({ fingerprint, host = null, plan, source = 'llm' }) {
+  db.prepare(`
+    INSERT INTO page_plans (fingerprint, host, plan_json, source, created_at, last_used_at)
+    VALUES (@fingerprint, @host, @plan, @source, @now, @now)
+    ON CONFLICT(fingerprint) DO UPDATE SET
+      host = excluded.host, plan_json = excluded.plan_json, source = excluded.source,
+      success_count = 0, fail_count = 0, last_used_at = excluded.last_used_at`)
+    .run({ fingerprint, host, plan: JSON.stringify(plan), source, now: now() });
+}
+
+export function bumpPlanSuccess(fingerprint) {
+  db.prepare('UPDATE page_plans SET success_count = success_count + 1, last_used_at = ? WHERE fingerprint = ?')
+    .run(now(), fingerprint);
+}
+
+export function bumpPlanFail(fingerprint) {
+  db.prepare('UPDATE page_plans SET fail_count = fail_count + 1, last_used_at = ? WHERE fingerprint = ?')
+    .run(now(), fingerprint);
+}
+
+/** Cached plans, newest-used first — the `npm run plans` view. */
+export function listPagePlans({ limit = 200 } = {}) {
+  return db.prepare(`
+    SELECT id, host, source, success_count, fail_count, created_at, last_used_at, fingerprint
+    FROM page_plans ORDER BY COALESCE(last_used_at, created_at) DESC LIMIT ?`).all(limit);
+}
