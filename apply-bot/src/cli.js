@@ -5,7 +5,7 @@ import { getContext, closeContext, isLoggedIn, attachScreencast, closeBrowserOnE
 import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
 import { emit } from './bus.js';
-import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures } from './db.js';
+import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures, listPagePlans } from './db.js';
 
 const cmd = process.argv[2];
 
@@ -187,6 +187,29 @@ const commands = {
     console.log('\n  Snapshots (a11y tree + DOM + screenshot) live under data/agent-snapshots/<fp>/.\n');
   },
 
+  async plans() {
+    const rows = listPagePlans();
+    if (!rows.length) {
+      console.log('\n  No learned plans yet. The agent caches a plan the first time it');
+      console.log('  fills an unknown page; later visits to that shape replay it with no model call.\n');
+      return;
+    }
+    const age = ts => {
+      if (!ts) return '—';
+      const h = Math.round((Date.now() - new Date(ts).getTime()) / 36e5);
+      return h < 24 ? `${h}h` : `${Math.round(h / 24)}d`;
+    };
+    console.log(`\n  ${rows.length} learned plan(s), most-recently-used first:\n`);
+    for (const r of rows) {
+      console.log(
+        `  ${(r.host || '?').padEnd(32)} ${String(r.source).padEnd(9)} ` +
+        `${String(r.success_count).padStart(3)}✓ ${String(r.fail_count).padStart(3)}✗  ` +
+        `used ${age(r.last_used_at).padStart(4)} ago  [${r.fingerprint.slice(0, 8)}]`,
+      );
+    }
+    console.log('');
+  },
+
   async stop() {
     fs.writeFileSync(PATHS.stop, new Date().toISOString());
     console.log('STOP file written — all runs will halt before their next action.');
@@ -231,6 +254,7 @@ if (!commands[cmd]) {
     npm run enrich [n]  Fetch JDs and resolve apply routes
     npm run searches    List configured searches
     npm run captures    List unknown application pages the apply flow couldn't fill
+    npm run plans       List learned plans the agent replays (Phase 3)
     npm run stop        Write the kill switch
     npm run resume      Clear the kill switch
     npm run mode [m]    Get/set observe | review | auto
