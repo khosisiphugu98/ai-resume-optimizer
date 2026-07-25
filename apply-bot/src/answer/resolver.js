@@ -5,17 +5,19 @@ import { callLLM, hasKey } from '../llm.js';
 
 const SYSTEM = `You fill in job application forms on behalf of one candidate.
 
-You may ONLY use facts present in the CANDIDATE PROFILE below. You have no other
-knowledge about this person.
+Use the candidate's structured PROFILE and the full text of their RÉSUMÉ as your
+evidence, and apply ordinary common sense to what they say.
 
 Rules, in order of importance:
-1. If the profile does not contain the fact needed, return UNANSWERABLE. Do not
-   estimate, infer, approximate, or reason from context.
+1. Ground every answer in the PROFILE or the RÉSUMÉ. You MAY reason and infer
+   from them, but you may NOT invent a fact that appears in neither. If the answer
+   isn't there or reasonably derivable, return UNANSWERABLE.
 2. NEVER produce a number of years of experience. Those are handled elsewhere.
 3. NEVER answer a question about work authorisation, visa status, or citizenship.
-4. NEVER claim a degree, certification, clearance, or licence not in the profile.
+4. NEVER claim a degree, certification, clearance, or licence not evidenced in the
+   profile or the résumé.
 5. For open-ended questions (motivation, strengths, why this company), you MAY
-   write prose grounded in the profile and the job description.
+   write prose grounded in the résumé and the job description.
 
 Return JSON: {"answer": "<text>"} or {"unanswerable": "<what fact is missing>"}`;
 
@@ -99,6 +101,7 @@ export async function resolveField(field, ctx) {
 async function draftAnswer(question, fieldType, options, ctx) {
   const user = [
     `CANDIDATE PROFILE\n${summariseForLLM(ctx.profile)}`,
+    ctx.resumeText ? `\nRÉSUMÉ (extracted text)\n${String(ctx.resumeText).slice(0, 6000)}` : '',
     ctx.jobTitle ? `\nROLE: ${ctx.jobTitle} at ${ctx.company}` : '',
     ctx.jd ? `\nJOB DESCRIPTION (excerpt)\n${String(ctx.jd).slice(0, 2500)}` : '',
     `\nQUESTION: ${question}`,
@@ -153,12 +156,16 @@ export function guardAnswer(question, value, ctx) {
     return { ok: false, reason: 'work authorisation must resolve from the profile, not the model' };
   }
 
-  // No claiming credentials that aren't in the profile.
+  // No claiming credentials that aren't evidenced. The résumé counts as evidence
+  // alongside the structured profile — the model is now allowed to answer from it,
+  // so the guard must recognise the same source, or it would reject legitimate
+  // résumé-grounded answers. A credential in neither source is still blocked.
   if (/\b(degree|certified|certification|clearance|licen[sc]e)\b/.test(q) && /^(yes|true)$/i.test(v.trim())) {
     const certs = (ctx.profile.certifications || []).map(c => c.name).join(' ').toLowerCase();
     const edu = (ctx.profile.education || []).map(e => `${e.degree} ${e.field}`).join(' ').toLowerCase();
-    const mentioned = q.split(/\s+/).some(w => w.length > 4 && (certs.includes(w) || edu.includes(w)));
-    if (!mentioned) return { ok: false, reason: 'model asserted a credential not evidenced in the profile' };
+    const resume = String(ctx.resumeText || '').toLowerCase();
+    const mentioned = q.split(/\s+/).some(w => w.length > 4 && (certs.includes(w) || edu.includes(w) || resume.includes(w)));
+    if (!mentioned) return { ok: false, reason: 'model asserted a credential not evidenced in the profile or résumé' };
   }
 
   return { ok: true };
@@ -166,23 +173,26 @@ export function guardAnswer(question, value, ctx) {
 
 const BATCH_SYSTEM = `You fill in job application forms on behalf of one candidate.
 
-You are given every remaining question on one form at once, and the candidate's
-profile. Answer only the ones the profile actually supports.
-
-You may ONLY use facts present in the CANDIDATE PROFILE. You have no other
-knowledge about this person.
+You are given every remaining question on one form at once, plus the candidate's
+structured PROFILE and the full text of their RÉSUMÉ. Use both as your evidence,
+and apply ordinary common sense to what they say.
 
 Rules, in order of importance:
-1. If the profile does not contain the fact a question needs, put it in
-   "unanswerable". Do not estimate, infer, approximate, or reason from context.
-   Leaving a question out is always better than guessing at it.
+1. Ground every answer in the PROFILE or the RÉSUMÉ. You MAY reason and infer
+   from them — derive a strength from the experience listed, judge fit from the
+   role, answer a practical yes/no that plainly follows from the facts. What you
+   may NOT do is invent facts that appear in neither source. If a question needs a
+   fact you cannot find or reasonably derive, put it in "unanswerable". A confident,
+   well-grounded answer is better than a needless "unanswerable"; a guess at a fact
+   that isn't there is worse than either.
 2. NEVER produce a number of years of experience. Those are handled elsewhere.
 3. NEVER answer a question about work authorisation, visa status, or citizenship.
-4. NEVER claim a degree, certification, clearance, or licence not in the profile.
+4. NEVER claim a degree, certification, clearance, or licence unless the PROFILE
+   or the RÉSUMÉ actually shows it.
 5. Where a question lists OPTIONS, the answer must be exactly one of them,
    copied character for character.
-6. For open-ended questions (motivation, strengths, why this company), you MAY
-   write prose grounded in the profile and the job description.
+6. For open-ended questions (motivation, strengths, why this company), write
+   concise prose grounded in the résumé and the job description.
 
 Return JSON:
 {"fills": [{"uid": "...", "value": "..."}],
@@ -226,6 +236,7 @@ function chunkFields(fields, budget = BATCH_CHAR_BUDGET) {
 async function batchMap(fields, ctx) {
   const user = [
     `CANDIDATE PROFILE\n${summariseForLLM(ctx.profile)}`,
+    ctx.resumeText ? `\nRÉSUMÉ (extracted text)\n${String(ctx.resumeText).slice(0, 6000)}` : '',
     ctx.jobTitle ? `\nROLE: ${ctx.jobTitle} at ${ctx.company}` : '',
     ctx.jd ? `\nJOB DESCRIPTION (excerpt)\n${String(ctx.jd).slice(0, 2500)}` : '',
     `\nFORM FIELDS\n${JSON.stringify(fields.map(serialiseField), null, 1)}`,

@@ -2,6 +2,7 @@
 // answers go on real employment applications, so a wrong one has consequences
 // beyond a failing build. No network.
 import { resolveField, guardAnswer } from '../src/answer/resolver.js';
+import { resumeText } from '../src/answer/resume-context.js';
 import { extractSkill, matchProfile } from '../src/answer/matchers.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
@@ -84,6 +85,17 @@ t('rejects unevidenced credential claim',
   guardAnswer('Do you hold an active security clearance?', 'Yes', ctx).ok, false);
 t('allows evidenced credential',
   guardAnswer('Do you have a Google Analytics certification?', 'Yes', ctx).ok, true);
+// The résumé now counts as evidence — the model may answer from it, so the guard
+// must too, but a credential in neither source is still blocked.
+t('rejects a credential in neither profile nor résumé',
+  guardAnswer('Do you hold an AWS Certified Cloud Practitioner licence?', 'Yes', ctx).ok, false);
+t('allows a credential the résumé evidences',
+  guardAnswer('Do you hold an AWS Certified Cloud Practitioner licence?', 'Yes',
+    { ...ctx, resumeText: 'AWS Certified Cloud Practitioner (2024)' }).ok, true);
+
+section('résumé context — best-effort, never throws');
+t('a missing résumé path yields empty text (falls back to the profile)', await resumeText('/no/such/file.pdf'), '');
+t('a null path yields empty text', await resumeText(null), '');
 
 section('question normalisation and fuzzy matching');
 t('strips required marker + parens',

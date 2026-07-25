@@ -7,6 +7,7 @@ import { applyExternal, resolveExternalUrl } from './external.js';
 import { detectVendor } from './adapters/index.js';
 import { canApply, recordApplication, currentMode, applicationGap } from './rate.js';
 import { AUDIT } from '../score/index.js';
+import { resumeText } from '../answer/resume-context.js';
 
 // A posting that fails this many times stays in apply_failed and stops being
 // re-queued. High enough to ride out transient failures, low enough that a
@@ -120,6 +121,10 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
       const answerCtx = {
         profile, countryCode: 'ZA', company: job.company,
         jobTitle: job.title, jd: job.jd_text,
+        // The tailored résumé's text, so the resolver can reason from the
+        // experience prose the structured profile doesn't carry. Best-effort —
+        // '' if there's no readable PDF yet.
+        resumeText: await resumeText(job.resume_path),
       };
 
       let result;
