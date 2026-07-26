@@ -8,6 +8,7 @@
 import path from 'node:path';
 import { runWizard, stepSignature } from '../wizard.js';
 import { resolveFormBatch } from '../../answer/resolver.js';
+import { normaliseQuestion } from '../../answer/bank.js';
 
 /** First frame where `build(frame)` yields a present, visible locator — or null. */
 async function firstFrameLocator(page, build) {
@@ -57,7 +58,7 @@ async function fillPlanField(item, value) {
  * @returns { outcome, filled, parked, steps } — outcome is 'ready' (reached the
  *          terminal without submitting), 'parked', or 'stuck'.
  */
-export async function executePlan(page, plan, { job = null, ctx = {}, resumePath = null } = {}) {
+export async function executePlan(page, plan, { job = null, ctx = {}, resumePath = null, pins = {} } = {}) {
   if (plan.kind === 'unsupported') return { outcome: 'stuck', filled: [], steps: 0, reason: 'planner returned unsupported' };
 
   // preSteps reveal a form hidden behind a button (landing pages).
@@ -68,6 +69,8 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
 
   const uploaded = [];
   const uploadedLabels = new Set();
+  const pinnedFilled = [];
+  const pinnedLabels = new Set();
 
   // Resolve the plan's fields to live locators. File fields are handled here
   // (setInputFiles) rather than through the answer resolver, like external.js.
@@ -77,6 +80,18 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
       const f = plan.fields[i];
       const loc = await firstFrameLocator(page, fieldBuilder(f.locator));
       if (!loc) continue;
+
+      // Operator pin (Phase 4): a corrected answer for this vendor shape outranks
+      // the resolver — fill it directly and never ask the model.
+      const norm = normaliseQuestion(f.label);
+      if (pins[norm] != null && !pinnedLabels.has(f.label)) {
+        pinnedLabels.add(f.label);
+        try {
+          await fillPlanField({ locator: loc, fieldType: f.type }, pins[norm]);
+          pinnedFilled.push({ uid: `plan-${i}`, question: f.label, value: pins[norm], tier: 'operator', kind: f.type });
+        } catch { /* a pin that won't apply just falls through to review */ }
+        continue;
+      }
 
       if (f.type === 'file') {
         if (resumePath && !uploadedLabels.has(f.label)) {
@@ -108,5 +123,5 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
     signature: stepSignature,
   });
 
-  return { ...result, filled: [...uploaded, ...(result.filled || [])] };
+  return { ...result, filled: [...uploaded, ...pinnedFilled, ...(result.filled || [])] };
 }

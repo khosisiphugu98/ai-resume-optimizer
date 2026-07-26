@@ -129,6 +129,9 @@ addColumn('applications', 'outcome_state', 'TEXT');
 addColumn('applications', 'outcome_at', 'TEXT');
 addColumn('applications', 'outcome_source', 'TEXT');
 addColumn('applications', 'outcome_note', 'TEXT');
+// Which learned plan shape (agent Phase 3) filled this application, so a review
+// correction (Phase 4) can pin the fix back onto that plan.
+addColumn('applications', 'plan_fingerprint', 'TEXT');
 
 const now = () => new Date().toISOString();
 const today = () => new Date().toISOString().slice(0, 10);
@@ -838,6 +841,10 @@ CREATE TABLE IF NOT EXISTS page_plans (
 );
 CREATE INDEX IF NOT EXISTS idx_page_plans_fp ON page_plans(fingerprint);
 `);
+// Operator pins (Phase 4): { "<questionNorm>": value } — a per-vendor correction
+// that outranks the resolver. Added here rather than in the CREATE so DBs that
+// already have page_plans from Phase 3 get the column too.
+addColumn('page_plans', 'pins_json', 'TEXT');
 
 // A cached plan is withheld once it has failed this many times without a winning
 // majority of successes — it is then treated as a miss and re-planned, which
@@ -850,7 +857,22 @@ export function getPlan(fingerprint) {
   if (!row) return null;
   const demoted = row.fail_count >= PLAN_DEMOTE_AT && row.success_count <= row.fail_count;
   if (demoted) return null;
-  return { ...row, plan: JSON.parse(row.plan_json) };
+  return { ...row, plan: JSON.parse(row.plan_json), pins: JSON.parse(row.pins_json || '{}') };
+}
+
+/** Pin an operator-corrected answer onto a plan — it outranks the resolver. */
+export function pinPlanField(fingerprint, questionNorm, value) {
+  const row = db.prepare('SELECT pins_json FROM page_plans WHERE fingerprint = ?').get(fingerprint);
+  if (!row) return false;
+  const pins = JSON.parse(row.pins_json || '{}');
+  pins[questionNorm] = value;
+  db.prepare('UPDATE page_plans SET pins_json = ? WHERE fingerprint = ?').run(JSON.stringify(pins), fingerprint);
+  return true;
+}
+
+/** Forget a shape's plan so the next visit re-plans from scratch. */
+export function deletePlan(fingerprint) {
+  return db.prepare('DELETE FROM page_plans WHERE fingerprint = ?').run(fingerprint).changes > 0;
 }
 
 /** Store (or replace) the working plan for a shape. A re-solve resets the counters. */

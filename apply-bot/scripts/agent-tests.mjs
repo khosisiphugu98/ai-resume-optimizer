@@ -13,7 +13,9 @@ import { executePlan } from '../src/apply/agent/execute.js';
 import { runAgent } from '../src/apply/agent/index.js';
 import {
   db, setSetting, getPlan, savePlan, bumpPlanSuccess, bumpPlanFail, PLAN_DEMOTE_AT,
+  pinPlanField, deletePlan,
 } from '../src/db.js';
+import { normaliseQuestion } from '../src/answer/bank.js';
 
 let pass = 0, fail = 0;
 const test = async (name, fn) => {
@@ -227,6 +229,43 @@ await test('a cached plan that no longer fits is re-planned, and the new plan is
   assert.equal(plannerCalls, 1, 'a stale cached plan must trigger exactly one re-plan');
   assert.equal(r.replayed, false);
   assert.equal(getPlan('fp-STALE').plan.kind, 'landing', 'the fresh plan overwrites the stale one');
+});
+
+// ---------------------------------------------------------------------------
+console.log('\noperator feedback (Phase 4)');
+
+await test('a pin round-trips and a re-plan forgets the plan', () => {
+  resetPlans();
+  savePlan({ fingerprint: 'fp-PIN', host: 'x.test', plan: validPlan });
+  assert.equal(pinPlanField('fp-PIN', normaliseQuestion('Email'), 'k@fixed.test'), true);
+  assert.equal(getPlan('fp-PIN').pins[normaliseQuestion('Email')], 'k@fixed.test');
+  assert.equal(pinPlanField('fp-UNKNOWN', 'q', 'v'), false);
+  assert.equal(deletePlan('fp-PIN'), true);
+  assert.equal(getPlan('fp-PIN'), null);
+});
+
+await test('an operator pin fills the field directly, bypassing the resolver (tier operator)', async () => {
+  const pinned = 'k@corrected.test';
+  let filledValue = null;
+  const emailLoc = fakeLocator({});
+  emailLoc.fill = async v => { filledValue = v; };
+  const page = {
+    frames: () => [{
+      url: () => 'https://x.test',
+      getByLabel: (v) => v === 'Email' ? emailLoc : fakeLocator({ count: 0, visible: false }),
+      getByPlaceholder: () => fakeLocator({ count: 0 }), getByText: () => fakeLocator({ count: 0, visible: false }),
+      locator: () => fakeLocator({ count: 0, visible: false }),
+      getByRole: (_r, o) => (o && o.name === 'Submit') ? fakeLocator({}) : fakeLocator({ count: 0, visible: false }),
+      evaluate: async () => [],
+    }],
+    url: () => 'https://x.test', waitForTimeout: async () => {},
+  };
+  const plan = { kind: 'form', preSteps: [], fields: [{ label: 'Email', type: 'text', required: true, locator: { by: 'label', value: 'Email' } }], advance: null, submit: { by: 'role', value: 'Submit' } };
+  const r = await executePlan(page, plan, { ctx: {}, pins: { [normaliseQuestion('Email')]: pinned } });
+  assert.equal(filledValue, pinned, 'the pinned value was typed into the field');
+  const op = r.filled.find(f => f.question === 'Email');
+  assert.equal(op.tier, 'operator');
+  assert.equal(op.value, pinned);
 });
 
 setSetting('agent_enabled', '0');   // leave the switch as a fresh install would

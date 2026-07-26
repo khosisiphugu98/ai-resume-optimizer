@@ -20,16 +20,19 @@ function recordAttempt(job, channel, result, outcome) {
   const info = db.prepare(`
     INSERT INTO applications (job_id, channel, resume_path, ats_vendor, adapter_used,
                               submitted_at, confirmation_evidence, outcome,
-                              filled_json, screenshots_json, step_count, outcome_note)
+                              filled_json, screenshots_json, step_count, outcome_note,
+                              plan_fingerprint)
     VALUES (@job_id, @channel, @resume_path, @ats_vendor, @adapter, @submitted_at,
-            @evidence, @outcome, @filled, @shots, @steps, @note)`).run({
+            @evidence, @outcome, @filled, @shots, @steps, @note, @fingerprint)`).run({
     job_id: job.id,
     channel,
     resume_path: job.resume_path || null,
     ats_vendor: result.vendor || job.ats_vendor || null,
     // The adaptive agent records which planner shape solved the page, so the
-    // review card can show it came from the agent rather than a vendor adapter.
+    // review card can show it came from the agent rather than a vendor adapter,
+    // and a correction can pin back onto that plan.
     adapter: result.agent ? `agent:${result.agent.kind}` : (result.vendor ? `ats:${result.vendor}` : 'linkedin-easy'),
+    fingerprint: result.agent?.fingerprint || null,
     submitted_at: outcome === 'submitted' ? new Date().toISOString() : null,
     evidence: result.evidence || null,
     outcome,
