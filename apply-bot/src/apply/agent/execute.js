@@ -58,7 +58,7 @@ async function fillPlanField(item, value) {
  * @returns { outcome, filled, parked, steps } — outcome is 'ready' (reached the
  *          terminal without submitting), 'parked', or 'stuck'.
  */
-export async function executePlan(page, plan, { job = null, ctx = {}, resumePath = null, pins = {} } = {}) {
+export async function executePlan(page, plan, { job = null, ctx = {}, resumePath = null, pins = {}, submitGate = null } = {}) {
   if (plan.kind === 'unsupported') return { outcome: 'stuck', filled: [], steps: 0, reason: 'planner returned unsupported' };
 
   // preSteps reveal a form hidden behind a button (landing pages).
@@ -114,7 +114,10 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
   };
 
   const result = await runWizard({
-    submit: false,                                   // Phase 2 never submits
+    // Fill-only unless a submit gate is supplied (Phase 5). Even then the wizard
+    // only *reaches* the terminal and hands it back — the gate below decides
+    // whether it is actually pressed.
+    submit: !!submitGate,
     collect,
     resolve: items => resolveFormBatch(items, ctx),
     fill: (item, value) => fillPlanField(item, value),
@@ -123,5 +126,21 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
     signature: stepSignature,
   });
 
-  return { ...result, filled: [...uploaded, ...pinnedFilled, ...(result.filled || [])] };
+  const filled = [...uploaded, ...pinnedFilled, ...(result.filled || [])];
+
+  // Reached the terminal with submit intent: the gate decides whether to press it.
+  if (result.outcome === 'submit') {
+    if (!submitGate(filled, result.parked || [])) return { outcome: 'ready', filled, steps: result.steps };
+    const before = page.url();
+    await result.terminal.click();
+    await page.waitForTimeout(4000);
+    const body = await page.locator('body').innerText().catch(() => '');
+    const confirmed = page.url() !== before
+      || /thank you|application (received|submitted|complete)|we('?ve| have) received|submitted successfully/i.test(body);
+    // Only claim 'submitted' on real confirmation — otherwise hold for review
+    // rather than report an application that may not have gone through.
+    return { outcome: confirmed ? 'submitted' : 'ready', filled, steps: result.steps, evidence: null };
+  }
+
+  return { ...result, filled };
 }
