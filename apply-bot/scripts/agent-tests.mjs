@@ -16,6 +16,7 @@ import {
   pinPlanField, deletePlan,
 } from '../src/db.js';
 import { normaliseQuestion } from '../src/answer/bank.js';
+import { autoSubmitAllowed, AUTOSUBMIT_MIN_SUCCESS } from '../src/apply/agent/gate.js';
 
 let pass = 0, fail = 0;
 const test = async (name, fn) => {
@@ -266,6 +267,85 @@ await test('an operator pin fills the field directly, bypassing the resolver (ti
   const op = r.filled.find(f => f.question === 'Email');
   assert.equal(op.tier, 'operator');
   assert.equal(op.value, pinned);
+});
+
+// ---------------------------------------------------------------------------
+console.log('\nconfident auto-submit gate (Phase 5)');
+
+const groundedFill = [{ tier: 'profile' }, { tier: 'bank-exact' }, { tier: 'operator' }];
+const okGate = { submitIntent: true, planSuccessCount: AUTOSUBMIT_MIN_SUCCESS, filled: groundedFill, parked: [] };
+
+await test('passes only when submit intent + proven plan + all grounded + nothing parked', () => {
+  assert.equal(autoSubmitAllowed(okGate), true);
+});
+await test('no submit intent blocks (review mode never submits)', () => {
+  assert.equal(autoSubmitAllowed({ ...okGate, submitIntent: false }), false);
+});
+await test('an unproven plan (too few successes) blocks', () => {
+  assert.equal(autoSubmitAllowed({ ...okGate, planSuccessCount: AUTOSUBMIT_MIN_SUCCESS - 1 }), false);
+});
+await test('any ungrounded model value (llm) blocks', () => {
+  assert.equal(autoSubmitAllowed({ ...okGate, filled: [...groundedFill, { tier: 'llm' }] }), false);
+});
+await test('a fuzzy/probable answer blocks', () => {
+  assert.equal(autoSubmitAllowed({ ...okGate, filled: [{ tier: 'bank-fuzzy', probable: true }] }), false);
+});
+await test('a parked (unanswerable/guarded) field blocks', () => {
+  assert.equal(autoSubmitAllowed({ ...okGate, parked: [{ question: 'x' }] }), false);
+});
+
+function fakeSubmitPage({ onSubmit, confirmText = 'Thank you for applying' } = {}) {
+  const submit = fakeLocator({ onClick: onSubmit });
+  const miss = () => fakeLocator({ count: 0, visible: false });
+  const frame = {
+    url: () => 'https://x.test',
+    getByLabel: miss, getByPlaceholder: miss, getByText: miss, locator: miss,
+    getByRole: (_r, o) => (o && o.name === 'Submit') ? submit : miss(),
+    evaluate: async () => [],
+  };
+  return {
+    frames: () => [frame], url: () => 'https://x.test', waitForTimeout: async () => {},
+    locator: sel => ({ innerText: async () => (sel === 'body' ? confirmText : '') }),
+  };
+}
+const submitOnlyPlan = { kind: 'form', preSteps: [], fields: [], advance: null, submit: { by: 'role', value: 'Submit' } };
+
+await test('executePlan presses submit and reports submitted when the gate allows it', async () => {
+  let clicked = false;
+  const page = fakeSubmitPage({ onSubmit: () => { clicked = true; } });
+  const r = await executePlan(page, submitOnlyPlan, { ctx: {}, submitGate: () => true });
+  assert.equal(clicked, true);
+  assert.equal(r.outcome, 'submitted');
+});
+
+await test('executePlan never clicks submit when the gate refuses — stays fill-only (ready)', async () => {
+  let clicked = false;
+  const page = fakeSubmitPage({ onSubmit: () => { clicked = true; } });
+  const r = await executePlan(page, submitOnlyPlan, { ctx: {}, submitGate: () => false });
+  assert.equal(clicked, false, 'the gate said no — submit must not be pressed');
+  assert.equal(r.outcome, 'ready');
+});
+
+await test('runAgent auto-submits a proven, grounded replay; a 0-success shape does not', async () => {
+  resetPlans();
+  setSetting('agent_enabled', '1');
+  // The injected executor consults the real gate runAgent builds and reports back.
+  const execViaGate = async (_page, _plan, opts) => (opts.submitGate([{ tier: 'profile' }], [])
+    ? { outcome: 'submitted', filled: [{ tier: 'profile' }], steps: 1 }
+    : { outcome: 'ready', filled: [{ tier: 'profile' }], steps: 1 });
+
+  savePlan({ fingerprint: 'fp-PROVEN', host: 'x.test', plan: validPlan });
+  for (let i = 0; i < AUTOSUBMIT_MIN_SUCCESS; i++) bumpPlanSuccess('fp-PROVEN');
+  const proven = await runAgent({}, { stage: 'stuck', reason: 't', submit: true }, {
+    observeFn: async () => ({ host: 'x.test', fingerprint: 'fp-PROVEN' }), executeFn: execViaGate,
+  });
+  assert.equal(proven.outcome, 'submitted');
+
+  savePlan({ fingerprint: 'fp-NEW', host: 'x.test', plan: validPlan });   // 0 successes
+  const fresh = await runAgent({}, { stage: 'stuck', reason: 't', submit: true }, {
+    observeFn: async () => ({ host: 'x.test', fingerprint: 'fp-NEW' }), executeFn: execViaGate,
+  });
+  assert.equal(fresh.outcome, 'ready', 'an unproven shape must not auto-submit even with intent');
 });
 
 setSetting('agent_enabled', '0');   // leave the switch as a fresh install would

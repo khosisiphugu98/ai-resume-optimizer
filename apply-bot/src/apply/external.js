@@ -22,6 +22,9 @@ function agentReturn(a, { vendor, url, screenshots }) {
     vendor: vendor.vendor, url, filled: a.filled, screenshots, steps: a.steps,
     agent: { kind: a.planKind, fingerprint: a.fingerprint },
   };
+  if (a.outcome === 'submitted') {
+    return { outcome: 'submitted', ...base, evidence: a.evidence || null };
+  }
   if (a.outcome === 'parked') {
     return {
       outcome: 'parked', ...base,
@@ -31,7 +34,7 @@ function agentReturn(a, { vendor, url, screenshots }) {
       })),
     };
   }
-  return { outcome: 'ready', ...base, heldForReview: 'adaptive agent never auto-submits' };
+  return { outcome: 'ready', ...base };
 }
 
 async function shot(page, jobId, label) {
@@ -186,7 +189,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const scope = (await formScope(page, vendor)) || (await a11yScope(page));
   if (!scope) {
     const agent = await runAgent(page, {
-      job, ctx: { ...ctx, ats: vendor.vendor }, resumePath,
+      job, ctx: { ...ctx, ats: vendor.vendor }, resumePath, submit,
       stage: 'no-form', reason: `No application form found on ${vendor.vendor} page`,
     });
     if (agent) return agentReturn(agent, { vendor, url, screenshots });
@@ -201,7 +204,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const first = await collectFields(frame, rootSelector, vendor);
   if (!first.items.length) {
     const agent = await runAgent(page, {
-      job, ctx: answerCtx, resumePath,
+      job, ctx: answerCtx, resumePath, submit,
       stage: 'no-fields', reason: `Form on ${vendor.vendor} had no fillable fields`,
     });
     if (agent) return agentReturn(agent, { vendor, url, screenshots });
@@ -274,7 +277,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
 
   if (result.outcome === 'stuck') {
     const agent = await runAgent(page, {
-      job, ctx: answerCtx, resumePath, stage: 'stuck', reason: result.reason,
+      job, ctx: answerCtx, resumePath, submit, stage: 'stuck', reason: result.reason,
     });
     if (agent) return agentReturn(agent, { vendor, url, screenshots });
     await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'stuck', reason: result.reason });
