@@ -24,16 +24,22 @@ export const SERVER = { port: Number(process.env.APPLY_BOT_PORT) || 5175 };
 // Run mode — see docs/APPLY_BOT_PLAN.md §7.5. Phase 1 ships observe only.
 export const MODES = ['observe', 'review', 'auto'];
 
-// Per-channel daily caps. Only linkedin_easy carries LinkedIn ban risk (§8.1).
+// Per-channel daily caps. Deliberately asymmetric: only linkedin_easy and the
+// linkedin_pageviews budget carry LinkedIn ACCOUNT-BAN risk (§8.1), so those stay
+// tight. External ATS forms and emailed CVs carry no LinkedIn risk, so their caps
+// are opened right up — the operator wants maximum external/email throughput.
 export const CAPS = {
-  linkedin_easy: 15,
-  external_ats: 35,
-  email: 15,
-  linkedin_pageviews: 250,
+  linkedin_easy: 15,          // kept tight — this is the ban-risk channel
+  external_ats: 1000,         // opened up — no LinkedIn ban risk
+  email: 300,                 // opened up — no LinkedIn ban risk (outbox hold is the guard)
+  linkedin_pageviews: 250,    // kept — the core anti-ban budget for LinkedIn browsing
 };
 
-// Operating window, SAST. Discovery outside this is deferred, not dropped.
-export const HOURS = { start: 8, end: 19, weekdaysOnly: true };
+// Operating window, SAST. Opened to 24/7 at the operator's request: applications
+// run round the clock, every day. The LinkedIn ban-risk guards above (daily cap +
+// pageview budget) and the channel-aware pacing in rate.js remain in force — those,
+// not the clock, are what keep the LinkedIn account safe.
+export const HOURS = { start: 0, end: 24, weekdaysOnly: false };
 
 // Saved searches — plan §2.1. `tier` weights scoring; `easyApplyOnly` splits the
 // risky channel from the free one.

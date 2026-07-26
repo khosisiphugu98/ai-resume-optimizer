@@ -203,7 +203,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
 
     // No point pacing after the final job.
     if (i < jobs.length - 1 && !noGap) {
-      const gap = applicationGap();
+      const gap = applicationGap(channel);
       emit({ stage: 'apply', message: `Waiting ${Math.round(gap / 1000)}s before the next application` });
       await new Promise(r => setTimeout(r, gap));
     }
