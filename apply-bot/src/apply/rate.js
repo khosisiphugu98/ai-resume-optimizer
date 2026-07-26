@@ -33,7 +33,12 @@ export function canApply(channel, { ignoreHours = false } = {}) {
     return { ok: false, reason: 'a LinkedIn challenge was hit today — halted until manually cleared' };
   }
 
-  if (!ignoreHours) {
+  // APPLY_BOT_IGNORE_HOURS lets a supervised operator run outside the normal
+  // window (e.g. a weekend live run) without editing the HOURS const. It bypasses
+  // only the time-of-day/day-of-week gate — the LinkedIn pageview budget and the
+  // per-channel caps below still apply, so it cannot be used to blow the anti-ban
+  // guards. Unset it and the window is enforced again.
+  if (!ignoreHours && process.env.APPLY_BOT_IGNORE_HOURS !== '1') {
     const hrs = withinHours();
     if (!hrs.ok) return hrs;
   }
@@ -57,10 +62,30 @@ export function currentMode() {
   return ['observe', 'review', 'auto'].includes(m) ? m : 'observe';
 }
 
-/** Gap between applications. Deliberately long and randomised. */
-export function applicationGap() {
-  const min = 120_000, max = 480_000;
-  const u = Math.random(), v = Math.random();
-  const z = Math.abs(Math.sqrt(-2 * Math.log(u || 1e-9)) * Math.cos(2 * Math.PI * v));
-  return Math.min(max, min + z * (max - min) / 3);
+/**
+ * Gap between applications, channel-aware.
+ *
+ * linkedin_easy carries account-ban risk, so it keeps the long, randomised,
+ * human-like pacing even in 24/7 mode — pacing, not the clock, is what protects
+ * the account. external_ats and email carry no LinkedIn risk, so they get a short
+ * gap to maximise throughput (but not zero: a burst still trips ATS-side rate
+ * limits and captchas, and gives the mail provider a reason to flag the sender).
+ *
+ * APPLY_BOT_GAP_MS forces a fixed gap for every channel — a supervised-run escape
+ * hatch; leave it unset for the channel-aware defaults.
+ */
+export function applicationGap(channel = 'linkedin_easy') {
+  const fixed = Number(process.env.APPLY_BOT_GAP_MS);
+  if (Number.isFinite(fixed) && fixed >= 0) return fixed;
+
+  if (channel === 'linkedin_easy') {
+    const min = 120_000, max = 480_000;
+    const u = Math.random(), v = Math.random();
+    const z = Math.abs(Math.sqrt(-2 * Math.log(u || 1e-9)) * Math.cos(2 * Math.PI * v));
+    return Math.min(max, min + z * (max - min) / 3);
+  }
+
+  // External ATS / email: short randomised gap, 3–12s.
+  const min = 3_000, max = 12_000;
+  return min + Math.random() * (max - min);
 }

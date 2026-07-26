@@ -222,7 +222,7 @@ const STAGES = {
     await seedDefaultResume(page);
   },
   tailor:   async () => { const m = await import('./tailor/optimiser.js'); await m.runTailoring({ limit: 10 }); },
-  apply:    async () => { const m = await import('./apply/run.js'); await m.runApplications({ limit: 5 }); },
+  apply:    async () => { const m = await import('./apply/run.js'); await m.runApplications({ limit: Number(process.env.APPLY_BOT_APPLY_LIMIT) || 5 }); },
   email:    async () => { const m = await import('./email/outbox.js'); await m.runEmailApplications({ limit: 10 }); },
   replies:  async () => { const m = await import('./email/outbox.js'); await m.checkReplies(); },
 };
