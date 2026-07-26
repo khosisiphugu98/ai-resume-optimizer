@@ -381,18 +381,33 @@ document.addEventListener('click', async e => {
 // Parked questions. Answering one here releases every application waiting on it,
 // and every future application that hits the same question.
 async function refreshParked() {
-  const { queue, profileFields, skillSuggestions = [] } = await (await fetch('/api/parked')).json();
+  const { queue, profileFields, skillSuggestions = [], inferredYears = [] } = await (await fetch('/api/parked')).json();
   const el = $('#parked');
   $('#pqCount').textContent = queue.length || '';
   $('#pfCount').textContent = profileFields.length || '';
   $('#ksCount').textContent = skillSuggestions.length || '';
+  $('#iyCount').textContent = inferredYears.length || '';
+
+  // Years worked out from the CV timeline. Accepting (or correcting) one turns it
+  // from the machine's reading into the candidate's own answer.
+  $('#inferredYears').innerHTML = inferredYears.length
+    ? inferredYears.map(s => `<div class="pq">
+        <div class="q">${esc(s.skill)} — ${s.years} year${s.years === 1 ? '' : 's'}</div>
+        <div class="why">${esc(s.derivation || 'read off your CV')}</div>
+        ${s.quote ? `<div class="why" style="font-style:italic">“${esc(s.quote)}”${s.document ? ` — ${esc(s.document)}` : ''}</div>` : ''}
+        <form class="inferred-form" data-skill="${esc(s.skill)}" style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <input name="years" type="number" min="0" step="1" value="${esc(s.years)}" autocomplete="off" style="width:120px">
+          <button type="submit">That's right</button>
+        </form>
+      </div>`).join('')
+    : '<div class="empty">Nothing to check.</div>';
 
   // Skills a job wanted that aren't confirmed yet. Confirm (optionally with years)
   // to make them usable in future tailoring, or dismiss to stop being asked.
   $('#skillSuggestions').innerHTML = skillSuggestions.length
     ? skillSuggestions.map(s => `<div class="pq">
         <div class="q">${esc(s.display)}</div>
-        <div class="why">asked for by ${s.job_count} job${s.job_count === 1 ? '' : 's'}</div>
+        <div class="why">asked for by ${s.job_count} job${s.job_count === 1 ? '' : 's'}${s.evidence_note ? ` · ${esc(s.evidence_note)}` : ''}</div>
         <form class="skill-form" data-skill="${esc(s.display)}" style="margin-top:6px;display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <input name="years" type="number" min="0" step="1" placeholder="years (optional)" autocomplete="off" style="width:120px">
           <button type="submit">I have this</button>
@@ -437,6 +452,18 @@ document.addEventListener('submit', async e => {
   const form = e.target.closest('.pq form');
   if (!form) return;
   e.preventDefault();
+
+  // An inferred years figure, accepted or corrected. Either way it stops being an
+  // inference and becomes the candidate's own answer.
+  if (form.classList.contains('inferred-form')) {
+    const r = await (await fetch('/api/inferred-years', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skill: form.dataset.skill, years: form.elements.years.value.trim() }),
+    })).json();
+    addEvent({ ts: new Date().toISOString(), stage: 'profile', message: r.error || `Accepted ${form.dataset.skill} — ${r.years} year(s)` });
+    refreshParked();
+    return;
+  }
 
   // Skill suggestion: "I have this", with an optional years value.
   if (form.classList.contains('skill-form')) {
@@ -555,6 +582,75 @@ document.addEventListener('click', async e => {
   })).json();
   if (r.error) return addEvent({ ts: new Date().toISOString(), stage: 'score', level: 'warn', message: r.error });
   refreshCalibration();
+});
+
+// --- Evidence corpus: the CVs every skill claim is checked against -----------
+
+async function refreshEvidence() {
+  const { documents = [] } = await (await fetch('/api/evidence')).json();
+  $('#evCount').textContent = documents.length || '';
+  $('#evidenceDocs').innerHTML = documents.length
+    ? documents.map(d => `<div class="pq">
+        <div class="q">${esc(d.filename)}</div>
+        <div class="why">${d.chars.toLocaleString()} characters of text · added ${esc(String(d.uploadedAt).slice(0, 10))}</div>
+        <button type="button" class="ev-del" data-id="${esc(d.id)}" style="margin-top:6px">Remove</button>
+      </div>`).join('')
+    : '<div class="empty">No CVs uploaded yet — every skill will be treated as unevidenced until you add one.</div>';
+}
+
+// Files go up as base64 JSON: the server is a plain node:http server with no
+// multipart parser, and a CV is small enough that this costs nothing.
+const fileToBase64 = file => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1]);
+  r.onerror = () => reject(new Error(`could not read ${file.name}`));
+  r.readAsDataURL(file);
+});
+
+document.addEventListener('click', async e => {
+  if (e.target.id === 'evUpload') {
+    const files = [...($('#evFile').files || [])];
+    if (!files.length) { $('#evMsg').textContent = 'Choose a file first.'; return; }
+    $('#evMsg').textContent = `Uploading ${files.length} file(s)…`;
+
+    const problems = [];
+    for (const file of files) {
+      try {
+        const r = await (await fetch('/api/evidence', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: file.name, contentBase64: await fileToBase64(file) }),
+        })).json();
+        if (r.error) problems.push(`${file.name}: ${r.error}`);
+      } catch (err) { problems.push(`${file.name}: ${err.message}`); }
+    }
+
+    $('#evMsg').textContent = problems.length ? problems.join(' · ') : 'Uploaded.';
+    $('#evFile').value = '';
+    refreshEvidence();
+    return;
+  }
+
+  if (e.target.classList.contains('ev-del')) {
+    await fetch(`/api/evidence?id=${encodeURIComponent(e.target.dataset.id)}`, { method: 'DELETE' });
+    refreshEvidence();
+    return;
+  }
+
+  // The audit reports; it never changes the profile.
+  if (e.target.id === 'evAudit') {
+    $('#auditReport').innerHTML = '<div class="empty">Checking every confirmed skill against your CVs…</div>';
+    const r = await (await fetch('/api/skill-audit', { method: 'POST' })).json();
+    if (r.error) { $('#auditReport').innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+
+    const flagged = r.rows.filter(x => !x.evidenced || !x.isSkill);
+    $('#auditReport').innerHTML = `
+      <div class="why" style="margin-top:10px"><strong>${r.flagged} of ${r.total} confirmed skills have no CV evidence.</strong>
+      These are the ones the résumé optimiser is currently allowed to write into a tailored CV. Nothing has been changed.</div>
+      ${flagged.map(x => `<div class="pq">
+        <div class="q">${esc(x.skill)}${x.years != null ? ` — ${x.years}y` : ''}</div>
+        <div class="why">${x.notSkillWhy ? esc(x.notSkillWhy) : 'not found in any uploaded CV'}</div>
+      </div>`).join('')}`;
+  }
 });
 
 // --- Rejection criteria editor (opens from the Rejected column) --------------
@@ -937,6 +1033,7 @@ document.addEventListener('click', async e => {
 fetch('/api/events').then(r => r.json()).then(evs => evs.forEach(addEvent));
 refreshBoard();
 refreshParked();
+refreshEvidence();
 refreshReview();
 refreshOutbox();
 refreshSearches();

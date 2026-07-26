@@ -14,7 +14,9 @@ import {
 } from './db.js';
 import { bus, emit, emitBoard } from './bus.js';
 import { saveAnswer, allAnswers, learnFromApproved, normaliseQuestion } from './answer/bank.js';
-import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue, confirmSkill, confirmedSkillNames } from './profile.js';
+import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue, confirmSkill, confirmedSkillNames, inferredYearsSkills } from './profile.js';
+import { listDocuments, addDocument, removeDocument, corpus } from './evidence/store.js';
+import { auditConfirmedSkills } from './evidence/skills.js';
 import { cancelEmail } from './db.js';
 import { flushOutbox, HOLD_MINUTES } from './email/outbox.js';
 import * as gmail from './email/gmail.js';
@@ -71,7 +73,13 @@ const routes = {
     // Skills jobs asked for that aren't confirmed yet. Hide any that have since been
     // confirmed in the profile so a stale suggestion never lingers after the fact.
     skillSuggestions: listSkillSuggestions(profileExists() ? confirmedSkillNames(loadProfile({ fresh: true })) : []),
+    // Years derived from the CV timeline that nobody has looked at yet. Each one
+    // fills forms already but blocks unattended submission until accepted here.
+    inferredYears: profileExists() ? inferredYearsSkills(loadProfile({ fresh: true })) : [],
   }),
+
+  // The evidence corpus — the CVs every skill claim is checked against.
+  '/api/evidence': (req, res) => json(res, { documents: listDocuments() }),
 
   '/api/answers': (req, res) => json(res, allAnswers()),
 
@@ -468,6 +476,61 @@ const server = http.createServer(async (req, res) => {
       }
       emitBoard();
       return json(res, { ok: true });
+    } catch (err) {
+      return json(res, { error: err.message }, 500);
+    }
+  }
+
+  // Upload a CV into the evidence corpus. The body is base64 JSON rather than
+  // multipart: this is a plain node:http server with no body parser, and every
+  // other handler here already reads a raw body into a string.
+  if (url.pathname === '/api/evidence' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { filename, contentBase64 } = JSON.parse(body || '{}');
+    if (!filename || !contentBase64) return json(res, { error: 'filename and contentBase64 required' }, 400);
+    try {
+      const doc = await addDocument(filename, Buffer.from(contentBase64, 'base64'));
+      emit({ stage: 'profile', message: `Evidence document added — ${doc.filename} (${doc.chars} characters of text)` });
+      return json(res, { ok: true, document: doc });
+    } catch (err) {
+      return json(res, { error: err.message }, 400);
+    }
+  }
+
+  if (url.pathname === '/api/evidence' && req.method === 'DELETE') {
+    const id = url.searchParams.get('id');
+    if (!id) return json(res, { error: 'id required' }, 400);
+    const removed = removeDocument(id);
+    if (removed) emit({ stage: 'profile', message: `Evidence document removed — ${id}` });
+    return json(res, { ok: removed });
+  }
+
+  // Accept an inferred years figure, or correct it. Either way the number stops
+  // being the machine's guess and becomes the candidate's own answer, which is
+  // what lets an application carrying it submit unattended.
+  if (url.pathname === '/api/inferred-years' && req.method === 'POST') {
+    const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
+    const { skill, years } = JSON.parse(body || '{}');
+    if (!skill) return json(res, { error: 'skill required' }, 400);
+    try {
+      const out = confirmSkill(skill, years, { source: 'operator' });
+      emit({ stage: 'profile', message: `Accepted ${out.skill} = ${out.years ?? 'no'} year(s) — now your answer, not an inference` });
+      emitBoard();
+      return json(res, out);
+    } catch (err) {
+      return json(res, { error: err.message }, 500);
+    }
+  }
+
+  // Re-check every confirmed skill against the corpus. Report only — it never
+  // writes to the profile.
+  if (url.pathname === '/api/skill-audit' && req.method === 'POST') {
+    if (!profileExists()) return json(res, { error: 'no profile' }, 400);
+    try {
+      const rows = await auditConfirmedSkills(loadProfile({ fresh: true }), corpus());
+      const flagged = rows.filter(r => !r.evidenced || !r.isSkill);
+      emit({ stage: 'profile', message: `Skill audit — ${flagged.length} of ${rows.length} confirmed skill(s) have no CV evidence` });
+      return json(res, { rows, flagged: flagged.length, total: rows.length });
     } catch (err) {
       return json(res, { error: err.message }, 500);
     }

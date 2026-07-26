@@ -44,7 +44,10 @@ export function skillYears(profile, skillName) {
     if (normaliseSkill(name) !== want) continue;
     if (!meta.confirmed) return { value: null, reason: `"${name}" is in the profile but not confirmed` };
     if (typeof meta.years !== 'number') return { value: null, reason: `"${name}" has no years value` };
-    return { value: meta.years, reason: null };
+    // A number derived from the CV timeline is reported as such. It answers the
+    // question, but the caller marks it `probable` so it goes past a human once
+    // before an application carrying it is submitted unattended.
+    return { value: meta.years, reason: null, inferred: meta.yearsSource === 'inferred' };
   }
   return { value: null, reason: `"${skillName}" is not in the profile` };
 }
@@ -162,7 +165,7 @@ export function setProfileValue(dotPath, value, { confirm = true } = {}) {
  * years-of-experience question (skillYears requires a number), so this can never
  * make the bot fabricate a duration.
  */
-export function confirmSkill(name, years = null) {
+export function confirmSkill(name, years = null, { source = 'operator', evidence = null, derivation = null } = {}) {
   const clean = String(name).trim();
   if (!clean) throw new Error('a skill name is required');
   const p = loadProfile({ fresh: true });
@@ -172,13 +175,49 @@ export function confirmSkill(name, years = null) {
   const want = normaliseSkill(clean);
   const existingKey = Object.keys(p.skills).find(k => !k.startsWith('_') && normaliseSkill(k) === want);
   const key = existingKey || clean;
+  const prev = p.skills[key] || {};
 
+  // An operator confirmation always outranks an inferred one — the person is the
+  // authority on their own experience, and this is how an inferred number gets
+  // corrected. Evidence found earlier is kept either way; it is a fact about the
+  // CV, not a claim, so a human confirmation does not invalidate it.
   const yrs = (years === '' || years == null) ? null : Number(years);
-  p.skills[key] = { years: Number.isFinite(yrs) ? yrs : null, confirmed: true };
+  const hasYears = Number.isFinite(yrs);
+  const keepYears = hasYears ? yrs : (source === 'operator' ? (typeof prev.years === 'number' ? prev.years : null) : null);
+
+  p.skills[key] = {
+    years: keepYears,
+    confirmed: true,
+    source: source === 'operator' ? 'operator' : (prev.source === 'operator' ? 'operator' : source),
+    ...(evidence || prev.evidence ? { evidence: evidence || prev.evidence } : {}),
+    ...(keepYears == null ? {} : {
+      yearsSource: hasYears && source === 'operator' ? 'operator' : (prev.yearsSource || (source === 'operator' ? 'operator' : 'inferred')),
+      ...(derivation || prev.yearsDerivation ? { yearsDerivation: derivation || prev.yearsDerivation } : {}),
+    }),
+  };
 
   fs.writeFileSync(PROFILE_PATH, JSON.stringify(p, null, 2) + '\n');
   cache = p;
-  return { skill: key, years: p.skills[key].years };
+  return { skill: key, years: p.skills[key].years, source: p.skills[key].source };
+}
+
+/**
+ * Skills carrying a years figure nobody has looked at yet.
+ *
+ * An inferred number fills forms immediately but blocks unattended submission
+ * (`skillYears().inferred` → `probable` → `gate.js`). Accepting it here is a
+ * one-time review per skill rather than an interruption per application, which is
+ * the same shape as the parked queue: answer once, applies everywhere.
+ */
+export function inferredYearsSkills(profile = loadProfile({ fresh: true })) {
+  return Object.entries(profile.skills || {})
+    .filter(([n, m]) => !n.startsWith('_') && m && typeof m === 'object' && m.yearsSource === 'inferred' && typeof m.years === 'number')
+    .map(([name, m]) => ({
+      skill: name, years: m.years,
+      derivation: m.yearsDerivation || '',
+      quote: m.evidence?.quote || null,
+      document: m.evidence?.document || null,
+    }));
 }
 
 export function summariseForLLM(profile) {
