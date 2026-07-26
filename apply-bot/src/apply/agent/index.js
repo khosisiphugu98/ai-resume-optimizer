@@ -42,7 +42,7 @@ export async function runAgent(page, { job = null, ctx = {}, resumePath = null, 
     // --- Phase 3: replay a cached plan for this shape, no model call ----------
     const cached = getPlan(fp);
     if (cached) {
-      const result = await executeFn(page, cached.plan, { job, ctx, resumePath });
+      const result = await executeFn(page, cached.plan, { job, ctx, resumePath, pins: cached.pins });
       if (solved(result.outcome)) {
         bumpPlanSuccess(fp);
         emit({ jobId: job?.id, stage: 'apply', message: `Agent replayed a cached plan on ${observation.host} [${shape}] — no model call, ${result.filled.length} field(s), held for review` });

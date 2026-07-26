@@ -234,13 +234,14 @@ async function refreshReview() {
       <div class="co">${esc(job.company)} · ${esc(job.location) || '—'} · fit ${job.fit_score ?? '—'} · ${steps} step${steps === 1 ? '' : 's'}</div>
       <table>${filled.map(f => `<tr>
         <td class="q">${esc(f.question)}</td>
-        <td class="v">${esc(f.value)}</td>
+        <td class="v" contenteditable="true" spellcheck="false" data-q="${esc(f.question)}" data-orig="${esc(f.value)}" title="Edit to correct — saved as a verified answer">${esc(f.value)}</td>
         <td class="t"><span class="tier ${f.probable ? 'probable' : esc((f.tier || '').split('-')[0])}">${esc(f.probable ? 'probable' : f.tier)}</span></td>
       </tr>`).join('') || '<tr><td class="q">No fields on this application</td></tr>'}</table>
       <div class="shots">${screenshots.map(s => `<img src="/api/shot?p=${encodeURIComponent(s)}" alt="step">`).join('')}</div>
       <div class="acts">
         <button class="ok" data-act="approve">Approve &amp; submit</button>
         <button class="no" data-act="skip">Skip</button>
+        ${agent ? '<button class="no" data-act="replan" title="The agent mis-read this page — forget the cached plan and re-read it next time">Re-plan</button>' : ''}
         ${job.resume_path ? `<a href="/api/resume?id=${job.id}" target="_blank" rel="noopener" style="align-self:center;font-size:11px">resume</a>` : ''}
       </div>
     </div>`).join('');
@@ -259,6 +260,30 @@ document.addEventListener('click', async e => {
     body: JSON.stringify({ id, action: btn.dataset.act }),
   });
   refreshReview(); refreshBoard();
+});
+
+// Correcting a field: editing a value cell and blurring it (or pressing Enter)
+// saves the fix as a verified answer and pins it to this vendor's plan. blur
+// does not bubble, so this listens in the capture phase.
+document.addEventListener('blur', async e => {
+  const cell = e.target.closest?.('.rv td.v[contenteditable]');
+  if (!cell) return;
+  const value = cell.textContent.trim();
+  if (value === cell.dataset.orig) return;                 // unchanged — nothing to learn
+  const id = cell.closest('.rv').dataset.id;
+  const r = await (await fetch('/api/review', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, action: 'correct', question: cell.dataset.q, value }),
+  })).json();
+  if (r.error) { cell.textContent = cell.dataset.orig; return; }   // reject → revert
+  cell.dataset.orig = value;
+  const badge = cell.closest('tr').querySelector('.tier');
+  if (badge) { badge.className = 'tier operator'; badge.textContent = 'operator'; }
+}, true);
+
+document.addEventListener('keydown', e => {
+  const cell = e.target.closest?.('.rv td.v[contenteditable]');
+  if (cell && e.key === 'Enter') { e.preventDefault(); cell.blur(); }
 });
 
 // Outbox. Drafts send themselves when the hold expires — cancelling is the

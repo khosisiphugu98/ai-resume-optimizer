@@ -5,6 +5,7 @@ import { WebSocketServer } from 'ws';
 import { ROOT, SERVER, CAPS, PATHS, DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED } from './config.js';
 import {
   boardSnapshot, recentEvents, db, getSetting, setSetting, setDatePostedWindow, parkedQueue, releaseAnswered,
+  pinPlanField, deletePlan, bumpPlanSuccess,
   allSearches, addSearch, setSearchEnabled, deleteSearch,
   blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, blockedCompanies,
   pendingOutcomes, setOutcome, autoTimeoutOutcomes, outcomeSummary,
@@ -12,7 +13,7 @@ import {
   listSkillSuggestions, dismissSkillSuggestion, removeSkillSuggestion,
 } from './db.js';
 import { bus, emit, emitBoard } from './bus.js';
-import { saveAnswer, allAnswers, learnFromApproved } from './answer/bank.js';
+import { saveAnswer, allAnswers, learnFromApproved, normaliseQuestion } from './answer/bank.js';
 import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue, confirmSkill, confirmedSkillNames } from './profile.js';
 import { cancelEmail } from './db.js';
 import { flushOutbox, HOLD_MINUTES } from './email/outbox.js';
@@ -34,9 +35,13 @@ function json(res, data, code = 200) {
 }
 
 /** Everything the last attempt filled in, for the answer bank to learn from. */
+function lastApplication(jobId) {
+  return db.prepare(
+    `SELECT * FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1`).get(jobId) || null;
+}
+
 function lastFilled(jobId) {
-  const app = db.prepare(
-    `SELECT filled_json FROM applications WHERE job_id = ? ORDER BY id DESC LIMIT 1`).get(jobId);
+  const app = lastApplication(jobId);
   try {
     return JSON.parse(app?.filled_json || '[]');
   } catch {
@@ -501,23 +506,46 @@ const server = http.createServer(async (req, res) => {
   // that closed hours ago.
   if (url.pathname === '/api/review' && req.method === 'POST') {
     const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
-    const { id, action } = JSON.parse(body || '{}');
+    const { id, action, question, value } = JSON.parse(body || '{}');
     const job = db.prepare('SELECT * FROM jobs WHERE id = ?').get(Number(id));
     if (!job) return json(res, { error: 'not found' }, 404);
+    const app = lastApplication(job.id);
 
     if (action === 'approve') {
       const learned = learnFromApproved(lastFilled(job.id));
+      // An approved agent-driven application is a human confirming the plan works —
+      // raise its confidence toward the Phase-5 auto-submit threshold.
+      if (app?.plan_fingerprint) bumpPlanSuccess(app.plan_fingerprint);
       db.prepare(`UPDATE jobs SET status = 'approved' WHERE id = ?`).run(job.id);
       emit({
         jobId: job.id, stage: 'review',
         message: `Approved — ${job.title} @ ${job.company} will submit on the next run` +
           (learned ? `. Learned ${learned} answer(s) — the same question will not need reviewing again.` : ''),
       });
+    } else if (action === 'correct') {
+      // The operator's fix is the highest authority: it teaches the bank
+      // globally (as a human-verified answer) AND pins the value on this vendor's
+      // cached plan, and the review card is updated to show it.
+      if (!question || value == null) return json(res, { error: 'correct needs question and value' }, 400);
+      saveAnswer({ question, value, source: 'human', humanVerified: 1 });
+      let pinned = false;
+      if (app?.plan_fingerprint) pinned = pinPlanField(app.plan_fingerprint, normaliseQuestion(question), value);
+      if (app) {
+        const filled = lastFilled(job.id).map(f =>
+          f.question === question ? { ...f, value, tier: 'operator', probable: false } : f);
+        db.prepare('UPDATE applications SET filled_json = ? WHERE id = ?').run(JSON.stringify(filled), app.id);
+      }
+      emit({ jobId: job.id, stage: 'review', message: `Corrected "${String(question).slice(0, 50)}" — learned globally${pinned ? ' and pinned to this page' : ''}` });
+    } else if (action === 'replan') {
+      const dropped = app?.plan_fingerprint ? deletePlan(app.plan_fingerprint) : false;
+      emit({ jobId: job.id, stage: 'review', level: 'warn', message: dropped
+        ? `Cached plan dropped — the agent will re-read this page shape from scratch next time`
+        : `No cached plan to drop for this application` });
     } else if (action === 'skip') {
       db.prepare(`UPDATE jobs SET status = 'rejected', reject_reason = 'skipped in review' WHERE id = ?`).run(job.id);
       emit({ jobId: job.id, stage: 'review', message: `Skipped — ${job.title} @ ${job.company}` });
     } else {
-      return json(res, { error: 'action must be approve or skip' }, 400);
+      return json(res, { error: 'action must be approve, correct, replan or skip' }, 400);
     }
     emitBoard();
     return json(res, { ok: true });
