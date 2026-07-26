@@ -69,6 +69,17 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   const page = ctx.pages()[0] || await ctx.newPage();
   await attachScreencast(page);
 
+  // A channel at its cap/budget (e.g. LinkedIn's pageview budget exhausted) is
+  // dropped from candidate selection: otherwise its high-fit jobs fill the limited
+  // batch, all get held, and a channel that CAN apply right now (external) is
+  // starved. Approved jobs stay eligible whatever the channel state — a human said
+  // go, so they never wait behind a capped channel.
+  const applyableType = { linkedin_easy: 'easy_apply', external_ats: 'external' };
+  const activeTypes = Object.entries(applyableType)
+    .filter(([ch]) => canApply(ch, { ignoreHours }).ok)
+    .map(([, t]) => t);
+  const typeList = activeTypes.map(() => '?').join(',') || 'NULL';
+
   // Approved-for-submit first, then freshly tailored, then a bounded retry of
   // anything that previously failed. Without the last bucket a job that failed
   // once — often for a transient reason (a slow-rendering posting, a lost popup
@@ -76,11 +87,14 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   const jobs = db.prepare(`
     SELECT * FROM jobs
     WHERE apply_type IN ('easy_apply', 'external')
-      AND (status IN ('approved', 'tailored')
-           OR (status = 'apply_failed' AND apply_attempts < ?))
+      AND (
+        status = 'approved'
+        OR (apply_type IN (${typeList})
+            AND (status = 'tailored' OR (status = 'apply_failed' AND apply_attempts < ?)))
+      )
     ORDER BY CASE status WHEN 'approved' THEN 0 WHEN 'tailored' THEN 1 ELSE 2 END,
              fit_score DESC, id
-    LIMIT ?`).all(APPLY_MAX_ATTEMPTS, limit);
+    LIMIT ?`).all(...activeTypes, APPLY_MAX_ATTEMPTS, limit);
 
   if (!jobs.length) {
     emit({ stage: 'apply', message: 'No jobs ready to apply to — tailor some first' });
