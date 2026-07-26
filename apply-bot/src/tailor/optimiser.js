@@ -5,8 +5,10 @@ import { getContext, attachScreencast, stopRequested, humanDelay } from '../brow
 import { db, updateJob } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { extractPdfText, validateResumePdf } from '../../scripts/extract-text.mjs';
-import { loadProfile, confirmedSkillNames } from '../profile.js';
+import { loadProfile, confirmedSkillNames, confirmSkill } from '../profile.js';
 import { recordSkillSuggestions } from '../db.js';
+import { gateSkills } from '../evidence/skills.js';
+import { corpus } from '../evidence/store.js';
 
 export const SEED_RESUME = path.join(ROOT, 'seed/Khosi_Siphugu_Resume (Marketing Analyst) (1).pdf');
 
@@ -247,6 +249,26 @@ export async function tailorForJob(page, job, profile) {
   };
 }
 
+/**
+ * The evidence gate, applied without letting it break a tailor run.
+ *
+ * The gate reads uploaded documents and may call a model. Neither is essential to
+ * producing a tailored résumé, so any failure degrades to the old behaviour —
+ * queue everything and let the operator decide — rather than losing the run's work.
+ *
+ * Note that skills confirmed here reach the browser allowlist on the NEXT run:
+ * the allowlist is seeded once per session via addInitScript, which is the same
+ * timing the dashboard's confirm button has always had.
+ */
+async function gateSkillsSafely(terms, profile) {
+  try {
+    return await gateSkills(terms, corpus(), profile);
+  } catch (err) {
+    emit({ stage: 'tailor', level: 'warn', message: `Skill evidence gate unavailable (${err.message}) — queuing everything for review` });
+    return { drop: [], confirm: [], ask: (terms || []).map(skill => ({ skill, why: 'evidence gate unavailable' })) };
+  }
+}
+
 export async function runTailoring({ limit = 10 } = {}) {
   const profile = loadProfile();
   const ctx = await getContext();
@@ -284,11 +306,30 @@ export async function runTailoring({ limit = 10 } = {}) {
       done++;
 
       // Skills this job asked for that the candidate hasn't vouched for. They were
-      // NOT added to the resume; they surface in the dashboard so the candidate can
-      // confirm the ones that are actually true, which then flow into future runs.
-      const suggested = recordSkillSuggestions(r.unconfirmedSkills || []);
+      // NOT added to the resume — they go through the evidence gate, which drops
+      // what isn't a skill at all, auto-confirms what the candidate's own CV
+      // already evidences, and queues only the genuine open questions.
+      //
+      // This is the one place the queue is written from, which is why the gate
+      // sits here: everything upstream is a job-description keyword extractor.
+      const gated = await gateSkillsSafely(r.unconfirmedSkills || [], profile);
+
+      for (const c of gated.confirm) {
+        confirmSkill(c.skill, c.years, { source: 'resume-evidence', evidence: c.evidence, derivation: c.derivation });
+      }
+      const suggested = recordSkillSuggestions(
+        gated.ask.map(a => a.skill),
+        Object.fromEntries(gated.ask.map(a => [a.skill, a.why])),
+      );
+
+      if (gated.confirm.length) {
+        emit({ jobId: job.id, stage: 'tailor', message: `${gated.confirm.length} skill(s) confirmed from your CV: ${gated.confirm.map(c => c.skill).join(', ')}` });
+      }
       if (suggested > 0) {
         emit({ jobId: job.id, stage: 'tailor', message: `${suggested} skill suggestion(s) queued for your review` });
+      }
+      if (gated.drop.length) {
+        emit({ jobId: job.id, stage: 'tailor', level: 'debug', message: `${gated.drop.length} keyword(s) dropped as not-skills` });
       }
 
       emit({

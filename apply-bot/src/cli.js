@@ -90,6 +90,57 @@ const commands = {
     console.log(`\n  Edit apply-bot/profile/master-profile.json and set confirmed: true where the value is right.\n`);
   },
 
+  // The evidence corpus. `evidence` lists it; `evidence <file...>` adds documents.
+  async evidence() {
+    const { listDocuments, addDocument } = await import('./evidence/store.js');
+    const fsMod = await import('node:fs');
+    const files = process.argv.slice(3);
+
+    for (const f of files) {
+      try {
+        const doc = await addDocument(f.split('/').pop(), fsMod.readFileSync(f));
+        console.log(`  added ${doc.filename} — ${doc.chars} characters of text`);
+      } catch (err) {
+        console.log(`  SKIPPED ${f} — ${err.message}`);
+      }
+    }
+
+    const docs = listDocuments();
+    if (!docs.length) return console.log('\n  No evidence documents. Add one:  npm run evidence -- path/to/CV.pdf\n');
+    console.log(`\n  ${docs.length} evidence document(s):`);
+    for (const d of docs) console.log(`   · ${d.filename} (${d.chars} chars, ${d.uploadedAt.slice(0, 10)})`);
+    console.log();
+  },
+
+  // Report-only: which confirmed skills the CVs cannot support. Never writes.
+  async audit() {
+    const { loadProfile } = await import('./profile.js');
+    const { corpus } = await import('./evidence/store.js');
+    const { auditConfirmedSkills } = await import('./evidence/skills.js');
+
+    const docs = corpus();
+    if (!docs.length) return console.log('\n  No evidence documents to audit against. Add one:  npm run evidence -- path/to/CV.pdf\n');
+
+    const rows = await auditConfirmedSkills(loadProfile({ fresh: true }), docs);
+    const notSkills = rows.filter(r => !r.isSkill);
+    const unevidenced = rows.filter(r => r.isSkill && !r.evidenced);
+
+    console.log(`\n  ${rows.length} confirmed skill(s) checked against ${docs.length} document(s).`);
+    console.log(`  ${rows.length - notSkills.length - unevidenced.length} evidenced · ${unevidenced.length} unevidenced · ${notSkills.length} not skills at all\n`);
+
+    if (notSkills.length) {
+      console.log('  NOT SKILLS — confirmed, but not something an employer can verify:');
+      for (const r of notSkills) console.log(`   · ${r.skill}${r.years != null ? ` (${r.years}y)` : ''} — ${r.notSkillWhy}`);
+      console.log();
+    }
+    if (unevidenced.length) {
+      console.log('  NO EVIDENCE — the optimiser may write these into a tailored CV:');
+      for (const r of unevidenced) console.log(`   · ${r.skill}${r.years != null ? ` (${r.years}y)` : ''}`);
+      console.log();
+    }
+    console.log('  Nothing was changed. Edit profile/master-profile.json to act on this.\n');
+  },
+
   async score() {
     const { runScoring } = await import('./score/index.js');
     console.log(await runScoring({ limit: Number(process.argv[3]) || 30 }));

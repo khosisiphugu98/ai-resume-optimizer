@@ -17,6 +17,7 @@
  * `data-bot-a11y`, which Playwright's CSS engine can find again — including
  * inside open shadow roots, which `document.querySelector` cannot.
  */
+import { matchOptionIndex } from '../answer/options.js';
 
 /**
  * Runs in the page. Returns a serialisable node per fillable control.
@@ -306,13 +307,13 @@ export function toFieldSpec(node) {
 
 const loc = (scope, node) => scope.locator(`[data-bot-a11y="${node.uid}"]`).first();
 
-/** Case-insensitive, whitespace-tolerant option match. */
-const matchIndex = (options, value) => {
-  const want = String(value).toLowerCase().trim();
-  const exact = options.findIndex(o => String(o).toLowerCase().trim() === want);
-  if (exact !== -1) return exact;
-  return options.findIndex(o => String(o).toLowerCase().trim().replace(/\s+/g, ' ') === want.replace(/\s+/g, ' '));
-};
+/**
+ * Case-, punctuation- and word-order-tolerant option match, plus yes/no polarity
+ * ("Yes" onto "Yes, I am"). Restatements only: the resolver has already fitted
+ * the answer to this control's options, so anything looser here would reinterpret
+ * an answer after the point where review could see it.
+ */
+const matchIndex = (options, value) => matchOptionIndex(value, options);
 
 /**
  * Apply one resolved value to a custom control. Returns what actually landed.

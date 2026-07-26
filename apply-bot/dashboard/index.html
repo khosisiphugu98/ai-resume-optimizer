@@ -472,8 +472,25 @@
       <div id="profile"></div>
     </div>
     <div class="panel">
+      <h3>Your CVs — the evidence <span id="evCount" style="color:var(--dim)"></span></h3>
+      <p style="font-size:12px;color:var(--dim);margin:0 0 8px">Every skill claim is checked against these. Upload a few — more CVs mean fewer questions, because a skill one of them already shows is never asked about.</p>
+      <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+        <input type="file" id="evFile" accept=".pdf,.txt,.md" multiple>
+        <button id="evUpload" type="button">Upload</button>
+        <button id="evAudit" type="button" title="Re-check every confirmed skill against these documents">Audit confirmed skills</button>
+      </div>
+      <div id="evMsg" class="msg"></div>
+      <div id="evidenceDocs"></div>
+      <div id="auditReport"></div>
+    </div>
+    <div class="panel">
+      <h3>Years read off your CV — check these <span id="iyCount" style="color:var(--warn)"></span></h3>
+      <p style="font-size:12px;color:var(--dim);margin:0 0 8px">Worked out from which jobs mention the skill. They're already being used on forms, but nothing auto-submits with them until you've okayed the number here — once each, not once per application.</p>
+      <div id="inferredYears"></div>
+    </div>
+    <div class="panel">
       <h3>Skills jobs asked for <span id="ksCount" style="color:var(--warn)"></span></h3>
-      <p style="font-size:12px;color:var(--dim);margin:0 0 8px">Not on your resume. Confirm the ones you genuinely have — they'll be used in future tailoring. Dismiss the rest.</p>
+      <p style="font-size:12px;color:var(--dim);margin:0 0 8px">Real skills your CVs don't evidence. Confirm the ones you genuinely have — they'll be used in future tailoring. Dismiss the rest.</p>
       <div id="skillSuggestions"></div>
     </div>
     <div class="panel">

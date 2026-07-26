@@ -1,5 +1,6 @@
 import { matchProfile, extractSkill } from './matchers.js';
 import { lookupExact, lookupFuzzy, saveAnswer, recordUse, normaliseQuestion } from './bank.js';
+import { matchOption } from './options.js';
 import { skillYears, authorisationFor, summariseForLLM } from '../profile.js';
 import { callLLM, hasKey } from '../llm.js';
 
@@ -34,28 +35,60 @@ function resolveDeterministic(field, ctx) {
   const { question, fieldType = 'text', options = null, uid = null } = field;
   const base = { question, fieldType, options, uid };
 
+  /**
+   * Fit a resolved value onto the options the control actually offers.
+   *
+   * A profile fact is stated in the profile's words, not the form's: the notice
+   * period is "30 days" and the dropdown offers "1 month", the confirmed skill is
+   * "3" years and the dropdown offers "3-5 years". Passing the profile's wording
+   * straight through means `fillField` throws mid-application, so an answer that
+   * was known and correct is lost to a vocabulary mismatch.
+   *
+   * A value that cannot be fitted parks instead of being forced into the nearest
+   * option — the option list is the full set of claims the form will accept, and
+   * none of them being true is exactly what review exists to handle.
+   */
+  const fit = result => {
+    if (!options?.length || result.value == null || result.value === '') return result;
+    const m = matchOption(result.value, options, { semantic: true });
+    if (!m) {
+      return {
+        status: 'park', tier: `${result.tier}-option`, ...base,
+        reason: `"${String(result.value).slice(0, 60)}" is not one of: ${options.join(' | ')}`,
+      };
+    }
+    if (m.rule === 'exact') return result;
+    return {
+      ...result, value: m.option, rawValue: result.value, optionRule: m.rule,
+      probable: result.probable || !m.confident,
+    };
+  };
+
   // Tier 1 — deterministic profile lookup
   const hit = matchProfile(ctx.profile, { ...base, countryCode: ctx.countryCode, question });
   if (hit?.park) return { status: 'park', tier: 'profile', reason: hit.park, ...base };
   if (hit?.value != null && hit.value !== '') {
-    return { status: 'ok', tier: 'profile', matcher: hit.matcher, value: hit.value, ...base };
+    return fit({
+      status: 'ok', tier: 'profile', matcher: hit.matcher, value: hit.value, ...base,
+      ...(hit.probable ? { probable: true } : {}),
+    });
   }
 
   // Tier 2 — answer bank, exact
   const exact = lookupExact(question, ctx);
   if (exact) {
     recordUse(exact.id);
-    return { status: 'ok', tier: 'bank-exact', value: exact.answer_value, answerId: exact.id, ...base };
+    return fit({ status: 'ok', tier: 'bank-exact', value: exact.answer_value, answerId: exact.id, ...base });
   }
 
   // Tier 3 — answer bank, fuzzy. Applied, but flagged so review can catch it.
   const fuzzy = lookupFuzzy(question, ctx);
   if (fuzzy) {
     recordUse(fuzzy.id);
-    return {
+    return fit({
       status: 'ok', tier: 'bank-fuzzy', value: fuzzy.answer_value,
       answerId: fuzzy.id, similarity: fuzzy.similarity, probable: true, ...base,
-    };
+    });
   }
 
   return null;
@@ -80,7 +113,7 @@ export async function resolveField(field, ctx) {
       const drafted = await draftAnswer(question, fieldType, options, ctx);
       if (drafted.value != null) {
         const check = guardAnswer(question, drafted.value, ctx);
-        if (check.ok) return { status: 'ok', tier: 'llm', value: drafted.value, ...base };
+        if (check.ok) return { status: 'ok', tier: 'llm', value: drafted.value, ...base, ...(drafted.probable ? { probable: true } : {}) };
         // The model produced something the deterministic guard rejects. Park —
         // a prompt is not a control.
         return { status: 'park', tier: 'llm-rejected', reason: check.reason, ...base };
@@ -116,11 +149,13 @@ async function draftAnswer(question, fieldType, options, ctx) {
 
   if (out.unanswerable) return { value: null, unanswerable: out.unanswerable };
   let value = out.answer;
-  // A select/radio answer must be one of the offered options.
+  // A select/radio answer must be one of the offered options — a near miss is
+  // fitted onto the list, and anything that will not fit parks.
   if (options?.length && !options.includes(value)) {
-    const near = options.find(o => o.toLowerCase().trim() === String(value).toLowerCase().trim());
-    if (!near) return { value: null, unanswerable: `model returned "${value}", not one of the offered options` };
-    value = near;
+    const m = matchOption(value, options, { semantic: true });
+    if (!m) return { value: null, unanswerable: `model returned "${value}", not one of the offered options` };
+    value = m.option;
+    if (!m.confident) return { value, probable: true };
   }
   return { value };
 }
@@ -327,19 +362,25 @@ export async function resolveFormBatch(rawFields, ctx) {
         continue;
       }
 
-      // A select or radio answer must be one of the offered options. Forcing a
-      // near-miss into the control would either fail or pick the wrong one.
+      // A select or radio answer must be one of the offered options. The model is
+      // told to copy one character for character and mostly does; when it answers
+      // correctly in its own words ("1 month" for a "30 days" option) the value is
+      // fitted onto the list, and an interpreted fit is flagged for review. What
+      // will not fit at all still parks — forcing a near miss into the control
+      // would either fail or pick the wrong one.
       if (field.options?.length) {
-        const exact = field.options.find(o => String(o).toLowerCase().trim() === String(value).toLowerCase().trim());
-        if (!exact) {
+        const m = matchOption(value, field.options, { semantic: true });
+        if (!m) {
           park(field, 'llm', `model returned "${String(value).slice(0, 60)}", which is not one of: ${field.options.join(' | ')}`);
           continue;
         }
-        const check = guardAnswer(field.question, exact, ctx);
+        const check = guardAnswer(field.question, m.option, ctx);
         if (!check.ok) { park(field, 'llm-rejected', check.reason); continue; }
         resolved.push({
-          status: 'ok', tier: 'llm', value: exact,
+          status: 'ok', tier: 'llm', value: m.option,
           question: field.question, fieldType: field.fieldType, options: field.options, uid: field.uid,
+          ...(m.rule === 'exact' ? {} : { rawValue: String(value), optionRule: m.rule }),
+          ...(m.confident ? {} : { probable: true }),
         });
         continue;
       }

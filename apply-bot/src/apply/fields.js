@@ -1,3 +1,5 @@
+import { matchOptionIndex } from '../answer/options.js';
+
 /**
  * Generic form-field extraction, shared by every adapter.
  *
@@ -148,18 +150,25 @@ export const fromDomField = f => ({
   field: f,
 });
 
-/** Apply one resolved value. Returns what actually landed in the DOM. */
+/**
+ * Apply one resolved value. Returns what actually landed in the DOM.
+ *
+ * Option matching here is the safe half of the ladder only — restatements of the
+ * value, never reinterpretations. The resolver has already fitted the answer to
+ * this control's options and flagged anything it had to interpret; a second,
+ * looser pass at fill time would silently undo that review.
+ */
 export async function fillField(scope, field, value) {
   switch (field.kind) {
     case 'radio': {
-      const idx = field.options.findIndex(o => o.toLowerCase().trim() === String(value).toLowerCase().trim());
+      const idx = matchOptionIndex(value, field.options);
       if (idx === -1) throw new Error(`"${value}" is not one of: ${field.options.join(' | ')}`);
       const radios = scope.locator(field.selector);
       await radios.nth(idx).check({ force: true });
       return field.options[idx];
     }
     case 'select': {
-      const idx = field.options.findIndex(o => o.toLowerCase().trim() === String(value).toLowerCase().trim());
+      const idx = matchOptionIndex(value, field.options);
       if (idx === -1) throw new Error(`"${value}" is not one of: ${field.options.join(' | ')}`);
       await scope.locator(field.selector).selectOption({ label: field.options[idx] });
       return field.options[idx];

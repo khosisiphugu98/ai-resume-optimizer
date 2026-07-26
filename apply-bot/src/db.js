@@ -415,6 +415,12 @@ CREATE TABLE IF NOT EXISTS skill_suggestions (
   last_seen   TEXT NOT NULL
 );`);
 
+// Why a skill is being asked about, once the evidence gate has looked at it —
+// shown in the dashboard so a suggestion is answerable without opening the CV.
+for (const col of ['verdict TEXT', 'evidence_note TEXT']) {
+  try { db.exec(`ALTER TABLE skill_suggestions ADD COLUMN ${col}`); } catch { /* already added */ }
+}
+
 // One canonical skill normaliser, shared with profile.js — it carries the alias map
 // (ga4/gtm/js…), so a suggestion for "Google Analytics" dedups against, and is
 // suppressed by, an already-confirmed "GA4". A separate local normaliser here would
@@ -428,15 +434,17 @@ const normSkill = normaliseSkill;
  * just because another posting mentions it. Returns how many rows were newly
  * created as pending suggestions.
  */
-export function recordSkillSuggestions(skills) {
+export function recordSkillSuggestions(skills, notes = {}) {
   if (!Array.isArray(skills) || skills.length === 0) return 0;
   const ts = now();
   const upsert = db.prepare(`
-    INSERT INTO skill_suggestions (skill_norm, display, job_count, status, first_seen, last_seen)
-    VALUES (@norm, @display, 1, 'pending', @ts, @ts)
+    INSERT INTO skill_suggestions (skill_norm, display, job_count, status, first_seen, last_seen, verdict, evidence_note)
+    VALUES (@norm, @display, 1, 'pending', @ts, @ts, @verdict, @note)
     ON CONFLICT (skill_norm) DO UPDATE SET
       job_count = job_count + 1,
-      last_seen = @ts`);
+      last_seen = @ts,
+      verdict = COALESCE(@verdict, verdict),
+      evidence_note = COALESCE(@note, evidence_note)`);
   const isNew = db.prepare(`SELECT 1 FROM skill_suggestions WHERE skill_norm = ?`);
   let created = 0;
   db.transaction(rows => {
@@ -444,7 +452,8 @@ export function recordSkillSuggestions(skills) {
       const norm = normSkill(raw);
       if (!norm) continue;
       const existed = isNew.get(norm);
-      upsert.run({ norm, display: String(raw).trim(), ts });
+      const note = notes[raw] || notes[norm] || null;
+      upsert.run({ norm, display: String(raw).trim(), ts, verdict: note ? 'unevidenced' : null, note });
       if (!existed) created++;
     }
   })(skills);
@@ -455,7 +464,7 @@ export function recordSkillSuggestions(skills) {
 export function listSkillSuggestions(excludeNorms = []) {
   const exclude = new Set(excludeNorms.map(normSkill));
   return db.prepare(`
-    SELECT skill_norm, display, job_count FROM skill_suggestions
+    SELECT skill_norm, display, job_count, verdict, evidence_note FROM skill_suggestions
     WHERE status = 'pending' ORDER BY job_count DESC, display`)
     .all()
     .filter(r => !exclude.has(r.skill_norm));

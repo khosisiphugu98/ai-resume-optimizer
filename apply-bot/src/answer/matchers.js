@@ -1,6 +1,6 @@
 import { skillYears, authorisationFor } from '../profile.js';
 
-const ok = value => ({ value, source: 'profile' });
+const ok = (value, extra = null) => ({ value, source: 'profile', ...extra });
 const park = reason => ({ park: reason });
 
 /**
@@ -58,9 +58,11 @@ export const MATCHERS = [
         if (typeof total === 'number') return ok(String(total));
         return park('total years of experience is not confirmed in the profile');
       }
-      const { value, reason } = skillYears(p, skill);
+      const { value, reason, inferred } = skillYears(p, skill);
       if (value == null) return park(`years of experience with "${skill}" — ${reason}`);
-      return ok(String(value));
+      // A figure derived from the CV timeline answers the question, but is flagged
+      // so it is seen once before an application carrying it submits itself.
+      return ok(String(value), inferred ? { probable: true } : null);
     },
   },
 

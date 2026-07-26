@@ -17,6 +17,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SUITES = [
   'smoke.mjs',
   'answer-tests.mjs',
+  'evidence-tests.mjs',
   'apply-tests.mjs',
   'easyapply-integration.mjs',
   'ats-tests.mjs',
