@@ -15,7 +15,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { ROOT } from '../config.js';
-import { extractPdfText } from '../../scripts/extract-text.mjs';
+import { extractPdfLines } from '../../scripts/extract-text.mjs';
 
 // Overridable for the same reason APPLY_BOT_PROFILE is: without it, a test that
 // adds a fixture CV writes into the real, un-recoverable evidence directory.
@@ -71,7 +71,9 @@ export async function addDocument(filename, buffer) {
 
   let text = '';
   try {
-    text = ext === '.pdf' ? await extractPdfText(filePath) : fs.readFileSync(filePath, 'utf8');
+    // Line-aware extraction, not extractPdfText: the evidence quote is the line a
+    // skill was found on, and section headings are recognised by starting one.
+    text = ext === '.pdf' ? await extractPdfLines(filePath) : fs.readFileSync(filePath, 'utf8');
   } catch (err) {
     fs.rmSync(filePath, { force: true });
     throw new Error(`could not read ${filename}: ${err.message}`);

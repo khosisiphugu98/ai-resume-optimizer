@@ -50,6 +50,10 @@ Wrote SQL to pull weekly performance extracts.
 Marketing Intern — Rowdy Bags
 2021 - 2021
 Scheduled social posts and drafted copy.
+
+E D U C A T I O N & C E R T I F I C A T I O N S
+BBusSc Analytics, University of Cape Town, 2020
+Google Analytics Certification
 `;
 
 const DOCS = [{ id: 'd1', filename: 'CV.pdf', text: CV }];
@@ -101,7 +105,9 @@ t('literal match is evidence',      ev.get('SQL').verdict, 'evidenced');
 t('  → and quotes where it found it', /SQL/.test(ev.get('SQL').quote), true);
 t('  → and names the document',     ev.get('SQL').document, 'CV.pdf');
 t('absent skill is unevidenced',    ev.get('Kubernetes').verdict, 'unevidenced');
-t('a skill named in no CV is not evidenced by wishing', ev.get('GA4').verdict, 'unevidenced');
+// The alias map is shared with profile.js, so a CV that says "Google Analytics"
+// evidences a profile skill recorded as "GA4".
+t('an alias counts as the same skill', ev.get('GA4').verdict, 'evidenced');
 
 // Whole-word matching: "R" as a skill must not match every word containing an r.
 const evR = await findEvidence(['R'], [{ id: 'd', filename: 'x.pdf', text: 'Reporting and research.' }], noModel);
@@ -137,6 +143,14 @@ t('  → and says why', /outside any role/.test(inferYears('TensorFlow', DOCS, P
 t('a sub-year span yields no years', inferYears('Scheduled social posts', DOCS, PROFILE).years, null);
 t('never exceeds total experience',
   inferYears('SQL', DOCS, { ...PROFILE, current: { ...PROFILE.current, totalYearsExperience: 1 } }).years, 1);
+// The last role must not swallow Education & Certifications. "Google Analytics
+// Certification" sits below the final job; crediting it there would date the
+// skill from that job's start. Note the CV letter-spaces its heading, as real
+// ones do — the section boundary has to survive that.
+t('a certification below the last role is not credited to it',
+  inferYears('Google Analytics', DOCS, PROFILE).years, null);
+t('  → and says it sat outside any role',
+  /outside any role/.test(inferYears('Google Analytics', DOCS, PROFILE).why), true);
 
 section('the gate end to end');
 const gated = await gateSkills(

@@ -346,6 +346,32 @@ const YEAR = /\b(19|20)\d{2}\b/;
  * job it was used in. Roles are located by company name — the one string that is
  * both in the structured profile and printed in the CV.
  */
+// Headings that end the experience section. Matched letter-by-letter with
+// optional gaps, because CVs routinely letter-space their headings
+// ("E D U C A T I O N"), and a plain /education/ finds nothing in those.
+const AFTER_EXPERIENCE = ['education', 'certification', 'skills', 'references', 'projects', 'awards', 'interests', 'languages', 'publications', 'volunteer', 'achievements', 'courses', 'training'];
+
+const spacedOut = word => new RegExp(`(^|\\n)[^\\S\\n]*${word.split('').join('\\s*')}`, 'i');
+
+/**
+ * Where the experience section stops.
+ *
+ * Without this the last role runs to the end of the document and swallows
+ * Education and Certifications — so a "Google Analytics Certification" line gets
+ * credited to whatever job happens to be listed last, and the derived span
+ * stretches back to that job's start date. Observed on a real CV: GA4 was
+ * attributed to a 2020–2021 construction role and only the total-experience cap
+ * kept the answer from reading as six years.
+ */
+function experienceEnd(docText, after) {
+  let end = docText.length;
+  for (const word of AFTER_EXPERIENCE) {
+    const m = spacedOut(word).exec(docText.slice(after));
+    if (m && after + m.index < end) end = after + m.index;
+  }
+  return end;
+}
+
 function roleSections(profile, docText) {
   const tokens = tokensOf(docText);
   const marks = [];
@@ -358,7 +384,7 @@ function roleSections(profile, docText) {
   return marks.map((m, i) => ({
     role: m.role,
     from: m.at,
-    to: i + 1 < marks.length ? marks[i + 1].at : docText.length,
+    to: i + 1 < marks.length ? marks[i + 1].at : experienceEnd(docText, m.at),
   }));
 }
 
