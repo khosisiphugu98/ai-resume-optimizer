@@ -9,6 +9,7 @@ import path from 'node:path';
 import { runWizard, stepSignature } from '../wizard.js';
 import { resolveFormBatch } from '../../answer/resolver.js';
 import { normaliseQuestion } from '../../answer/bank.js';
+import { matchOption } from '../../answer/options.js';
 
 /** First frame where `build(frame)` yields a present, visible locator — or null. */
 async function firstFrameLocator(page, build) {
@@ -43,11 +44,29 @@ function controlBuilder(ctrl) {
     : frame.getByRole('button', { name: ctrl.value }));
 }
 
+/**
+ * Select by label, then by value, then by whichever option the answer actually
+ * means. The planner describes a field before the page is open, so it never sees
+ * the option list and answers in its own words — which is the one place a
+ * semantic fit has to happen at fill time rather than in the resolver.
+ */
+async function selectClosest(loc, value) {
+  const v = String(value);
+  try { await loc.selectOption({ label: v }); return v; } catch { /* try the value attribute */ }
+  try { await loc.selectOption(v); return v; } catch { /* fall through to matching */ }
+
+  const labels = (await loc.locator('option').allTextContents()).map(t => t.trim()).filter(Boolean);
+  const m = matchOption(v, labels, { semantic: true });
+  if (!m) throw new Error(`"${v}" is not one of: ${labels.join(' | ')}`);
+  await loc.selectOption({ label: m.option });
+  return m.option;
+}
+
 /** Apply one value to a plan-located control. Returns the landed value. */
 async function fillPlanField(item, value) {
   const loc = item.locator;
   switch (item.fieldType) {
-    case 'select': await loc.selectOption({ label: String(value) }).catch(async () => { await loc.selectOption(String(value)); }); return value;
+    case 'select': return await selectClosest(loc, value);
     case 'checkbox': if (value === false || /^(no|false|unchecked)$/i.test(String(value))) await loc.uncheck(); else await loc.check(); return value;
     case 'radio': await loc.check(); return value;
     default: await loc.fill(String(value)); return value;

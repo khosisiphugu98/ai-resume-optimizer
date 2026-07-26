@@ -4,6 +4,7 @@
 import { resolveField, guardAnswer } from '../src/answer/resolver.js';
 import { resumeText } from '../src/answer/resume-context.js';
 import { extractSkill, matchProfile } from '../src/answer/matchers.js';
+import { matchOption } from '../src/answer/options.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
 import { db, parkQuestions, parkedQueue, releaseAnswered, upsertJob, updateJob } from '../src/db.js';
@@ -64,6 +65,70 @@ t('linkedin',(await r('LinkedIn profile URL')).value, 'https://linkedin.com/in/k
 t('notice',  (await r('What is your notice period?')).value, '30 days');
 t('relocate',(await r('Are you willing to relocate?', { options: ['Yes', 'No'] })).value, 'No');
 t('source',  (await r('How did you hear about this role?')).value, 'LinkedIn');
+
+section('option matching — the answer in the form\'s vocabulary, not the profile\'s');
+// Safe rules: a restatement of the same answer. Available everywhere, including
+// at fill time.
+t('exact wins',            matchOption('30 days', ['Immediately', '30 days']).rule, 'exact');
+t('case and punctuation',  matchOption('yes', ['Yes.', 'No.']).option, 'Yes.');
+t('word order and filler', matchOption('Bachelors degree', ['Degree, Bachelors', 'Masters']).option, 'Degree, Bachelors');
+t('yes onto a worded yes', matchOption('Yes', ['Yes, I am authorised', 'No, I am not']).option, 'Yes, I am authorised');
+t('no onto a worded no',   matchOption('No', ['Yes, I am authorised', 'No, I am not']).option, 'No, I am not');
+t('ambiguous polarity refuses', matchOption('Yes', ['Yes, full-time', 'Yes, part-time', 'No']), null);
+t('never guesses',         matchOption('Negotiable', ['R10 000 - R20 000', 'R20 000 - R30 000']), null);
+
+// Semantic rules: an interpretation of the answer. Resolver only, and flagged.
+const sem = (v, o) => matchOption(v, o, { semantic: true });
+t('30 days is 1 month',    sem('30 days', ['Immediately', '1 month', '3 months']).option, '1 month');
+t('  → and is confident',  sem('30 days', ['Immediately', '1 month', '3 months']).confident, true);
+t('1 month is 30 days',    sem('1 month', ['Immediately', '30 days', '60 days']).option, '30 days');
+t('4 weeks is 1 month',    sem('4 weeks', ['2 weeks', '1 month', '2 months']).option, '1 month');
+t('lands inside a span',   sem('45 days', ['Immediately', '1-2 months', '6 months']).option, '1-2 months');
+t('immediate matches now', sem('0 days', ['Immediately', '1 month']).option, 'Immediately');
+// Nothing on offer covers the true notice period: round up, never down, and say
+// it is a substitution.
+t('rounds up, not down',   sem('45 days', ['Immediately', '30 days', '60 days']).option, '60 days');
+t('  → flagged unconfident', sem('45 days', ['Immediately', '30 days', '60 days']).confident, false);
+t('no longer option refuses', sem('90 days', ['Immediately', '30 days']), null);
+// A number onto banded options — true statements only.
+t('3 falls in 3-5 years',  sem('3', ['0-2 years', '3-5 years', '5+ years']).option, '3-5 years');
+t('prefers the tighter band', sem('3', ['1-10 years', '3-5 years']).option, '3-5 years');
+t('7 falls in 5+',         sem('7', ['0-2 years', '3-5 years', '5+ years']).option, '5+ years');
+t('"more than 5" excludes 5', sem('5', ['Less than 5', 'More than 5', '5']).option, '5');
+t('0 is none',             sem('0', ['None', '1-3 years']).option, 'None');
+t('a number outside every band refuses', sem('12', ['0-2 years', '3-5 years']), null);
+// Prose that contains a duration is still read — but reading a sentence is an
+// interpretation, so it is never confident.
+t('prose is read unconfidently', sem('I have three years', ['0-2 years', '3-5 years']).option, '3-5 years');
+t('  → flagged unconfident',     sem('I have three years', ['0-2 years', '3-5 years']).confident, false);
+t('a stated length is confident', sem('3 years', ['0-2 years', '3-5 years']).confident, true);
+t('framing words stay confident', sem('30 days notice', ['1 month', '3 months']).confident, true);
+t('duration is not a salary band', sem('30 days', ['R20 000 - R30 000', 'R30 000 - R40 000']), null);
+// Unique containment, the weakest rule.
+t('unique phrase match',   sem('Bachelor', ['Bachelor of Science (BSc)', 'Masters', 'PhD']).option, 'Bachelor of Science (BSc)');
+t('  → flagged unconfident', sem('Bachelor', ['Bachelor of Science (BSc)', 'Masters', 'PhD']).confident, false);
+t('ambiguous phrase refuses', sem('Bachelor', ['Bachelor of Science', 'Bachelor of Arts']), null);
+
+section('resolved values are fitted to the options the form offers');
+t('notice period in months',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', '1 month', '3 months'] })).value, '1 month');
+t('  → keeps what the profile said',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', '1 month', '3 months'] })).rawValue, '30 days');
+t('  → still tier profile',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', '1 month', '3 months'] })).tier, 'profile');
+t('confirmed years onto a band',
+  (await r('How many years of experience do you have with SQL?', { fieldType: 'select', options: ['0-2 years', '3-5 years', '5+ years'] })).value, '3-5 years');
+// A rounded-up notice period is applied, but marked so review sees it.
+t('interpreted fit is flagged probable',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', '60 days', '90 days'] })).probable, true);
+// The option list is every claim the form will accept. None of them being true
+// is a park, never the nearest string.
+t('an answer that fits nothing parks',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', 'Two weeks'] })).status, 'park');
+t('  → park names the tier that answered',
+  (await r('What is your notice period?', { fieldType: 'select', options: ['Immediately', 'Two weeks'] })).tier, 'profile-option');
+t('gender with no decline option parks rather than pick one',
+  (await r('What is your gender?', { fieldType: 'select', options: ['Male', 'Female'] })).status, 'park');
 
 section('compensation — unimportant, so text answers never park');
 t('text → negotiable', (await r('What are your salary expectations?')).value, 'Negotiable');
