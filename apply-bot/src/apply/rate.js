@@ -5,6 +5,16 @@ import fs from 'node:fs';
 export const CHANNELS = ['linkedin_easy', 'external_ats', 'email'];
 
 /**
+ * The most of the LinkedIn pageview budget the external channel may consume.
+ *
+ * Resolving an external apply URL opens the signed-in LinkedIn posting, so
+ * external browsing is LinkedIn browsing and counts against the same anti-ban
+ * budget — it was simply never gated on it. 60% leaves a working reserve for Easy
+ * Apply, which is the channel the budget was written for.
+ */
+export const EXTERNAL_PAGEVIEW_SHARE = 0.6;
+
+/**
  * Only linkedin_easy carries LinkedIn ban risk, so the caps are per-channel
  * rather than one shared budget (plan §8.1). Throttling a Greenhouse form or an
  * emailed CV buys nothing and costs volume.
@@ -29,8 +39,11 @@ export function canApply(channel, { ignoreHours = false } = {}) {
   if (fs.existsSync(PATHS.stop)) return { ok: false, reason: 'STOP file present' };
 
   const rates = todayRates();
-  if (rates.challenges_hit > 0) {
-    return { ok: false, reason: 'a LinkedIn challenge was hit today — halted until manually cleared' };
+  // A LinkedIn checkpoint is a LinkedIn problem. Halting every channel on one
+  // stopped emailed CVs and third-party ATS forms too, neither of which LinkedIn
+  // can see — a blast radius three times larger than the thing being protected.
+  if (rates.challenges_hit > 0 && channel.startsWith('linkedin')) {
+    return { ok: false, reason: 'a LinkedIn challenge was hit today — LinkedIn halted until manually cleared' };
   }
 
   // APPLY_BOT_IGNORE_HOURS lets a supervised operator run outside the normal
@@ -48,6 +61,21 @@ export function canApply(channel, { ignoreHours = false } = {}) {
 
   if (channel.startsWith('linkedin') && rates.linkedin_pageviews >= CAPS.linkedin_pageviews) {
     return { ok: false, reason: 'LinkedIn pageview budget exhausted' };
+  }
+
+  // External applications spend the LinkedIn budget too — resolving an apply URL
+  // means opening the signed-in posting — but only the linkedin channels were ever
+  // gated on it. With external capped at 1000 that is 1000 LinkedIn pageviews a day
+  // against a 250 budget, and it showed: external burned 247 of 250 while
+  // linkedin_easy used none, starving the channel the budget exists to protect.
+  // External may spend up to a share of it and no more; the remainder is held for
+  // the channel that actually carries the ban risk.
+  if (channel === 'external_ats' && rates.linkedin_pageviews >= EXTERNAL_PAGEVIEW_SHARE * CAPS.linkedin_pageviews) {
+    return {
+      ok: false,
+      reason: `external has used its share of the LinkedIn pageview budget `
+        + `(${rates.linkedin_pageviews}/${CAPS.linkedin_pageviews}) — the rest is reserved for Easy Apply`,
+    };
   }
 
   return { ok: true, remaining: left };

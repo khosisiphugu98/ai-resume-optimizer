@@ -134,7 +134,16 @@ addColumn('applications', 'outcome_note', 'TEXT');
 addColumn('applications', 'plan_fingerprint', 'TEXT');
 
 const now = () => new Date().toISOString();
-const today = () => new Date().toISOString().slice(0, 10);
+/**
+ * The operator's day, not UTC's.
+ *
+ * The daily caps are the anti-ban budget and `withinHours()` reasons in
+ * Africa/Johannesburg, but this rolled over at midnight UTC — 02:00 SAST. So the
+ * ledger reset two hours into the operator's day, and applications sent between
+ * midnight and 02:00 were billed to the day before. Both halves of the same policy
+ * now agree on when a day starts.
+ */
+const today = () => new Date().toLocaleDateString('en-CA', { timeZone: 'Africa/Johannesburg' });
 
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);

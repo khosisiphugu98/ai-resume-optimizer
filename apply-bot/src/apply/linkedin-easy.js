@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
+import { bumpRate } from '../db.js';
 import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
 import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
@@ -90,6 +91,11 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
   const uploadedUids = new Set();
 
   await page.goto(job.url, { waitUntil: 'domcontentloaded' });
+  // A signed-in posting view, exactly like the one resolveExternalUrl charges for.
+  // This channel never counted its own, so the budget that exists to keep LinkedIn
+  // browsing under a ceiling was blind to the channel that carries the ban risk:
+  // fifteen Easy Apply attempts a day cost fifteen pageviews and recorded none.
+  bumpRate('linkedin_pageviews');
   await assertNoChallenge(page);
 
   // Poll: the top card (and its Apply button) hydrates after first paint, so a

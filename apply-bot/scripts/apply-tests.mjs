@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { collectFieldsInPage, fillField } from '../src/apply/fields.js';
-import { canApply, withinHours, capRemaining } from '../src/apply/rate.js';
+import { canApply, withinHours, capRemaining, EXTERNAL_PAGEVIEW_SHARE } from '../src/apply/rate.js';
 import { HOURS } from '../src/config.js';
 import { db, bumpRate, setSetting } from '../src/db.js';
 import { CAPS } from '../src/config.js';
@@ -109,10 +109,27 @@ t('easy apply blocked at cap', canApply('linkedin_easy', { ignoreHours: true }).
 t('  → reason names the cap', /daily cap reached/.test(canApply('linkedin_easy', { ignoreHours: true }).reason), true);
 t('external channel unaffected by it', canApply('external_ats', { ignoreHours: true }).ok, true);
 
-section('challenge halt is global and sticky');
+// A LinkedIn checkpoint is a LinkedIn problem. It used to halt every channel,
+// including emailed CVs and third-party ATS forms that LinkedIn cannot see — a
+// blast radius three times larger than the thing being protected, and with no
+// auto-recovery short of the day rolling over.
+section('a challenge halts LinkedIn, and only LinkedIn');
 bumpRate('challenges_hit');
-t('easy apply halted', canApply('external_ats', { ignoreHours: true }).ok, false);
-t('  → reason mentions the challenge', /challenge/.test(canApply('external_ats', { ignoreHours: true }).reason), true);
+t('easy apply halted', canApply('linkedin_easy', { ignoreHours: true }).ok, false);
+t('  → reason mentions the challenge', /challenge/.test(canApply('linkedin_easy', { ignoreHours: true }).reason), true);
+t('external keeps going', canApply('external_ats', { ignoreHours: true }).ok, true);
+t('email keeps going', canApply('email', { ignoreHours: true }).ok, true);
+db.exec('DELETE FROM rate_ledger');
+
+// Resolving an external apply URL opens the signed-in LinkedIn posting, so
+// external browsing is LinkedIn browsing — but only the linkedin channels were
+// gated on the budget. External spent 247 of 250 in one day while easy apply
+// used none, starving the channel the budget exists to protect.
+section('external may spend only its share of the LinkedIn pageview budget');
+for (let i = 0; i < Math.ceil(EXTERNAL_PAGEVIEW_SHARE * CAPS.linkedin_pageviews); i++) bumpRate('linkedin_pageviews');
+t('external stopped at its share', canApply('external_ats', { ignoreHours: true }).ok, false);
+t('  → reason explains the reserve', /reserved for Easy Apply/.test(canApply('external_ats', { ignoreHours: true }).reason), true);
+t('easy apply still has budget left', canApply('linkedin_easy', { ignoreHours: true }).ok, true);
 db.exec('DELETE FROM rate_ledger');
 
 // HOURS is deliberately 24/7 (config.js:42) — the operator opened external and
