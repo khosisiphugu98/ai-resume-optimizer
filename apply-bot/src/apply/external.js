@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
-import { bumpRate } from '../db.js';
+import { bumpRate, getSetting } from '../db.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
 import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
 import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
@@ -168,7 +168,7 @@ export async function resolveExternalUrl(page, job) {
  * Identical shape to the Easy Apply adapter so the pipeline treats them the same:
  * fill everything, park rather than guess, and never submit in review mode.
  */
-export async function applyExternal(page, job, ctx, { submit = false, resumePath = null } = {}) {
+export async function applyExternal(page, job, ctx, { submit = false, resumePath = null, approved = false } = {}) {
   const screenshots = [];
 
   const url = job.external_apply_url;
@@ -182,6 +182,21 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(3000);
   screenshots.push(await shot(page, job.id, `${vendor.vendor}-open`));
+
+  // A sign-in page is not an application form.
+  //
+  // Postings whose apply link points at a Google Doc, or at a board that requires
+  // an account, land on an identity provider. The collector sees a text input and
+  // a Next button and treats it as step one of a form: it typed the candidate's
+  // email into Google's sign-in, failed to advance, escalated to the agent, and
+  // burned a retry — three of the seventeen captured "unsolved forms" in the
+  // database are accounts.google.com, the single most common shape. Nothing good
+  // is reachable from here without credentials, so it stops being an error and
+  // becomes an honest hand-off.
+  const wall = await loginWall(page);
+  if (wall) {
+    return { outcome: 'manual', vendor: vendor.vendor, reason: wall, url, filled: [], screenshots };
+  }
 
   // A form with no native controls is invisible to formScope's input count, so
   // falling back to the accessibility tree is what makes an unknown React
@@ -239,8 +254,20 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     return items.filter(i => i.role !== 'file' && i.question);
   };
 
+  // `requiresReview` is a policy about unrecognised forms, not a law of physics.
+  //
+  // It was an unconditional constant, so for the 80% of external postings that
+  // resolve to no known vendor the submit intent was discarded before the wizard
+  // started — in every mode, and even for a job a human had explicitly approved.
+  // Approving one re-filled the form and flipped it back to awaiting_review, on
+  // every cycle, forever. Two ways past it now, both requiring a person: an
+  // explicit approval of this job, or an operator who has turned the setting on
+  // with their eyes open. Neither is the default.
+  const override = approved || genericAutoSubmitAllowed();
+  const maySubmit = submit && (!vendor.requiresReview || override);
+
   const result = await runWizard({
-    submit: submit && !vendor.requiresReview,
+    submit: maySubmit,
     collect,
 
     resolve: items => resolveFormBatch(items, answerCtx),
@@ -284,11 +311,16 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     throw new Error(result.reason);
   }
 
-  // An unknown form is never auto-submitted, whatever the mode.
+  // Reached the end of the form without pressing submit.
   if (result.outcome === 'ready') {
     return {
       outcome: 'ready', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps,
-      heldForReview: vendor.requiresReview && submit ? 'generic adapter never auto-submits' : null,
+      // Why, in words the operator can act on. This string was already being built
+      // and then dropped on the floor by run.js, so "Ready for review" in auto mode
+      // looked like a bug rather than a policy.
+      heldForReview: !maySubmit && submit
+        ? `the ${vendor.vendor} adapter does not auto-submit — approve this application, or turn on generic auto-submit in settings`
+        : null,
     };
   }
 
@@ -299,11 +331,86 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const evidence = await shot(page, job.id, `${vendor.vendor}-submitted`);
   screenshots.push(evidence);
 
-  const body = await page.locator('body').innerText().catch(() => '');
-  const confirmed = vendor.success.some(re => re.test(body)) || page.url() !== before;
-  if (!confirmed) throw new Error('Clicked submit but saw no confirmation');
+  const confirmed = await sawConfirmation(page, vendor, before);
+
+  // Never throw here. Throwing marked the job apply_failed, and apply_failed is
+  // re-selected on the next cycle — so a submission that actually went through but
+  // confirmed in a way we did not recognise was silently sent again. To a recruiter
+  // that is a duplicate application; to us it looked like a retry of a failure.
+  // An unverified click is its own outcome, terminal, and a person decides.
+  if (!confirmed) {
+    return {
+      outcome: 'submitted_unconfirmed', vendor: vendor.vendor, url, filled, screenshots,
+      steps: result.steps, evidence,
+      reason: 'clicked submit but saw no confirmation — it may have gone through, so it will not be retried automatically',
+    };
+  }
 
   return { outcome: 'submitted', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps, evidence };
+}
+
+/**
+ * Whether the operator has allowed unrecognised forms to submit themselves.
+ *
+ * Off unless explicitly turned on. An unrecognised form is one nobody has read the
+ * shape of, so auto-submitting it is a genuine risk decision — it belongs to a
+ * person, taken once, deliberately, and reversible from the same place.
+ */
+export function genericAutoSubmitAllowed() {
+  return getSetting('allow_generic_autosubmit') === '1';
+}
+
+/** Identity providers an apply link can bounce through. */
+const IDENTITY_HOSTS = /(^|\.)(accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|.*\.okta\.com|.*\.auth0\.com|signin\.aws\.amazon\.com|github\.com\/login|appleid\.apple\.com)/i;
+
+/** Why this page is a login wall rather than an application, or null. */
+async function loginWall(page) {
+  const url = page.url();
+  try {
+    const host = new URL(url).host;
+    if (IDENTITY_HOSTS.test(host) || IDENTITY_HOSTS.test(`${host}${new URL(url).pathname}`)) {
+      return `the apply link lands on a sign-in page (${host}) — this needs an account, so it cannot be completed unattended`;
+    }
+  } catch { /* an unparseable URL is not a login wall */ }
+
+  // A password box is the giveaway on a site with its own account system. Checked
+  // across frames, since these are often embedded.
+  for (const frame of page.frames()) {
+    const pw = await frame.locator('input[type="password"]:visible').count().catch(() => 0);
+    if (pw > 0) {
+      return 'the application page asks for a password — it needs an account, so it cannot be completed unattended';
+    }
+  }
+  return null;
+}
+
+/**
+ * Did the page acknowledge the submission?
+ *
+ * Two changes from the original single-expression check. The confirmation text is
+ * read from every frame, not just the main one: these forms routinely live in an
+ * iframe — `formScope` walks frames precisely because of that — and a board that
+ * confirms inside the same iframe left `page.locator('body')` reading the host
+ * page and finding nothing. And a bare URL change is no longer sufficient on its
+ * own; an SPA route change, an appended tracking parameter or a redirect to a
+ * login wall all changed the URL without anything being submitted. A URL change
+ * now counts only alongside the form having actually gone away.
+ */
+async function sawConfirmation(page, vendor, urlBefore) {
+  const texts = await Promise.all(
+    page.frames().map(f => f.locator('body').innerText().catch(() => '')),
+  );
+  if (texts.some(t => vendor.success.some(re => re.test(t)))) return true;
+
+  if (page.url() === urlBefore) return false;
+
+  // The URL moved. Treat that as confirmation only if the form we just submitted
+  // is no longer on the page — a redirect that still shows the form is a failure
+  // or a login wall, not an acknowledgement.
+  const scope = await formScope(page).catch(() => null);
+  if (!scope) return true;
+  const stillThere = await scope.locator('input, select, textarea').count().catch(() => 0);
+  return stillThere === 0;
 }
 
 export { ChallengeDetected };

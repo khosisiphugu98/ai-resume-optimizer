@@ -146,6 +146,9 @@ const routes = {
       anthropic: secretsStatus().anthropic,
       anthropicHint: secretsStatus().anthropicHint,
     },
+    // Off unless deliberately turned on: it is what allows an application to be
+    // sent on a form no adapter recognises.
+    allowGenericAutosubmit: getSetting('allow_generic_autosubmit') === '1',
     paths: { profileDir: path.join(ROOT, 'profile'), artifacts: PATHS.artifacts },
   }),
 
@@ -695,7 +698,7 @@ const server = http.createServer(async (req, res) => {
   // window it started with.
   if (url.pathname === '/api/settings' && req.method === 'POST') {
     const body = await new Promise(r => { let b = ''; req.on('data', c => b += c); req.on('end', () => r(b)); });
-    const { datePosted, agentEnabled } = JSON.parse(body || '{}');
+    const { datePosted, agentEnabled, allowGenericAutosubmit } = JSON.parse(body || '{}');
     try {
       if (datePosted !== undefined) {
         const win = setDatePostedWindow(datePosted);
@@ -705,12 +708,25 @@ const server = http.createServer(async (req, res) => {
         setSetting('agent_enabled', agentEnabled ? '1' : '0');
         emit({ stage: 'apply', message: `Adaptive agent ${agentEnabled ? 'enabled' : 'disabled'} — applies on the next apply run (fill-only, never submits)` });
       }
+      // The one setting that lets applications go to employers on forms nobody has
+      // vetted the shape of. Logged loudly in both directions: turning it on is a
+      // decision worth being able to find again in the event log.
+      if (allowGenericAutosubmit !== undefined) {
+        setSetting('allow_generic_autosubmit', allowGenericAutosubmit ? '1' : '');
+        emit({
+          stage: 'apply', level: allowGenericAutosubmit ? 'warn' : 'info',
+          message: allowGenericAutosubmit
+            ? 'Generic auto-submit ENABLED — applications on unrecognised forms will now be sent without review. Turn this off to go back to review-only.'
+            : 'Generic auto-submit disabled — unrecognised forms are filled and held for review again.',
+        });
+      }
     } catch (err) {
       return json(res, { error: err.message }, 400);
     }
     return json(res, {
       datePosted: getSetting('date_posted', DEFAULT_DATE_POSTED),
       agentEnabled: getSetting('agent_enabled') === '1',
+      allowGenericAutosubmit: getSetting('allow_generic_autosubmit') === '1',
     });
   }
 

@@ -1,4 +1,4 @@
-import { db, updateJob, parkQuestions, bumpRate } from '../db.js';
+import { db, updateJob, parkQuestions, bumpRate, appliedUrlOwner } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { getContext, attachScreencast, stopRequested, ChallengeDetected } from '../browser.js';
 import { loadProfile } from '../profile.js';
@@ -156,8 +156,24 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
           job.external_apply_url = resolved;
           emit({ jobId: job.id, stage: 'apply', message: `Resolved to ${v.vendor}: ${resolved.slice(0, 90)}` });
         }
+
+        // Two LinkedIn cards can be the same underlying posting — reposted by a
+        // different agency, or listed twice by the same one. They only reveal
+        // themselves as identical once the apply URL is resolved, by which point
+        // both look like fresh work. In one batch, "Data Scientist @ Jobs Ai" and
+        // "Data Scientist @ Hire Feed" both resolved to the same micro1.ai posting
+        // and both were filled. Applying twice to one job is not persistence.
+        const twin = appliedUrlOwner(job.external_apply_url, job.id);
+        if (twin) {
+          updateJob(job.id, { status: 'blocked', reject_reason: `duplicate of job #${twin} — same apply URL` });
+          emit({
+            jobId: job.id, stage: 'apply', level: 'warn',
+            message: `Skipped — the same posting was already applied to as job #${twin}`,
+          });
+          continue;
+        }
         result = await applyExternal(page, job, answerCtx,
-          { submit: shouldSubmit, resumePath: job.resume_path });
+          { submit: shouldSubmit, resumePath: job.resume_path, approved: job.status === 'approved' });
       }
 
       if (result.outcome === 'manual') {
@@ -182,6 +198,32 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         updateJob(job.id, { status: 'submitted' });
         stats.submitted++;
         emit({ jobId: job.id, stage: 'apply', message: `Submitted — ${job.title} @ ${job.company}` });
+      } else if (result.outcome === 'submitted_unconfirmed') {
+        // We pressed submit and could not verify what happened. This is terminal on
+        // purpose: `manual_required` is never re-selected, so the application is not
+        // sent a second time on the strength of an unrecognised confirmation page.
+        // It counts against the daily cap, because something did go out.
+        recordAttempt(job, channel, result, 'submitted_unconfirmed');
+        recordApplication(channel);
+        updateJob(job.id, { status: 'manual_required', reject_reason: result.reason });
+        stats.manual++;
+        emit({
+          jobId: job.id, stage: 'apply', level: 'warn',
+          message: `Submitted but unconfirmed — ${job.title} @ ${job.company}. ${result.reason} Check the employer's site or your inbox before re-applying.`,
+        });
+      } else if (job.status === 'approved') {
+        // A human approved this and it still did not submit. Sending it back to
+        // awaiting_review is what made approval an infinite loop: re-filling the
+        // live vendor form on every cycle and never finishing. It stops here, with
+        // the reason, so the operator can do it by hand rather than approve again.
+        recordAttempt(job, channel, result, 'blocked');
+        const why = result.heldForReview || 'the form could not be submitted automatically';
+        updateJob(job.id, { status: 'manual_required', reject_reason: why });
+        stats.manual++;
+        emit({
+          jobId: job.id, stage: 'apply', level: 'warn',
+          message: `Approved but not submittable — ${why}. Filled ${result.filled.length} field(s); finish this one by hand.`,
+        });
       } else {
         // Filled and captured, not sent.
         recordAttempt(job, channel, result, 'blocked');
@@ -189,7 +231,8 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         stats.queued++;
         emit({
           jobId: job.id, stage: 'apply',
-          message: `Ready for review — ${result.filled.length} fields filled across ${result.steps} step(s)`,
+          message: `Ready for review — ${result.filled.length} fields filled across ${result.steps} step(s)`
+            + (result.heldForReview ? ` — ${result.heldForReview}` : ''),
         });
       }
     } catch (err) {

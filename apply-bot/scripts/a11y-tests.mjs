@@ -365,6 +365,30 @@ t('the field that revealed it was filled too',
   !!w2.filled.find(f => /sponsorship/i.test(f.question)), true);
 t('one step, not two', w2.steps, 1);
 
+// One unanswerable field used to discard the whole application before a single
+// character was typed, which is why LinkedIn Easy Apply recorded thirteen attempts
+// averaging 0.0 fields filled. The answerable fields are worth keeping: they are
+// what the review card shows and what an operator corrects.
+const PARTIAL = at('https://careers.partial.test/apply', `
+  <form>
+    <label for="p-em">Email</label><input id="p-em" type="text" required>
+    <label for="p-ph">Mobile phone number</label><input id="p-ph" type="text" required>
+    <label for="p-li">LinkedIn Profile</label><input id="p-li" type="text" required>
+    <label for="p-x">How did you perform in mathematics at high school?</label>
+    <input id="p-x" type="text" required>
+    <button type="button" id="sub">Submit application</button>
+  </form>`);
+
+const w4 = await applyExternal(page, { ...job(9105), external_apply_url: PARTIAL }, ctx, { submit: true });
+t('an unanswerable field still parks the run', w4.outcome, 'parked');
+t('but the answerable fields were filled', w4.filled.length >= 3, true);
+t('the maths question is the one parked',
+  /mathematics/i.test(w4.parked.map(p => p.question).join(' ')), true);
+t('and nothing was submitted', await page.locator('#sub').isVisible(), true);
+// The values must actually be in the controls, not merely reported.
+t('email really landed in the DOM',
+  await page.locator('#p-em').inputValue(), 'k@example.com');
+
 // A Next button that does nothing puts the loop in a spin that only MAX_STEPS
 // ends — eight rounds of LLM calls and screenshots for a form standing still.
 const DEAD = at('https://careers.dead.test/apply', `
@@ -384,7 +408,7 @@ t('and it happens early, not after the step ceiling', /step 1/.test(deadErr || '
 // auto-submitted, whatever the mode says.
 const w3 = await applyExternal(page, { ...job(9104), external_apply_url: WIZ }, ctx, { submit: true });
 t('generic vendor never auto-submits even with submit:true', w3.outcome, 'ready');
-t('and says why it was held', /never auto-submits/.test(w3.heldForReview || ''), true);
+t('and says why it was held', /does not auto-submit/.test(w3.heldForReview || ''), true);
 t('nothing was submitted', await page.locator('#done').isVisible(), false);
 
 section('button matching by accessible name');
@@ -401,7 +425,7 @@ t('a different form does not', sig(roles) === sig(shadow), false);
 t('signature ignores uids', /a11y-/.test(sig(roles)), false);
 
 await browser.close();
-for (let i = 9101; i <= 9104; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
+for (let i = 9101; i <= 9105; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

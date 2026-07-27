@@ -44,6 +44,10 @@ export async function runWizard({
   onStep = null, beforeAdvance = null, submit = false, maxSteps = MAX_STEPS,
 }) {
   const filled = [];
+  // Questions this run could not answer. Collected rather than returned on sight,
+  // so the step is completed and captured before the run ends — see the note at
+  // the resolve() call below.
+  const parkedFields = [];
   let steps = 0;
   let lastSignature = null;
 
@@ -59,7 +63,17 @@ export async function runWizard({
       if (!unfilled.length) break;
 
       const { resolved, parked } = await resolve(unfilled);
-      if (parked.length) return { outcome: 'parked', parked, filled, steps };
+
+      // A park is recorded and the step still gets filled.
+      //
+      // Returning here meant one unanswerable required field discarded the whole
+      // application before a single character was typed — which is why LinkedIn
+      // Easy Apply recorded thirteen attempts averaging 0.0 fields filled. The
+      // answers we do have are worth keeping: they are what the review card shows,
+      // what an operator corrects, and what the bank learns from. Nothing is
+      // submitted while `parkedFields` holds anything; the step simply finishes its
+      // work first, and the wizard stops at the end of it.
+      if (parked.length) parkedFields.push(...parked);
 
       for (const r of resolved) {
         if (r.status !== 'ok') continue;
@@ -81,15 +95,13 @@ export async function runWizard({
             tier: r.tier, kind: node.role, probable: !!r.probable,
           });
         } catch (err) {
-          // A value that will not go into the control is not an answer. Park it
-          // rather than submitting the form with the field blank.
-          return {
-            outcome: 'parked', filled, steps,
-            parked: [{
-              question: r.question, fieldType: r.fieldType, options: node.options,
-              reason: `could not apply "${r.value}": ${err.message}`, tier: 'fill-error',
-            }],
-          };
+          // A value that will not go into the control is not an answer. Record it
+          // and carry on with the rest of the step — one stubborn control must not
+          // cost the fields that would have gone in cleanly.
+          parkedFields.push({
+            question: r.question, fieldType: r.fieldType, options: node.options,
+            reason: `could not apply "${r.value}": ${err.message}`, tier: 'fill-error',
+          });
         }
       }
 
@@ -103,6 +115,16 @@ export async function runWizard({
     }
 
     if (onStep) await onStep({ step: steps, nodes });
+
+    // --- anything unanswered ends the run, now that the step is done --------
+    //
+    // The step has been filled as far as it could be and captured, so the review
+    // card shows real work rather than an empty form. Advancing past an unanswered
+    // required field would only fail validation on the next screen, and submitting
+    // is out of the question — so this is where the run stops.
+    if (parkedFields.length) {
+      return { outcome: 'parked', parked: parkedFields, filled, steps };
+    }
 
     // --- terminal? ---------------------------------------------------------
     const terminal = await findTerminal();
