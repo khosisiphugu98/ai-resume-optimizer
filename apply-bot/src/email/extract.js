@@ -20,7 +20,25 @@ Rules:
   referenceNumber and subjectTemplate.
 - If no email address is present, return {"to": null}.`;
 
-const EMAIL_RE = /[\w.+-]+@[\w-]+\.[\w.]{2,}/g;
+// The TLD is matched label by label rather than as one `[\w.]{2,}` run, because
+// that class also matches the full stop that ends the sentence the address sits
+// in — "send your CV to stefan@prinsandprins.com." yielded a trailing dot and a
+// guaranteed hard bounce. 11% of the addresses on file were captured that way.
+const EMAIL_RE = /[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}/gi;
+
+// Inboxes that appear in postings but are never the place an application goes.
+// One posting carried both a recruiter's address and the company's data-protection
+// officer; only document order kept the CV away from the DPO.
+const ROLE_DENYLIST = /^(dpo|privacy|legal|noreply|no-reply|donotreply|unsubscribe|abuse|postmaster|webmaster|marketing|sales|support|billing|press)@/i;
+
+/** Addresses in the posting, de-duplicated, with role inboxes dropped. */
+export function addressesIn(jd) {
+  const all = [...new Set((String(jd).match(EMAIL_RE) || []).map(a => a.trim()))];
+  const usable = all.filter(a => !ROLE_DENYLIST.test(a));
+  // If the posting offers nothing but role inboxes, a careers@ address is still
+  // better than parking — fall back rather than losing the application.
+  return usable.length ? usable : all;
+}
 
 // Documents we cannot produce. Asking for these parks the application rather
 // than sending an incomplete one.
@@ -54,7 +72,7 @@ export function detectRequiredDocuments(jd) {
 
 /** Deterministic fallback when there is no LLM key — address + reference only. */
 export function extractHeuristically(jd) {
-  const addresses = [...new Set(String(jd).match(EMAIL_RE) || [])];
+  const addresses = addressesIn(jd);
   const ref = String(jd).match(/\b(?:ref(?:erence)?|req(?:uisition)?)\s*(?:no\.?|number|#|:)?\s*([A-Z0-9][A-Z0-9\/\-_]{2,})/i);
   return {
     to: addresses[0] || null,
@@ -84,11 +102,26 @@ export async function extractEmailApplication(job) {
 
   // The address must actually appear in the posting — a hallucinated recipient
   // would send this person's CV to a stranger.
-  const present = new Set((jd.match(EMAIL_RE) || []).map(a => a.toLowerCase()));
+  const present = new Set(addressesIn(jd).map(a => a.toLowerCase()));
   if (!out.to || !present.has(String(out.to).toLowerCase())) {
     const fallback = extractHeuristically(jd);
     if (!fallback.to) return { ...fallback, to: null };
-    return { ...out, to: fallback.to, correctedRecipient: true };
+    // Spreading `out` here used to carry the model's own cc array through — on the
+    // exact path where it has just been caught inventing a recipient, and skipping
+    // the `present` filter applied on the happy path below. Rebuild the spec from
+    // the deterministic scan instead, and keep the document union.
+    return {
+      ...fallback,
+      to: fallback.to,
+      cc: [],
+      subjectTemplate: out.subjectTemplate || fallback.subjectTemplate || null,
+      referenceNumber: out.referenceNumber || fallback.referenceNumber || null,
+      requiredAttachments: [...new Set([
+        ...(Array.isArray(out.requiredAttachments) ? out.requiredAttachments : ['cv']),
+        ...detectRequiredDocuments(jd),
+      ])],
+      correctedRecipient: true,
+    };
   }
 
   return {

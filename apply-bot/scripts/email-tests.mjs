@@ -113,6 +113,43 @@ try { buildMimeMessage({ from: 'a@b.c', to: 'd@e.f', subject: 's', body: 'b', at
 catch (e) { threw = e.message; }
 t('missing attachment throws rather than sending without it', /Attachment not found/.test(threw || ''), true);
 
+// Every one of these strings is a real posting fragment from the live database.
+// The old TLD class `[\w.]{2,}` ran past the address and swallowed the full stop
+// that ended the sentence, so 5 of 45 stored recipients were unsendable.
+section('addresses are not captured with the sentence punctuation attached');
+{
+  const cases = [
+    ['Send your CV to stefan@prinsandprins.com.', 'stefan@prinsandprins.com'],
+    ['Applications to roelien@propdevlaw.co.za.', 'roelien@propdevlaw.co.za'],
+    ['Email contact@o-ring.tech.', 'contact@o-ring.tech'],
+    ['Forward to Lfrench@networkrecruitment.co.za, thanks', 'Lfrench@networkrecruitment.co.za'],
+    ['CV to maria.a.anazario@aubay.pt!', 'maria.a.anazario@aubay.pt'],
+  ];
+  for (const [jd, want] of cases) t(want, extractHeuristically(jd).to, want);
+}
+
+section('role inboxes are never chosen as the recipient');
+{
+  const jd = 'Send your CV to careers@acme.com. For data requests contact dpo@acme.com.';
+  t('picks careers over dpo', extractHeuristically(jd).to, 'careers@acme.com');
+  const dpoFirst = 'Data protection: dpo@acme.com. Applications to recruitment@acme.com.';
+  t('skips a leading dpo@', extractHeuristically(dpoFirst).to, 'recruitment@acme.com');
+  const onlyRole = 'Questions to legal@acme.com only.';
+  t('falls back rather than losing the job', extractHeuristically(onlyRole).to, 'legal@acme.com');
+}
+
+section('the message never advertises that a bot wrote it');
+{
+  const msg = buildMimeMessage({
+    from: 'k@example.com', to: 'hr@acme.com', subject: 'Application',
+    body: 'Hello', attachments: [], now: new Date('2026-07-27T09:00:00Z'),
+  });
+  t('no "bot" anywhere in the message', /bot/i.test(msg), false);
+  t('has a Date header', /^Date: .+/m.test(msg), true);
+  t('has a Message-ID', /^Message-ID: <.+@example\.com>/m.test(msg), true);
+  t('has a Reply-To', /^Reply-To: k@example\.com/m.test(msg), true);
+}
+
 section('cover email composition (no LLM key → deterministic fallback)');
 const body = await composeCoverEmail(
   { title: 'Marketing Analyst', company: 'Takealot', jd_text: 'SQL and dashboards.' },

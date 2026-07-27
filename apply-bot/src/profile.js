@@ -104,6 +104,21 @@ export function unconfirmed(profile) {
   for (const f of ['firstName', 'lastName', 'email', 'phone']) {
     if (!profile.identity?.[f]) out.push(`identity.${f} — empty`);
   }
+
+  // Facts almost every application asks for, and that nothing else can supply.
+  //
+  // `city` is here because leaving it out is worse than parking on it: the profile
+  // summary handed to the model read "Location: , South Africa", and the model
+  // filled a City control with "South Africa" on one live application and invented
+  // "Johannesburg" on another. An empty value that reports itself as complete is
+  // how a fabricated one reaches an employer.
+  if (!profile.identity?.city) out.push('identity.city — empty (forms ask for it; the model guesses when it is blank)');
+  if (profile.misc?.hasDriversLicense == null) out.push('misc.hasDriversLicense — unset (parks, and reads as a blocker when scoring)');
+  if (!profile.misc?.startAvailability) out.push('misc.startAvailability — empty (asked as often as notice period)');
+  if (profile.compensation?.expectedAnnual == null) {
+    out.push('compensation.expectedAnnual — unset (a form demanding a number cannot take "Negotiable")');
+  }
+
   return out;
 }
 
@@ -122,6 +137,21 @@ export function editableGaps() {
     rows.push({ path: 'current.title', label: 'Current job title', value: p.current?.title ?? '', type: 'text', group: 'current' });
     rows.push({ path: 'current.totalYearsExperience', label: 'Total years of experience', value: p.current?.totalYearsExperience ?? '', type: 'number', group: 'current' });
   }
+  // The plain facts above, editable in place so the gap can be closed where it is
+  // reported rather than by hand-editing master-profile.json.
+  if (!p.identity?.city) {
+    rows.push({ path: 'identity.city', label: 'City you live in', value: '', type: 'text', group: 'identity' });
+  }
+  if (p.misc?.hasDriversLicense == null) {
+    rows.push({ path: 'misc.hasDriversLicense', label: 'Do you have a driver\'s licence?', value: 'false', type: 'bool', group: 'misc' });
+  }
+  if (!p.misc?.startAvailability) {
+    rows.push({ path: 'misc.startAvailability', label: 'Earliest start date / availability', value: '', type: 'text', group: 'misc' });
+  }
+  if (p.compensation?.expectedAnnual == null) {
+    rows.push({ path: 'compensation.expectedAnnual', label: `Expected annual salary (${p.compensation?.currency || 'ZAR'})`, value: '', type: 'number', group: 'compensation' });
+  }
+
   for (const [name, meta] of Object.entries(p.skills || {})) {
     if (name.startsWith('_') || !meta || typeof meta !== 'object' || meta.confirmed) continue;
     rows.push({ path: `skills.${name}.years`, label: `${name} — years`, value: meta.years ?? '', type: 'number', group: `skills.${name}` });

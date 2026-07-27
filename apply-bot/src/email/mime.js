@@ -28,14 +28,26 @@ function wrap(b64, width = 76) {
  * non-ASCII (curly quotes, accented names) and 8-bit content in a 7-bit transport
  * is how mojibake happens.
  */
-export function buildMimeMessage({ from, to, cc = [], subject, body, attachments = [] }) {
-  const boundary = `----=_bot_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+export function buildMimeMessage({ from, to, cc = [], subject, body, attachments = [], now = new Date() }) {
+  // The boundary string travels with the message and is visible to the recipient
+  // in "Show original" and to any filter that inspects MIME structure, so it must
+  // not advertise what generated it. It is an opaque token; nothing reads it back.
+  const token = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+  const boundary = `----=_mime_${token}`;
+
+  // A hand-rolled 5322 message missing Date/Message-ID scores badly with spam
+  // filters. Gmail's API supplies its own when these are absent, but the message
+  // is also written to disk and may go out over SMTP, so set them here.
+  const domain = String(from).split('@')[1]?.replace(/[>\s]/g, '') || 'localhost';
 
   const headers = [
     `From: ${from}`,
     `To: ${to}`,
     ...(cc.length ? [`Cc: ${cc.join(', ')}`] : []),
     `Subject: ${encodeHeader(subject)}`,
+    `Date: ${now.toUTCString()}`,
+    `Message-ID: <${token}@${domain}>`,
+    `Reply-To: ${from}`,
     'MIME-Version: 1.0',
     `Content-Type: multipart/mixed; boundary="${boundary}"`,
   ];

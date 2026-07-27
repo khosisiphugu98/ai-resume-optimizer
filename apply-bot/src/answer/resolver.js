@@ -64,34 +64,50 @@ function resolveDeterministic(field, ctx) {
     };
   };
 
-  // Tier 1 — deterministic profile lookup
+  // Tier 1 — deterministic profile lookup.
+  //
+  // A park here is held, NOT returned. The profile states a fact in the profile's
+  // own words, and a control may simply not offer that wording: LinkedIn's "Email
+  // address" is a select of account-verified addresses, and a phone-country-code
+  // list never contains a phone number. Returning the park immediately made tiers
+  // 2 and 3 unreachable in exactly the case they exist for — a human had already
+  // stored the right answer for "Email address" and it was never once read
+  // (`times_used` stayed 0 while the question parked ten times). So the ladder
+  // continues, and the tier-1 park is only the answer if nothing below resolves.
+  let deferredPark = null;
+
   const hit = matchProfile(ctx.profile, { ...base, countryCode: ctx.countryCode, question });
-  if (hit?.park) return { status: 'park', tier: 'profile', reason: hit.park, ...base };
-  if (hit?.value != null && hit.value !== '') {
-    return fit({
+  if (hit?.park) {
+    deferredPark = { status: 'park', tier: 'profile', reason: hit.park, ...base };
+  } else if (hit?.value != null && hit.value !== '') {
+    const fitted = fit({
       status: 'ok', tier: 'profile', matcher: hit.matcher, value: hit.value, ...base,
       ...(hit.probable ? { probable: true } : {}),
     });
+    if (fitted.status !== 'park') return fitted;
+    deferredPark = fitted;   // the profile knew a value; the control would not take it
   }
 
   // Tier 2 — answer bank, exact
   const exact = lookupExact(question, ctx);
   if (exact) {
-    recordUse(exact.id);
-    return fit({ status: 'ok', tier: 'bank-exact', value: exact.answer_value, answerId: exact.id, ...base });
+    const fitted = fit({ status: 'ok', tier: 'bank-exact', value: exact.answer_value, answerId: exact.id, ...base });
+    if (fitted.status !== 'park') { recordUse(exact.id); return fitted; }
   }
 
   // Tier 3 — answer bank, fuzzy. Applied, but flagged so review can catch it.
   const fuzzy = lookupFuzzy(question, ctx);
   if (fuzzy) {
-    recordUse(fuzzy.id);
-    return fit({
+    const fitted = fit({
       status: 'ok', tier: 'bank-fuzzy', value: fuzzy.answer_value,
       answerId: fuzzy.id, similarity: fuzzy.similarity, probable: true, ...base,
     });
+    if (fitted.status !== 'park') { recordUse(fuzzy.id); return fitted; }
   }
 
-  return null;
+  // Nothing below tier 1 could satisfy the control either. Now the park stands —
+  // and it reports the profile's reason, which is the one the operator can act on.
+  return deferredPark;
 }
 
 /**

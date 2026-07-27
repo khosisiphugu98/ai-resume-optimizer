@@ -53,6 +53,20 @@ export async function extractPdfLines(pdfPath) {
   return lines.filter((l, i) => l || lines[i - 1]).join('\n');
 }
 
+/**
+ * The hard technical skills a genuine export of this résumé always contains.
+ *
+ * Deliberately NOT `Object.keys(profile.skills)`: that list has grown to 188
+ * entries including `Remote`, `KPI`, `charts`, `collaborate` and `attention to
+ * detail`, so "at least five skills found" degenerated into "at least five common
+ * English words found" and any A4 page passed. Every token here was verified
+ * present in a real tailored export.
+ */
+export const CORE_RESUME_SKILLS = [
+  'SQL', 'Python', 'GA4', 'Looker Studio', 'Tableau',
+  'Power BI', 'Grafana', 'programmatic',
+];
+
 // Assert a generated resume PDF is actually machine-readable.
 export function validateResumePdf(text, { name, email, skills = [] }) {
   const hay = text.toLowerCase();
@@ -71,7 +85,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   console.log(validateResumePdf(text, {
     name: 'Khosi Siphugu',
     email: 'mksiphugu@gmail.com',
-    skills: ['SQL', 'Python', 'GA4', 'Looker Studio', 'Tableau', 'Power BI', 'Grafana', 'programmatic'],
+    skills: CORE_RESUME_SKILLS,
   }));
   console.log('\n--- first 400 chars ---\n' + text.slice(0, 400));
 }

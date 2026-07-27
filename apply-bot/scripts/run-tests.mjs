@@ -23,6 +23,7 @@ const SUITES = [
   'ats-tests.mjs',
   'a11y-tests.mjs',
   'email-tests.mjs',
+  'tailor-tests.mjs',
   'outcome-tests.mjs',
   'calibration-tests.mjs',
   'enrich-tests.mjs',
