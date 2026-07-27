@@ -154,7 +154,29 @@ export const collectA11yInPage = (rootSelector) => {
     return r.width > 0 && r.height > 0;
   };
 
-  const disabledOf = el => !!el.disabled || el.getAttribute('aria-disabled') === 'true';
+  // readOnly counts as unfillable — but only where it means anything. A readonly
+  // text input looks exactly like an editable one to a role check, so it was
+  // collected, sent to the resolver, then handed to locator.fill(), which waits
+  // the full 30s for an element that will never become editable and throws,
+  // parking the whole application. Seen on a BambooHR posting whose apply-URL
+  // field was pre-populated and locked.
+  //
+  // Scoped to the controls the attribute actually applies to: per spec `readonly`
+  // has no effect on a checkbox, radio or file input, and browsers honour that, so
+  // treating it as disabling there would skip a control the user can still change.
+  const READONLY_APPLIES = new Set([
+    'text', 'search', 'url', 'tel', 'email', 'password',
+    'date', 'month', 'week', 'time', 'datetime-local', 'number',
+  ]);
+  const readOnlyOf = el => {
+    if (el.getAttribute('aria-readonly') === 'true') return true;
+    if (el.tagName === 'TEXTAREA') return !!el.readOnly;
+    if (el.tagName !== 'INPUT') return false;
+    return READONLY_APPLIES.has((el.type || 'text').toLowerCase()) && !!el.readOnly;
+  };
+
+  const disabledOf = el =>
+    !!el.disabled || el.getAttribute('aria-disabled') === 'true' || readOnlyOf(el);
   const requiredOf = el => !!el.required || el.getAttribute('aria-required') === 'true';
 
   const tag = el => {

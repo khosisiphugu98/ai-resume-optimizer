@@ -23,6 +23,27 @@ Rules, in order of importance:
 Return JSON: {"answer": "<text>"} or {"unanswerable": "<what fact is missing>"}`;
 
 /**
+ * Why a field's question cannot be trusted, or null when it reads fine.
+ *
+ * Three shapes, all seen in production. An empty name means labelling failed
+ * outright. A name identical to one of the control's own options means the
+ * accessible name fell through to the control's content — "Yes" as both the
+ * question and the answer. A one- or two-character name carries no meaning a
+ * person could act on, let alone a model.
+ */
+export function unreadableQuestion(field) {
+  const q = String(field?.question ?? '').trim();
+  if (!q) return 'the field has no readable label';
+  if (q.length < 3) return `the field's label is just "${q}" — too short to be a question`;
+
+  const opts = (field?.options || []).map(o => String(o).trim().toLowerCase());
+  if (opts.length && opts.includes(q.toLowerCase())) {
+    return `the label "${q}" is one of the control's own options, so the real question was never read`;
+  }
+  return null;
+}
+
+/**
  * Tiers 1–3 of the ladder: everything that resolves without a model.
  *
  * Split out so the batch resolver can exhaust the deterministic tiers first and
@@ -120,6 +141,10 @@ export async function resolveField(field, ctx) {
   const { question, fieldType = 'text', options = null, required = true, uid = null } = field;
   const base = { question, fieldType, options, uid };
 
+  // Same rule as the batch path: an unreadable question is never answered.
+  const unreadable = unreadableQuestion(field);
+  if (unreadable) return { status: 'park', tier: 'unreadable', reason: unreadable, ...base };
+
   const deterministic = resolveDeterministic(field, ctx);
   if (deterministic) return deterministic;
 
@@ -200,26 +225,74 @@ export function guardAnswer(question, value, ctx) {
     return { ok: true };
   }
 
-  // Authorisation answers must come from the profile, never a model.
-  if (/sponsor|visa|authorized to work|authorised to work|right to work|work permit|citizen/.test(q)) {
-    const a = authorisationFor(ctx.profile, ctx.countryCode || 'ZA');
-    if (!a.known) return { ok: false, reason: 'model answered a work authorisation question, which only the profile may answer' };
-    return { ok: false, reason: 'work authorisation must resolve from the profile, not the model' };
+  // Authorisation, nationality and citizenship are matters of legal fact. They
+  // resolve from the profile or they do not resolve — a model may not state them
+  // however plausible its inference. Both outcomes below are a refusal on purpose;
+  // the caller parks, and the matcher answers the question on the next pass once
+  // the profile carries the fact.
+  if (/sponsor|visa|authorized to work|authorised to work|right to work|work permit|citizen|nationality/.test(q)) {
+    return { ok: false, reason: 'work authorisation, citizenship and nationality resolve from the profile, not the model' };
   }
 
-  // No claiming credentials that aren't evidenced. The résumé counts as evidence
-  // alongside the structured profile — the model is now allowed to answer from it,
-  // so the guard must recognise the same source, or it would reject legitimate
-  // résumé-grounded answers. A credential in neither source is still blocked.
-  if (/\b(degree|certified|certification|clearance|licen[sc]e)\b/.test(q) && /^(yes|true)$/i.test(v.trim())) {
+  // No claiming credentials that aren't evidenced.
+  //
+  // Two holes this used to have. It only fired on a bare "yes", so "Yes, I hold a
+  // valid licence" walked straight past it; and it accepted the claim if ANY word
+  // over four characters from the question appeared anywhere in the résumé, which
+  // on a full CV is nearly always true — "do you have a *relevant* degree" passed
+  // because "relevant" appeared somewhere. Now the affirmative is recognised in
+  // prose, and the evidence has to be the credential itself.
+  if (/\b(degree|certified|certification|clearance|licen[sc]e|qualification|accredited)\b/.test(q) && isAffirmative(v)) {
     const certs = (ctx.profile.certifications || []).map(c => c.name).join(' ').toLowerCase();
     const edu = (ctx.profile.education || []).map(e => `${e.degree} ${e.field}`).join(' ').toLowerCase();
     const resume = String(ctx.resumeText || '').toLowerCase();
-    const mentioned = q.split(/\s+/).some(w => w.length > 4 && (certs.includes(w) || edu.includes(w) || resume.includes(w)));
-    if (!mentioned) return { ok: false, reason: 'model asserted a credential not evidenced in the profile or résumé' };
+    const haystack = `${certs} ${edu} ${resume}`;
+
+    // The nouns the question is actually about, not every long word in it.
+    const subject = q
+      .replace(/\b(do|does|did|you|your|have|has|a|an|the|any|is|are|in|of|for|with|valid|current|please|confirm|indicate)\b/g, ' ')
+      .split(/[^a-z0-9+#.]+/i)
+      .filter(w => w.length > 3);
+
+    const evidenced = subject.length > 0 && subject.some(w => haystack.includes(w));
+    if (!evidenced) {
+      return { ok: false, reason: `model asserted "${v.slice(0, 40)}" for a credential not evidenced in the profile or résumé` };
+    }
+  }
+
+  // Where the candidate lives is a fact, not an inference. With identity.city
+  // empty the model filled a City control with "South Africa" on one live
+  // application and invented "Johannesburg" on another; nothing checked either.
+  if (/^(current |home )?(city|town)\b|city of residence|which city|where do you (live|reside)/.test(q)) {
+    const city = ctx.profile.identity?.city;
+    if (!city) return { ok: false, reason: 'model supplied a city, but identity.city is empty in the profile' };
+    if (!normalise(v).includes(normalise(city))) {
+      return { ok: false, reason: `model answered "${v}" for city; the profile says ${city}` };
+    }
+  }
+
+  // A salary figure is a negotiating position, never a guess.
+  if (/salary|compensation|remuneration|expected (pay|package)|ctc/.test(q) && /\d/.test(v)) {
+    const expected = ctx.profile.compensation?.expectedAnnual;
+    if (expected == null) {
+      return { ok: false, reason: 'model produced a salary figure, but compensation.expectedAnnual is not set' };
+    }
+    const digits = v.replace(/\D/g, '');
+    if (digits && !digits.includes(String(expected)) && !String(expected).includes(digits)) {
+      return { ok: false, reason: `model answered "${v}"; the profile expects ${expected}` };
+    }
   }
 
   return { ok: true };
+}
+
+const normalise = s => String(s).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+/** "Yes", "Yes, I do", "I have one", "true" — an affirmative in any dress. */
+function isAffirmative(value) {
+  const v = String(value).trim().toLowerCase();
+  if (/^(yes|y|true|correct|affirmative|i do|i have|i am)\b/.test(v)) return true;
+  return /^(yes|true)$/i.test(v);
 }
 
 const BATCH_SYSTEM = `You fill in job application forms on behalf of one candidate.
@@ -249,8 +322,19 @@ Return JSON:
 {"fills": [{"uid": "...", "value": "..."}],
  "unanswerable": [{"uid": "...", "why": "<which fact is missing>"}]}`;
 
-/** Roughly the serialised form size above which the call gets chunked. */
-const BATCH_CHAR_BUDGET = 6000;
+/**
+ * Roughly the serialised form size above which the call gets chunked.
+ *
+ * Lowered from 6000. The user message also carries up to 6000 characters of
+ * résumé and 2500 of job description, so a full-budget chunk left the model
+ * holding a great deal at once — and what it did under that load was quietly omit
+ * fields from its reply rather than answer them badly. Smaller chunks and the
+ * retry below address the same failure from both ends.
+ */
+const BATCH_CHAR_BUDGET = 3500;
+
+/** The model that fills form fields. See the note at the callLLM site below. */
+const BATCH_MODEL = 'gpt-4o';
 
 const serialiseField = f => ({
   uid: f.uid,
@@ -296,7 +380,13 @@ async function batchMap(fields, ctx) {
   const out = await callLLM([
     { role: 'system', content: BATCH_SYSTEM },
     { role: 'user', content: user },
-  ], { maxTokens: 2000 });
+    // gpt-4o-mini is the default for the cheap, high-volume calls elsewhere, but
+    // this one has to return a complete object covering every field it was given,
+    // and the smaller model demonstrably dropped entries from long replies —
+    // 22 of 30 model-tier parks in production were fields it never mentioned.
+    // Answers go on real applications; this is the wrong place to save a fraction
+    // of a cent.
+  ], { maxTokens: 4000, model: BATCH_MODEL });
 
   return {
     fills: Array.isArray(out.fills) ? out.fills : [],
@@ -338,6 +428,16 @@ export async function resolveFormBatch(rawFields, ctx) {
   };
 
   for (const field of fields) {
+    // A question we could not read is not a question we may answer.
+    //
+    // When accessible-name resolution finds nothing it can fall back to the
+    // control's own content, so a lone checkbox came back with the question text
+    // "Yes" — and one live application agreed to three separate terms whose
+    // wording nobody ever saw. Everything else in this module is built on knowing
+    // what was asked; when that is not true, the only safe answer is none.
+    const unreadable = unreadableQuestion(field);
+    if (unreadable) { park(field, 'unreadable', unreadable); continue; }
+
     const hit = resolveDeterministic(field, ctx);
     if (!hit) { needsModel.push(field); continue; }
     resolved.push(hit);
@@ -372,44 +472,9 @@ export async function resolveFormBatch(rawFields, ctx) {
       if (!field) continue;            // a uid we never asked about
       said.add(fill.uid);
 
-      const value = fill.value;
-      if (value == null || value === '') {
-        park(field, 'llm', 'model returned an empty answer');
-        continue;
-      }
-
-      // A select or radio answer must be one of the offered options. The model is
-      // told to copy one character for character and mostly does; when it answers
-      // correctly in its own words ("1 month" for a "30 days" option) the value is
-      // fitted onto the list, and an interpreted fit is flagged for review. What
-      // will not fit at all still parks — forcing a near miss into the control
-      // would either fail or pick the wrong one.
-      if (field.options?.length) {
-        const m = matchOption(value, field.options, { semantic: true });
-        if (!m) {
-          park(field, 'llm', `model returned "${String(value).slice(0, 60)}", which is not one of: ${field.options.join(' | ')}`);
-          continue;
-        }
-        const check = guardAnswer(field.question, m.option, ctx);
-        if (!check.ok) { park(field, 'llm-rejected', check.reason); continue; }
-        resolved.push({
-          status: 'ok', tier: 'llm', value: m.option,
-          question: field.question, fieldType: field.fieldType, options: field.options, uid: field.uid,
-          ...(m.rule === 'exact' ? {} : { rawValue: String(value), optionRule: m.rule }),
-          ...(m.confident ? {} : { probable: true }),
-        });
-        continue;
-      }
-
-      // The deterministic control on anything a model produced. A prompt is not
-      // a control, so this runs on batch output exactly as it does per field.
-      const check = guardAnswer(field.question, value, ctx);
-      if (!check.ok) { park(field, 'llm-rejected', check.reason); continue; }
-
-      resolved.push({
-        status: 'ok', tier: 'llm', value,
-        question: field.question, fieldType: field.fieldType, options: field.options, uid: field.uid,
-      });
+      const settled = settleModelValue(field, fill.value, ctx);
+      resolved.push(settled);
+      if (settled.status === 'park' && field.required !== false) parked.push(settled);
     }
 
     for (const entry of mapping.unanswerable) {
@@ -419,13 +484,93 @@ export async function resolveFormBatch(rawFields, ctx) {
       park(field, 'llm', entry.why || 'model could not answer from the profile');
     }
 
-    // A field the model simply did not mention is not an answered field.
-    for (const field of chunk) {
-      if (!said.has(field.uid)) park(field, 'llm', 'model returned no answer for this field');
+    // A field the model simply did not mention is not an answered field — but it
+    // is not necessarily an unanswerable one either.
+    //
+    // This was the single largest LLM failure in production: 22 of 30 model-tier
+    // parks were "returned no answer", and they included questions the profile
+    // plainly settles ("In which country do you currently work?"). The model was
+    // not declining, it was losing track of items in a long batch. So the dropped
+    // fields get one focused second pass, asked on their own, before they park.
+    const dropped = chunk.filter(f => !said.has(f.uid));
+    if (dropped.length) {
+      const recovered = await retryDropped(dropped, ctx);
+      for (const field of dropped) {
+        const value = recovered.get(field.uid);
+        if (value == null || value === '') {
+          park(field, 'llm', 'model returned no answer for this field, twice');
+          continue;
+        }
+        const settled = settleModelValue(field, value, ctx);
+        resolved.push(settled);
+        if (settled.status === 'park' && field.required !== false) parked.push(settled);
+      }
     }
   }
 
   return finishForm(resolved, parked);
+}
+
+/**
+ * Put one model-produced value through every control that applies to it.
+ *
+ * Shared by the batch pass and the retry pass so a recovered answer is subject to
+ * exactly the same scrutiny as a first-pass one — a second chance to answer is not
+ * a second standard of proof.
+ */
+function settleModelValue(field, value, ctx) {
+  const base = {
+    question: field.question, fieldType: field.fieldType,
+    options: field.options, uid: field.uid,
+  };
+  const park = (tier, reason) => ({ status: 'park', tier, reason, ...base });
+
+  if (value == null || value === '') return park('llm', 'model returned an empty answer');
+
+  // A select or radio answer must be one of the offered options. The model is told
+  // to copy one character for character and mostly does; when it answers correctly
+  // in its own words ("1 month" for a "30 days" option) the value is fitted onto
+  // the list, and an interpreted fit is flagged for review. What will not fit at
+  // all still parks — forcing a near miss into the control would either fail or
+  // pick the wrong one.
+  if (field.options?.length) {
+    const m = matchOption(value, field.options, { semantic: true });
+    if (!m) {
+      return park('llm', `model returned "${String(value).slice(0, 60)}", which is not one of: ${field.options.join(' | ')}`);
+    }
+    const check = guardAnswer(field.question, m.option, ctx);
+    if (!check.ok) return park('llm-rejected', check.reason);
+    return {
+      status: 'ok', tier: 'llm', value: m.option, ...base,
+      ...(m.rule === 'exact' ? {} : { rawValue: String(value), optionRule: m.rule }),
+      ...(m.confident ? {} : { probable: true }),
+    };
+  }
+
+  // The deterministic control on anything a model produced. A prompt is not a
+  // control, so this runs on batch output exactly as it does per field.
+  const check = guardAnswer(field.question, value, ctx);
+  if (!check.ok) return park('llm-rejected', check.reason);
+
+  return { status: 'ok', tier: 'llm', value, ...base };
+}
+
+/**
+ * Ask again for the fields the batch response left out entirely.
+ *
+ * One call, only the dropped fields, so the model has far less to hold in view.
+ * A failure here is not fatal — the caller parks whatever comes back empty, which
+ * is what would have happened anyway.
+ */
+async function retryDropped(fields, ctx) {
+  const out = new Map();
+  try {
+    const mapping = await batchMap(fields, ctx);
+    for (const fill of mapping.fills || []) {
+      if (fill?.uid != null) out.set(fill.uid, fill.value);
+    }
+  } catch { /* the caller parks these; a failed retry changes nothing */ }
+  return out;
 }
 
 const finishForm = (resolved, parked) => ({
