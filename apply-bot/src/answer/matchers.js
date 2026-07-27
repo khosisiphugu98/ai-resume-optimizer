@@ -107,8 +107,17 @@ export const MATCHERS = [
       return ok(p.identity.phone);
     },
   },
-  { name: 'city',      test: /^(current )?(city|town)$|city of residence|where.*located|current location/, resolve: p => ok(p.identity.city) },
-  { name: 'country',   test: /^country$|country of residence/, resolve: p => ok(p.identity.country) },
+  // Country first, and city explicitly declines anything that says "country".
+  // A LinkedIn field labelled "Country: Current Location" was answered "Pretoria"
+  // because the city matcher owns "current location" and ran first — a correct
+  // fact in the wrong control, which then fails the option list and parks the
+  // application. The more specific word wins.
+  { name: 'country',   test: /\bcountry\b|nationality of residence/, resolve: p => ok(p.identity.country) },
+  {
+    name: 'city',
+    test: /^(current )?(city|town)$|city of residence|where.*located|current location|city\/town/,
+    resolve: (p, ctx) => (/\bcountry\b/i.test(ctx.question || '') ? null : ok(p.identity.city)),
+  },
 
   // ---- Links --------------------------------------------------------------
   { name: 'linkedin',  test: /linkedin/, resolve: p => ok(p.links.linkedin) },
@@ -333,7 +342,12 @@ export function matchProfile(profile, ctx) {
     if (!q) continue;
     for (const m of MATCHERS) {
       if (!m.test.test(q)) continue;
-      return { matcher: m.name, ...m.resolve(profile, ctx) };
+      // A matcher may look at the full question and decline — returning null means
+      // "this is not mine after all", so the search continues rather than stopping
+      // on a pattern that merely overlapped.
+      const res = m.resolve(profile, ctx);
+      if (!res) continue;
+      return { matcher: m.name, ...res };
     }
     if (q === raw && stripImperative(raw) === raw) break;   // nothing to retry
   }

@@ -291,6 +291,19 @@ section('email selects are matched on the mailbox, not on string equality');
     matchProfile(P, { question: 'Email address' })?.value, 'k@example.com');
 }
 
+// Seen live: LinkedIn labels a country dropdown "Country: Current Location", and
+// the city matcher owned "current location" and ran first — so a correct fact
+// went into the wrong control, failed the option list, and parked the application.
+section('"country" beats "location" when both are in the label');
+{
+  const loc = q => matchProfile(P, { question: q })?.value;
+  t('Country: Current Location', loc('Country: Current Location'), 'South Africa');
+  t('plain Country', loc('Country'), 'South Africa');
+  t('plain City still works', loc('City'), 'Johannesburg');
+  t('Current location is a city', loc('Current location'), 'Johannesburg');
+  t('City/Town', loc('City/Town'), 'Johannesburg');
+}
+
 section('a country-code select gets the country, never the phone number');
 {
   const CODES = ['United Kingdom (+44)', 'South Africa (+27)', 'United States (+1)'];
