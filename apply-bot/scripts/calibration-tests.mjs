@@ -173,8 +173,11 @@ for (let i = 0; i < trials; i++) {
   db.prepare('DELETE FROM rate_ledger').run();
   if (shouldAuditSample(55, 65, Math.random)) fired++;
 }
+// Derived from AUDIT rather than hardcoded, so tuning the rate is a config change
+// and not a test failure. ±2.5 points is comfortably outside sampling noise at
+// n=1000 and still tight enough to catch a rate that is wrong by a factor.
 t(`fires near ${AUDIT.rate * 100}% over ${trials} draws`,
-  fired / trials > 0.03 && fired / trials < 0.07, true);
+  Math.abs(fired / trials - AUDIT.rate) < 0.025, true);
 
 const always = () => 0;   // always under the rate
 t('never samples a job below the floor score', shouldAuditSample(AUDIT.floor - 1, 65, always), false);
@@ -185,17 +188,18 @@ t('never samples a job at or above the threshold', shouldAuditSample(65, 65, alw
 t('never samples one comfortably above it', shouldAuditSample(90, 65, always), false);
 
 db.prepare('DELETE FROM rate_ledger').run();
+// Fires exactly dailyCap times and then stops, whatever the cap is set to.
 t('respects the daily cap',
   (() => {
     const got = [];
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < AUDIT.dailyCap + 3; i++) {
       const hit = shouldAuditSample(55, 65, always);
       got.push(hit);
       if (hit) bumpRate('audit_samples');
     }
     return got;
   })(),
-  [true, true, false, false, false]);
+  [...Array(AUDIT.dailyCap).fill(true), ...Array(3).fill(false)]);
 db.prepare('DELETE FROM rate_ledger').run();
 
 // ---------------------------------------------------------------------------

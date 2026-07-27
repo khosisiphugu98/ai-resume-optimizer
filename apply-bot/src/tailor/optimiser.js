@@ -405,7 +405,13 @@ export async function runTailoring({ limit = 10 } = {}) {
   emit({ stage: 'tailor', message: `Auto-confirm allowlist seeded — ${allowlist.length} confirmed skill(s)` });
 
   const jobs = db.prepare(
-    `SELECT * FROM jobs WHERE status = 'scored' ORDER BY fit_score DESC, id LIMIT ?`
+    // Only routes something can actually apply through. `unknown` jobs were being
+    // tailored too — a browser session and a full optimiser pass each — and then
+    // dead-ended, because run.js selects easy_apply/external and outbox.js selects
+    // email, and nothing selects unknown. Four of them, averaging fit 76, have a
+    // finished PDF on disk and no code path that will ever send it.
+    `SELECT * FROM jobs WHERE status = 'scored' AND apply_type IN ('easy_apply', 'external', 'email')
+     ORDER BY fit_score DESC, id LIMIT ?`
   ).all(limit);   // all channels tailor first — email attaches the same PDF
 
   let done = 0, failed = 0;

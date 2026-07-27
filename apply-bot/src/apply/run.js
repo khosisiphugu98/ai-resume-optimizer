@@ -74,10 +74,18 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   // batch, all get held, and a channel that CAN apply right now (external) is
   // starved. Approved jobs stay eligible whatever the channel state — a human said
   // go, so they never wait behind a capped channel.
+  // `unknown` rides with external. Enrichment writes that route when LinkedIn's
+  // guest page omits the apply control — which it does for any posting that wants
+  // you signed in — and nothing ever re-derived it, so those jobs were tailored
+  // and then stranded: no selector anywhere would pick them up. Sending them
+  // through resolveExternalUrl is exactly the work that would have classified them
+  // in the first place, and it either finds the real ATS or says the posting is
+  // Easy Apply after all, which is handled below.
   const applyableType = { linkedin_easy: 'easy_apply', external_ats: 'external' };
+  const ridesWith = { external_ats: ['external', 'unknown'] };
   const activeTypes = Object.entries(applyableType)
     .filter(([ch]) => canApply(ch, { ignoreHours }).ok)
-    .map(([, t]) => t);
+    .flatMap(([ch, t]) => ridesWith[ch] || [t]);
   const typeList = activeTypes.map(() => '?').join(',') || 'NULL';
 
   // Approved-for-submit first, then freshly tailored, then a bounded retry of
@@ -86,7 +94,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   // race) — sits in apply_failed forever, because nothing ever selects it again.
   const jobs = db.prepare(`
     SELECT * FROM jobs
-    WHERE apply_type IN ('easy_apply', 'external')
+    WHERE apply_type IN ('easy_apply', 'external', 'unknown')
       AND (
         status = 'approved'
         OR (apply_type IN (${typeList})
@@ -246,6 +254,20 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         emitBoard();
         throw err;
       }
+      // resolveExternalUrl reports this when the Apply button never left LinkedIn,
+      // which means the posting is Easy Apply and was mis-routed at enrichment.
+      // Re-label it rather than spending three retries proving the same thing:
+      // classifyApply is never re-run, so nothing else would ever correct it.
+      if (/may actually be Easy Apply/i.test(err.message) && job.apply_type !== 'easy_apply') {
+        updateJob(job.id, { apply_type: 'easy_apply', status: 'tailored', apply_attempts: 0, reject_reason: null });
+        emit({
+          jobId: job.id, stage: 'apply', level: 'warn',
+          message: `Re-routed to Easy Apply — the posting never left LinkedIn. It will be picked up on the next pass.`,
+        });
+        emitBoard();
+        continue;
+      }
+
       updateJob(job.id, { status: 'apply_failed', reject_reason: err.message.slice(0, 200) });
       stats.failed++;
       const exhausted = attemptNo >= APPLY_MAX_ATTEMPTS;

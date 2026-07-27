@@ -73,20 +73,49 @@ export function effectiveTerms(group) {
 
 const escapeRe = s => String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** A word-boundary alternation over the seniority terms — the title gate. */
+/**
+ * Terms that are only senior in some positions, mapped to where they count.
+ *
+ * "Lead" is the problem case. As a noun it is a seniority marker — Growth Lead,
+ * Team Lead — but "Lead Generation Analyst" is an analyst role and "lead" there is
+ * the marketing noun, nothing to do with rank. A flat `\blead\b` rejected 73
+ * postings with no seniority word in them at all, Lead Generation Analyst among
+ * them. Matching it only at the start or end of the title, and never in front of
+ * "generation", keeps the seniority sense and drops the false positives.
+ */
+const POSITIONAL = {
+  lead: String.raw`(?:^lead\b(?!\s+gen)|\blead$|\bteam lead\b|\btech(?:nical)? lead\b|\bsquad lead\b)`,
+};
+
+/** An alternation over the seniority terms — the title gate. */
 export function titleRejectRe() {
   const terms = effectiveTerms('seniorityTitles');
   if (!terms.length) return /(?!)/; // nothing to reject on
-  return new RegExp(`\\b(${terms.map(escapeRe).join('|')})\\b`, 'i');
+
+  const plain = terms.filter(t => !POSITIONAL[t.toLowerCase()]);
+  const positional = terms.filter(t => POSITIONAL[t.toLowerCase()]).map(t => POSITIONAL[t.toLowerCase()]);
+
+  const parts = [];
+  if (plain.length) parts.push(`\\b(?:${plain.map(escapeRe).join('|')})\\b`);
+  parts.push(...positional);
+  return new RegExp(parts.join('|'), 'i');
 }
 
-/** Alternation over role families — no word boundaries so "ad operations" matches. */
+/**
+ * Alternation over role families.
+ *
+ * Anchored on word boundaries at each end, which multi-word terms like
+ * "ad operations" survive unharmed — `\b` sits outside the phrase, not inside it.
+ * Without them `data` matched Metadata, Database Administrator and Data Entry
+ * Clerk, so the gate leaked in one direction while being brutally strict in the
+ * other.
+ */
 export function roleFamiliesRe() {
   const terms = effectiveTerms('roleFamilies');
   // Emptied on purpose means "don't gate on title relevance" — match everything
   // rather than nothing, so the operator can't silently zero out the pipeline.
   if (!terms.length) return /(?:)/;
-  return new RegExp(`(${terms.map(escapeRe).join('|')})`, 'i');
+  return new RegExp(`\\b(${terms.map(escapeRe).join('|')})\\b`, 'i');
 }
 
 /**

@@ -8,7 +8,7 @@ import { matchOption } from '../src/answer/options.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
 import { db, parkQuestions, parkedQueue, releaseAnswered, upsertJob, updateJob } from '../src/db.js';
-import { heuristicScore } from '../src/score/index.js';
+import { heuristicScore, normaliseBlockers } from '../src/score/index.js';
 
 let pass = 0, fail = 0;
 const t = (name, got, want) => {
@@ -388,6 +388,62 @@ section('availability phrasings all reach the notice period');
   // Deliberately still a bare duration, because that is what fits a dropdown.
   t('fits a duration dropdown',
     matchOption('30 days', ['Immediately', 'Less than 2 weeks', '1 month'], { semantic: true }).option, '1 month');
+}
+
+// The single largest leak in the pipeline: twelve substrings against the title
+// alone rejected 1188 of 2305 jobs with no model ever looking at them.
+section('the role-family gate reads the description, not just the title');
+{
+  const h = (title, jd_text = '') => heuristicScore({ title, jd_text }, P);
+  t('an on-target title still passes', h('Marketing Analyst').titleRelevant, true);
+  // Titles the old twelve-term list threw away, every one of them real.
+  for (const title of ['Google Ads Manager', 'Amazon PPC Manager', 'Junior Media Buyer',
+                       'CRM Manager', 'SEO Manager', 'User Acquisition Specialist',
+                       'Business Intelligence Engineer']) {
+    t(title, h(title).titleRelevant, true);
+  }
+  // A title that says nothing, over a description that names the candidate's own
+  // skills. Deliberately NOT "the description mentions a family term" — that let
+  // 956 of 1187 gated jobs through, because "data" appears in almost any posting.
+  const RICH = { ...P, skills: {
+    SQL: { confirmed: true }, 'Power BI': { confirmed: true },
+    GA4: { confirmed: true }, Tableau: { confirmed: true }, ETL: { confirmed: true },
+  } };
+  const rich = (title, jd_text) => heuristicScore({ title, jd_text }, RICH);
+  const body = rich('Specialist, Commercial',
+    'You will own SQL reporting, build Power BI and Tableau dashboards, own GA4 and maintain ETL jobs.');
+  t('rescued by the description', body.titleRelevant, true);
+  t('and it says which carried it', body.matchedOn, 'description');
+  t('one passing mention is not enough',
+    rich('Operations Coordinator', 'Some SQL exposure is a bonus.').titleRelevant, false);
+
+  // Short skills used to match inside longer words — "ml" in html, "cro" in
+  // microsoft, "git" in logistics — which is how an Executive Assistant posting
+  // scored four skill hits and `worthScoring` stopped being a gate at all.
+  const PS = { ...P, skills: { ML: { confirmed: true }, CRO: { confirmed: true }, Git: { confirmed: true } } };
+  t('no fragment matches inside other words',
+    heuristicScore({ title: 'Web Designer', jd_text: 'Build HTML across Microsoft logistics tooling.' }, PS).matchedSkills,
+    []);
+  t('but a real mention still counts',
+    heuristicScore({ title: 'Web Designer', jd_text: 'You will use Git daily.' }, PS).matchedSkills,
+    ['git']);
+  t('a title match is credited to the title', h('Marketing Analyst').matchedOn, 'title');
+  // Word boundaries: "data" used to match Metadata.
+  t('Metadata Librarian is not a data role', h('Metadata Librarian').titleRelevant, false);
+  t('genuinely off-target still gated', h('Chef de Partie', 'Kitchen work').titleRelevant, false);
+}
+
+section('blockers are validated before they can reject anything');
+{
+  t('an empty array is empty', normaliseBlockers([]), []);
+  t('"None" is not a blocker', normaliseBlockers(['None']), []);
+  t('nor is "N/A"', normaliseBlockers([{ kind: 'auth', why: 'N/A' }]), []);
+  t('a bare string is kept, untyped',
+    normaliseBlockers(['Requires US clearance']), [{ kind: 'unknown', why: 'Requires US clearance' }]);
+  t('a typed blocker survives',
+    normaliseBlockers([{ kind: 'auth', why: 'US work authorisation required' }]),
+    [{ kind: 'auth', why: 'US work authorisation required' }]);
+  t('kind is normalised', normaliseBlockers([{ kind: 'LOCATION', why: 'On-site in Pretoria' }])[0].kind, 'location');
 }
 
 section('scoring heuristic');
