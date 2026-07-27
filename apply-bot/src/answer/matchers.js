@@ -4,6 +4,56 @@ const ok = (value, extra = null) => ({ value, source: 'profile', ...extra });
 const park = reason => ({ park: reason });
 
 /**
+ * Phrases that qualify "experience" rather than naming something to have it in.
+ * A match here means the question was about overall experience all along.
+ */
+const GENERIC_EXPERIENCE_QUALIFIERS =
+  /^(relevant|full[- ]?time|part[- ]?time|paid|unpaid|professional|work|working|industry|corporate|commercial|overall|general|total|post[- ]?graduate|related|similar|this (field|area|role|industry)|the (field|industry|role))(\s+(relevant|full[- ]?time|part[- ]?time|paid|professional|work|working|industry|related|similar))*$/i;
+
+/** A control offering exactly the two answers to a closed question. */
+const isYesNo = opts =>
+  Array.isArray(opts) && opts.length === 2 &&
+  opts.some(o => /^\s*yes\b/i.test(String(o))) && opts.some(o => /^\s*no\b/i.test(String(o)));
+
+/**
+ * The threshold a "do you have N years" question is testing, or null.
+ *
+ * A range takes its LOWER bound: "4-5 years" is satisfied by four, so four is what
+ * has to be met.
+ */
+export function requiredYearsIn(question) {
+  const m = normalisePunctuation(question).match(/(\d+)\s*(?:\+|-|to)?\s*\d*\s*\+?\s*years?/i);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Whether the candidate meets a years threshold — true, false, or null when the
+ * profile cannot settle it and the question must park.
+ *
+ * The total-years figure is only used for questions that ask about experience in
+ * general. When a specific technology is named and the profile does not confirm
+ * it, the answer is a plain no: substituting the overall total there would let
+ * three years of marketing analytics answer "do you have 5 years of Kubernetes".
+ */
+export function meetsYearsThreshold(profile, question) {
+  const need = requiredYearsIn(question);
+  if (need == null) return null;
+
+  const skill = extractSkill(question);
+  if (skill) {
+    const { value } = skillYears(profile, skill);
+    return typeof value === 'number' ? value >= need : false;
+  }
+
+  const total = profile.current?.confirmed ? profile.current.totalYearsExperience : null;
+  return typeof total === 'number' ? total >= need : null;
+}
+
+/** "South Africa (+27)" — the shape of a country-code option. */
+const isDiallingCode = opt => /\(\+\d{1,4}\)|^\+\d{1,4}$/.test(String(opt));
+const isEmailLike = opt => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(String(opt).trim());
+
+/**
  * Tier 1 of the resolution ladder — deterministic profile lookups. Anything
  * matched here never reaches a model.
  *
@@ -15,8 +65,48 @@ export const MATCHERS = [
   { name: 'firstName', test: /^(first|given)\s*name$|^forename/, resolve: p => ok(p.identity.firstName) },
   { name: 'lastName',  test: /^(last|family|sur)\s*name$|^surname/, resolve: p => ok(p.identity.lastName) },
   { name: 'fullName',  test: /^(full|legal)?\s*name$|your name/, resolve: p => ok(`${p.identity.firstName} ${p.identity.lastName}`) },
-  { name: 'email',     test: /e[- ]?mail/, resolve: p => ok(p.identity.email) },
-  { name: 'phone',     test: /phone|mobile|cell|contact number|telephone/, resolve: p => ok(p.identity.phone) },
+  // An email control that offers a fixed list is not asking which address to type,
+  // it is asking which of these addresses is yours — LinkedIn only offers the ones
+  // verified on the account. The profile address is frequently not among them, and
+  // string equality against the list can only fail. Match on the mailbox instead,
+  // and otherwise prefer a real address over an Apple private-relay alias.
+  {
+    name: 'email',
+    test: /e[- ]?mail/,
+    resolve: (p, ctx) => {
+      const mine = p.identity.email;
+      const opts = ctx.options || [];
+      if (!opts.length || !opts.every(isEmailLike)) return ok(mine);
+
+      const local = String(mine).split('@')[0].toLowerCase();
+      const sameMailbox = opts.find(o => String(o).split('@')[0].toLowerCase() === local);
+      if (sameMailbox) return ok(sameMailbox);
+      if (opts.some(o => String(o).toLowerCase() === String(mine).toLowerCase())) return ok(mine);
+
+      const real = opts.filter(o => !/privaterelay\.appleid\.com$/i.test(String(o)));
+      if (real.length === 1) return ok(real[0], { probable: true });
+      return park(
+        `the form offers only ${opts.join(' | ')}, and none of them is ${mine} — ` +
+        `confirm which address to use, or verify ${mine} on the account`
+      );
+    },
+  },
+  // A phone control whose options are countries is asking for the dialling code,
+  // not the number. Feeding it the number can never match; feeding it the country
+  // does — "South Africa" fits "South Africa (+27)" — so route on what is offered.
+  {
+    name: 'phone',
+    test: /phone|mobile|cell|contact number|telephone/,
+    resolve: (p, ctx) => {
+      const opts = ctx.options || [];
+      if (opts.length && opts.some(isDiallingCode)) {
+        return p.identity.country
+          ? ok(p.identity.country)
+          : park('this is a country-code list and the profile has no country');
+      }
+      return ok(p.identity.phone);
+    },
+  },
   { name: 'city',      test: /^(current )?(city|town)$|city of residence|where.*located|current location/, resolve: p => ok(p.identity.city) },
   { name: 'country',   test: /^country$|country of residence/, resolve: p => ok(p.identity.country) },
 
@@ -50,8 +140,23 @@ export const MATCHERS = [
   // ---- Years of experience — the highest-risk question ---------------------
   {
     name: 'yearsOfSkill',
-    test: /how many years|years of (experience|exp)|years.*experience (with|in|using)/,
+    // A qualifier is allowed to sit between "years of" and "experience":
+    // "Years of professional experience" is the same question as "Years of
+    // experience", and without this it matched nothing, fell through to the model,
+    // and the model is forbidden from answering years at all — so a question the
+    // profile settles outright came back unanswerable.
+    test: /how many years|years of (?:\w+[- ]){0,3}(experience|exp)\b|years.*experience (with|in|using)/,
     resolve: (p, ctx) => {
+      // "Do you have 4-5 years of experience in digital marketing?" mentions years
+      // but is a yes/no question, and answering it with a number fits no option and
+      // parks. A control offering only yes/no is asking whether a threshold is met,
+      // which is a comparison the profile's own total can settle.
+      if (isYesNo(ctx.options)) {
+        const meets = meetsYearsThreshold(p, ctx.question);
+        if (meets == null) return park('a yes/no years question the profile cannot settle');
+        return ok(yesNo(meets, ctx));
+      }
+
       const skill = extractSkill(ctx.question);
       if (!skill) {
         const total = p.current?.confirmed ? p.current.totalYearsExperience : null;
@@ -169,7 +274,18 @@ export function extractSkill(question) {
     .replace(/^\s*(?:with|in|using|of|for|a|an|the)\s+/i, ' ')
     .replace(/\s+/g, ' ')
     .trim();
-  return skill && skill.length > 1 ? skill : null;
+
+  if (!skill || skill.length <= 1) return null;
+
+  // "How many years of relevant full-time experience do you have?" is a question
+  // about experience in general, but the pattern above happily returns the
+  // qualifier "relevant full-time" as though it were a technology — which is then
+  // looked up as a skill, never found, and parks. Two live applications died on
+  // exactly that phrase. A qualifier is not a skill; returning null routes the
+  // question to the confirmed total, which is what it was asking for.
+  if (GENERIC_EXPERIENCE_QUALIFIERS.test(skill)) return null;
+
+  return skill;
 }
 
 /**
@@ -190,12 +306,36 @@ export function normalisePunctuation(text) {
     .replace(/ /g, ' ');                             // non-breaking space
 }
 
+/**
+ * Strip the instruction a form wraps around the thing it is actually asking for.
+ *
+ * Several matchers are anchored (`/^(first|given)\s*name$/`), so "First name"
+ * resolved from the profile while "Enter your first name" fell through to the
+ * model — real applications burned LLM calls drafting a first name. The label is
+ * the same question either way; only the politeness differs.
+ */
+export function stripImperative(q) {
+  return String(q)
+    .replace(/^\s*(please\s+)?(enter|type|input|provide|give|tell us|specify|add|fill in|write)\s+/i, '')
+    .replace(/^\s*(your|the)\s+/i, '')
+    .replace(/^\s*[*]\s*/, '')
+    .trim();
+}
+
 export function matchProfile(profile, ctx) {
-  const q = normalisePunctuation(ctx.question || '').toLowerCase().trim();
-  for (const m of MATCHERS) {
-    if (!m.test.test(q)) continue;
-    const res = m.resolve(profile, ctx);
-    return { matcher: m.name, ...res };
+  const raw = normalisePunctuation(ctx.question || '').toLowerCase().trim();
+
+  // The label as written wins, so nothing that matched before can change. The
+  // stripped form is a second pass, not a substitute — it only adds matches the
+  // anchored patterns would otherwise miss. `resolve` still sees the original
+  // `ctx.question`, because polarity and threshold checks read the full wording.
+  for (const q of [raw, stripImperative(raw)]) {
+    if (!q) continue;
+    for (const m of MATCHERS) {
+      if (!m.test.test(q)) continue;
+      return { matcher: m.name, ...m.resolve(profile, ctx) };
+    }
+    if (q === raw && stripImperative(raw) === raw) break;   // nothing to retry
   }
   return null;
 }

@@ -169,6 +169,29 @@ t('fieldset legend names the radio group',
 t('required flags survive', viaA11y.find(n => n.name === 'First Name')?.required, true);
 
 // ---------------------------------------------------------------------------
+// A readonly text input is indistinguishable from an editable one by role, so it
+// was collected, answered, and handed to locator.fill() — which waits the full 30s
+// for an element that will never accept input, throws, and parks the whole
+// application. Seen live on a BambooHR posting with a locked apply-URL field.
+section('readonly controls are not collected as fillable');
+const ro = await collectAt('https://fixture.test/readonly', `
+  <form>
+    <label for="a">Application URL</label><input id="a" type="text" readonly value="https://x.test/1">
+    <label for="b">Notes</label><textarea id="b" readonly>locked</textarea>
+    <label for="c">Reference</label><input id="c" type="text" aria-readonly="true">
+    <label for="d">Full name</label><input id="d" type="text">
+    <label for="e">Agree to terms</label><input id="e" type="checkbox" readonly>
+  </form>`);
+const roNames = ro.map(n => n.name).filter(Boolean);
+t('readonly input skipped', roNames.includes('Application URL'), false);
+t('readonly textarea skipped', roNames.includes('Notes'), false);
+t('aria-readonly skipped', roNames.includes('Reference'), false);
+t('editable input still collected', roNames.includes('Full name'), true);
+// `readonly` has no effect on a checkbox per spec, and browsers honour that — the
+// user can still toggle it, so skipping it would lose a real question.
+t('readonly checkbox still collected', roNames.includes('Agree to terms'), true);
+
+// ---------------------------------------------------------------------------
 section('shadow DOM — invisible to querySelectorAll, found here');
 const shadow = await collectAt('https://fixture.test/shadow', `
   <div id="host"></div>

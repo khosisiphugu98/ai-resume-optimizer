@@ -1,9 +1,9 @@
 // Phase 2 tests. The important ones are the anti-fabrication guarantees: these
 // answers go on real employment applications, so a wrong one has consequences
 // beyond a failing build. No network.
-import { resolveField, guardAnswer } from '../src/answer/resolver.js';
+import { resolveField, guardAnswer, unreadableQuestion } from '../src/answer/resolver.js';
 import { resumeText } from '../src/answer/resume-context.js';
-import { extractSkill, matchProfile, normalisePunctuation } from '../src/answer/matchers.js';
+import { extractSkill, matchProfile, normalisePunctuation, stripImperative } from '../src/answer/matchers.js';
 import { matchOption } from '../src/answer/options.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
@@ -244,20 +244,23 @@ t('answering the second releases it too',
 // tier 1 returned its park and tiers 2-3 were never reached.
 section('a tier-1 park falls through to the answer bank');
 {
-  const LINKEDIN_EMAILS = ['ksiphugu@icloud.com', 'hpmnwp4zwn@privaterelay.appleid.com'];
-  const field = { question: 'TEST Email address', fieldType: 'select', options: LINKEDIN_EMAILS };
+  // Two addresses, neither the profile's and neither a relay — genuinely
+  // ambiguous, so the profile tier can only park. That park must not end the
+  // ladder: a human has already said which one to use.
+  const AMBIGUOUS = ['a.person@corp.com', 'b.person@corp.com'];
+  const field = { question: 'TEST Email address', fieldType: 'select', options: AMBIGUOUS };
 
   const before = await resolveField(field, ctx);
   t('parks when nothing else knows', before.status, 'park');
-  t('park names the profile tier', before.tier, 'profile-option');
+  t('park comes from the profile tier', before.tier, 'profile');
 
   saveAnswer({
     question: 'TEST Email address', fieldType: 'select',
-    value: 'ksiphugu@icloud.com', source: 'human', humanVerified: 1,
+    value: 'b.person@corp.com', source: 'human', humanVerified: 1,
   });
 
   const after = await resolveField(field, ctx);
-  t('bank answer now wins', after.value, 'ksiphugu@icloud.com');
+  t('bank answer now wins', after.value, 'b.person@corp.com');
   t('and is credited to the bank', after.tier, 'bank-exact');
   t('and is no longer parked', after.status, 'ok');
 }
@@ -266,11 +269,82 @@ section('a tier-1 park falls through to the answer bank');
 // reason — that reason is the one the operator can act on.
 section('a bank answer that still does not fit keeps the profile park');
 {
-  const field = { question: 'TEST Email address', fieldType: 'select', options: ['someone.else@corp.com'] };
+  const field = { question: 'TEST Email address', fieldType: 'select', options: ['x@corp.com', 'y@corp.com'] };
   const out = await resolveField(field, ctx);
   t('still parks', out.status, 'park');
-  t('reports the profile tier', out.tier, 'profile-option');
+  t('reports the profile tier', out.tier, 'profile');
 }
+
+// The real LinkedIn shape: the account's verified addresses, one of which is an
+// Apple private-relay alias. The relay is never the address to give an employer.
+section('email selects are matched on the mailbox, not on string equality');
+{
+  const em = (opts, profile = P) => matchProfile(profile, { question: 'Email address', options: opts });
+  t('same mailbox, different domain',
+    em(['k@icloud.com', 'hpmnwp4zwn@privaterelay.appleid.com'])?.value, 'k@icloud.com');
+  t('the profile address when it is offered',
+    em(['k@example.com', 'other@corp.com'])?.value, 'k@example.com');
+  t('the only non-relay option, flagged probable',
+    em(['someone@icloud.com', 'hpmnwp4zwn@privaterelay.appleid.com'])?.probable, true);
+  t('two real strangers park', !!em(['a@corp.com', 'b@corp.com'])?.park, true);
+  t('a free-text email box is untouched',
+    matchProfile(P, { question: 'Email address' })?.value, 'k@example.com');
+}
+
+section('a country-code select gets the country, never the phone number');
+{
+  const CODES = ['United Kingdom (+44)', 'South Africa (+27)', 'United States (+1)'];
+  t('routes to the country', matchProfile(P, { question: 'Phone country code', options: CODES })?.value, 'South Africa');
+  t('which then fits the option',
+    matchOption('South Africa', CODES, { semantic: true }).option, 'South Africa (+27)');
+  t('a normal phone box still gets the number',
+    matchProfile(P, { question: 'Mobile phone number' })?.value, '+27 82 000 0000');
+}
+
+section('a years question with yes/no options is a threshold, not a number');
+{
+  const YN = ['Yes', 'No'];
+  t('3 years does not meet 4-5',
+    matchProfile(P, { question: 'Do you have 4–5 years of experience in digital marketing?', options: YN })?.value, 'No');
+  t('3 years meets "at least 2 years"',
+    matchProfile(P, { question: 'Do you have at least 2 years of experience?', options: YN })?.value, 'Yes');
+  t('an unconfirmed technology is a plain no',
+    matchProfile(P, { question: 'Do you have 2 years of experience with Kubernetes?', options: YN })?.value, 'No');
+  t('no threshold to test parks',
+    !!matchProfile(P, { question: 'How many years of experience do you have?', options: YN })?.park, true);
+}
+
+section('generic qualifiers are not skills');
+{
+  t('relevant full-time', extractSkill('How many years of relevant full-time experience do you have? (Excluding internship)'), null);
+  t('professional', extractSkill('How many years of professional experience do you have?'), null);
+  t('a real technology survives', extractSkill('How many years of experience do you have with SQL?'), 'SQL');
+  // Routed to the confirmed total instead of parking on a junk noun.
+  t('answers from the total',
+    matchProfile(P, { question: 'How many years of relevant full-time experience do you have?' })?.value, '3');
+}
+
+section('"Enter your ..." reaches the same matcher as "..."');
+{
+  t('first name', matchProfile(P, { question: 'Enter your first name' })?.value, 'Khosi');
+  t('last name', matchProfile(P, { question: 'Please enter your last name' })?.value, 'Siphugu');
+  t('email', matchProfile(P, { question: 'Enter your email address' })?.value, 'k@example.com');
+  t('stripImperative is conservative', stripImperative('Interesting facts about you'), 'Interesting facts about you');
+}
+
+section('a question we could not read is never answered');
+{
+  const u = f => unreadableQuestion(f);
+  t('empty label', !!u({ question: '', options: ['Yes', 'No'] }), true);
+  t('label is its own option', !!u({ question: 'Yes', options: ['Yes', 'No'] }), true);
+  t('two-character label', !!u({ question: 'Do', options: [] }), true);
+  t('a real question is fine', u({ question: 'Do you agree to the terms?', options: ['Yes', 'No'] }), null);
+  // And the ladder must refuse it outright, not hand it to the model.
+  const out = await resolveField({ question: 'Yes', fieldType: 'checkbox', options: ['Yes', 'No'] }, ctx);
+  t('parks at tier unreadable', out.tier, 'unreadable');
+}
+
+section('scoring heuristic');
 
 // ATS copy is typed in word processors, so a straight-apostrophe pattern misses
 // the real question. This one silently sent a licence question to the model, which
