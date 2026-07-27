@@ -4,13 +4,89 @@ import { PATHS, ROOT } from '../config.js';
 import { getContext, attachScreencast, stopRequested, humanDelay } from '../browser.js';
 import { db, updateJob } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
-import { extractPdfText, validateResumePdf } from '../../scripts/extract-text.mjs';
+import { extractPdfText, validateResumePdf, CORE_RESUME_SKILLS } from '../../scripts/extract-text.mjs';
 import { loadProfile, confirmedSkillNames, confirmSkill } from '../profile.js';
 import { recordSkillSuggestions } from '../db.js';
 import { gateSkills } from '../evidence/skills.js';
 import { corpus } from '../evidence/store.js';
 
 export const SEED_RESUME = path.join(ROOT, 'seed/Khosi_Siphugu_Resume (Marketing Analyst) (1).pdf');
+
+/**
+ * Minimum characters of extracted text a real one-page résumé carries. The real
+ * exports measure 8100–9100; anything under a third of that is a broken render,
+ * not a CV. `validateResumePdf` has always computed `chars` and never asserted it.
+ */
+const MIN_RESUME_CHARS = 3000;
+
+/**
+ * Height-to-width ratio above which the export is not one page.
+ *
+ * `page.pdf()` is called with `height: ${box.h}px`, so a runaway document is
+ * emitted as one enormous page and `pdfPageCount() === 1` can never catch it.
+ * Measured across 40 real exports: all 675px wide, ratio 1.22–1.33 (A4 is 1.41).
+ * 1.8 sits well clear of the observed maximum while still catching a doubled
+ * document, which lands near 2.6.
+ */
+const MAX_PAGE_RATIO = 1.8;
+
+/**
+ * Ceiling on skills the evidence gate may confirm by itself for one job.
+ *
+ * The gate confirms into the same allowlist that decides what the optimiser is
+ * permitted to write into the CV, so an unbounded gate slowly grants itself
+ * permission to claim anything. A cap keeps the growth visible and operator-paced.
+ */
+const MAX_AUTO_CONFIRMS_PER_JOB = 5;
+
+/**
+ * The rendered résumé's text, normalised, straight from the page.
+ *
+ * Deliberately NOT the seed PDF's text layer: the optimiser re-renders the seed
+ * into its own template, so an untailored export never matches the seed file
+ * byte-for-byte — it matches the other untailored exports. Reading `#resume-content`
+ * (the element the PDF is printed from) before and after optimisation compares the
+ * document against itself, which is the comparison that actually holds.
+ */
+export function normaliseResumeText(text) {
+  return String(text).replace(/\s+/g, ' ').trim();
+}
+
+/** Shortest rendered résumé we will accept as "the document has loaded". */
+const MIN_BASELINE_CHARS = 500;
+
+async function resumeTextInPage(page) {
+  const raw = await page.evaluate(() => {
+    const el = document.getElementById('resume-content');
+    return el ? el.innerText || el.textContent || '' : '';
+  });
+  return normaliseResumeText(raw);
+}
+
+/**
+ * The baseline the export is compared against, read only once the résumé has
+ * actually rendered.
+ *
+ * Taking this too early is the one way the whole guard fails open: an empty
+ * baseline can never equal the finished document, so an untailored export would
+ * sail through the very check written to stop it. Waiting for real content, and
+ * refusing to proceed without it, keeps the comparison honest.
+ */
+async function resumeBaseline(page) {
+  await page.waitForFunction(min => {
+    const el = document.getElementById('resume-content');
+    return !!el && (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim().length >= min;
+  }, MIN_BASELINE_CHARS, { timeout: 30_000 }).catch(() => {});
+
+  const text = await resumeTextInPage(page);
+  if (text.length < MIN_BASELINE_CHARS) {
+    throw new Error(
+      `The résumé had not rendered before optimisation (${text.length} chars) — ` +
+      `without a baseline the untailored-export check cannot run, so this is not safe to tailor`
+    );
+  }
+  return text;
+}
 
 const SEL = {
   upload: '#resume-upload',
@@ -128,6 +204,11 @@ export async function tailorForJob(page, job, profile) {
     await page.waitForTimeout(2500);
   }
 
+  // The document as it stands before this job's optimisation — the baseline the
+  // export is checked against below. Read from the same element the PDF is printed
+  // from, so both sides of the comparison measure the same thing.
+  const beforeText = await resumeBaseline(page);
+
   await page.fill(SEL.jd, job.jd_text || '');
   await page.evaluate(() => { window.__optimizeDone = null; });
   await page.click(SEL.optimise);
@@ -158,6 +239,20 @@ export async function tailorForJob(page, job, profile) {
       const b = document.getElementById('diff-accept-all');
       return b && !b.disabled && /✓/.test(b.textContent || '');
     }, { timeout: 60_000 }).catch(() => {});
+  }
+
+  // The guard that was missing. `diffCount === 0` is a legitimate outcome upstream,
+  // and diffs the fabrication guard flagged are excluded from "Accept All" — so a
+  // run can complete "successfully" having changed nothing at all, and the export
+  // then ships the untailored base CV under a job-specific filename. 19 of 164
+  // résumés on disk were duplicates of one another that way, including the only
+  // application ever emailed. Comparing the rendered document before and after is
+  // the one check that catches every route to that outcome.
+  if ((await resumeTextInPage(page)) === beforeText) {
+    throw new Error(
+      `Optimisation changed nothing for "${job.title}" — the export would be the ` +
+      `untailored base CV. Not marking this tailored.`
+    );
   }
 
   const unconfirmedSkills = Array.isArray(done.unconfirmedSkills) ? done.unconfirmedSkills : [];
@@ -209,6 +304,14 @@ export async function tailorForJob(page, job, profile) {
   if (!box.w || !box.h || box.h > 20000) {
     throw new Error(`Implausible resume dimensions ${box.w}x${box.h} — refusing to export`);
   }
+  // The real one-page check. `pageRanges: '1'` with an explicit pixel height means
+  // pdfPageCount() below always returns 1, however long the document actually is.
+  if (box.h / box.w > MAX_PAGE_RATIO) {
+    throw new Error(
+      `Resume is ${(box.h / box.w).toFixed(2)}x as tall as it is wide (${box.w}x${box.h}) — ` +
+      `over the ${MAX_PAGE_RATIO} single-page limit, refusing to export`
+    );
+  }
 
   await page.pdf({
     path: outPath,
@@ -226,11 +329,22 @@ export async function tailorForJob(page, job, profile) {
   }
 
   const text = await extractPdfText(outPath);
+
   const check = validateResumePdf(text, {
     name: `${profile.identity.firstName} ${profile.identity.lastName}`,
     email: profile.identity.email,
-    skills: Object.keys(profile.skills || {}).filter(k => !k.startsWith('_')),
+    // A curated set of hard technical skills, not all 188 profile keys — see the
+    // comment on CORE_RESUME_SKILLS.
+    skills: CORE_RESUME_SKILLS,
   });
+
+  if (check.chars < MIN_RESUME_CHARS) {
+    fs.rmSync(outPath, { force: true });
+    throw new Error(
+      `Generated PDF holds only ${check.chars} characters of text (expected ` +
+      `>${MIN_RESUME_CHARS}) — the render is broken, not uploading it anywhere`
+    );
+  }
 
   if (!check.ok) {
     fs.rmSync(outPath, { force: true });
@@ -314,8 +428,21 @@ export async function runTailoring({ limit = 10 } = {}) {
       // sits here: everything upstream is a job-description keyword extractor.
       const gated = await gateSkillsSafely(r.unconfirmedSkills || [], profile);
 
-      for (const c of gated.confirm) {
+      // Auto-confirmation is bounded, and only on skills that carry actual
+      // evidence. Unbounded, it ran the confirmed list to 188 entries — every
+      // skill in the profile — which turned the allowlist that is supposed to stop
+      // the optimiser inventing credentials into a rubber stamp that authorises
+      // them. A skill without evidence is a question for the operator, not a fact.
+      const confirmable = gated.confirm.filter(c => c.evidence || c.derivation);
+      for (const c of confirmable.slice(0, MAX_AUTO_CONFIRMS_PER_JOB)) {
         confirmSkill(c.skill, c.years, { source: 'resume-evidence', evidence: c.evidence, derivation: c.derivation });
+      }
+      const heldBack = confirmable.length - Math.min(confirmable.length, MAX_AUTO_CONFIRMS_PER_JOB);
+      if (heldBack > 0) {
+        emit({
+          jobId: job.id, stage: 'tailor', level: 'warn',
+          message: `${heldBack} evidenced skill(s) not auto-confirmed — ${MAX_AUTO_CONFIRMS_PER_JOB}/job cap reached. Confirm them in the dashboard if they are right.`,
+        });
       }
       const suggested = recordSkillSuggestions(
         gated.ask.map(a => a.skill),

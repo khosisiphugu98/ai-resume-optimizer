@@ -3,7 +3,7 @@
 // beyond a failing build. No network.
 import { resolveField, guardAnswer } from '../src/answer/resolver.js';
 import { resumeText } from '../src/answer/resume-context.js';
-import { extractSkill, matchProfile } from '../src/answer/matchers.js';
+import { extractSkill, matchProfile, normalisePunctuation } from '../src/answer/matchers.js';
 import { matchOption } from '../src/answer/options.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
@@ -236,6 +236,85 @@ t('job with a second question stays parked',
 releaseAnswered(Q2.questionNorm);
 t('answering the second releases it too',
   db.prepare('SELECT status FROM jobs WHERE id = ?').get(ids[2]).status, 'scored');
+
+// The regression that kept LinkedIn Easy Apply at zero. The profile's email is a
+// real fact, but LinkedIn offers a select of account-verified addresses only, so
+// the profile value cannot be applied. The ladder must go on to the answer bank,
+// where a human has already stored the address that IS on the list — before this,
+// tier 1 returned its park and tiers 2-3 were never reached.
+section('a tier-1 park falls through to the answer bank');
+{
+  const LINKEDIN_EMAILS = ['ksiphugu@icloud.com', 'hpmnwp4zwn@privaterelay.appleid.com'];
+  const field = { question: 'TEST Email address', fieldType: 'select', options: LINKEDIN_EMAILS };
+
+  const before = await resolveField(field, ctx);
+  t('parks when nothing else knows', before.status, 'park');
+  t('park names the profile tier', before.tier, 'profile-option');
+
+  saveAnswer({
+    question: 'TEST Email address', fieldType: 'select',
+    value: 'ksiphugu@icloud.com', source: 'human', humanVerified: 1,
+  });
+
+  const after = await resolveField(field, ctx);
+  t('bank answer now wins', after.value, 'ksiphugu@icloud.com');
+  t('and is credited to the bank', after.tier, 'bank-exact');
+  t('and is no longer parked', after.status, 'ok');
+}
+
+// A stored answer that also fails the option list must not mask the profile's
+// reason — that reason is the one the operator can act on.
+section('a bank answer that still does not fit keeps the profile park');
+{
+  const field = { question: 'TEST Email address', fieldType: 'select', options: ['someone.else@corp.com'] };
+  const out = await resolveField(field, ctx);
+  t('still parks', out.status, 'park');
+  t('reports the profile tier', out.tier, 'profile-option');
+}
+
+// ATS copy is typed in word processors, so a straight-apostrophe pattern misses
+// the real question. This one silently sent a licence question to the model, which
+// is forbidden from asserting a credential and so declined it.
+section('curly punctuation does not defeat the matchers');
+{
+  const P2 = { ...P, misc: { ...P.misc, hasDriversLicense: true, startAvailability: '' } };
+  const c2 = { ...ctx, profile: P2 };
+  const straight = matchProfile(P2, { question: "Do you have a valid driver's licence?", options: ['Yes', 'No'] });
+  const curly = matchProfile(P2, { question: 'Do you have a valid driver’s licence?', options: ['Yes', 'No'] });
+  t('straight apostrophe matches', straight?.value, 'Yes');
+  t('curly apostrophe matches too', curly?.value, 'Yes');
+  t('en-dash folded', normalisePunctuation('4–5 years'), '4-5 years');
+}
+
+section('salary — a numeric control needs a number, not "Negotiable"');
+{
+  const withFigure = { ...P, compensation: { fallbackText: 'Negotiable', expectedAnnual: 480000 } };
+  t('text control still gets the phrase',
+    matchProfile(withFigure, { question: 'Expected salary', fieldType: 'text' })?.value, 'Negotiable');
+  t('numeric control gets the figure',
+    matchProfile(withFigure, { question: 'Expected salary', fieldType: 'number' })?.value, '480000');
+  t('and parks when no figure is on file',
+    !!matchProfile(P, { question: 'Expected salary', fieldType: 'number' })?.park, true);
+}
+
+// The phrasings real forms use. "When are you available to start?" parked on a
+// live application because the pattern only had "availability to start".
+section('availability phrasings all reach the notice period');
+{
+  const asked = [
+    'What is your notice period?',
+    'When can you start?',
+    'When are you available to start?',
+    'When would you be available to commence?',
+    'Earliest possible start date',
+    'Availability to start',
+  ];
+  for (const q of asked) t(q, matchProfile(P, { question: q })?.value, '30 days');
+
+  // Deliberately still a bare duration, because that is what fits a dropdown.
+  t('fits a duration dropdown',
+    matchOption('30 days', ['Immediately', 'Less than 2 weeks', '1 month'], { semantic: true }).option, '1 month');
+}
 
 section('scoring heuristic');
 const hs = heuristicScore({ title: 'Marketing Data Analyst', jd_text: 'You will use SQL and Power BI daily.' }, P);

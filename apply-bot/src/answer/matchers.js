@@ -69,7 +69,12 @@ export const MATCHERS = [
   // ---- Logistics ----------------------------------------------------------
   {
     name: 'noticePeriod',
-    test: /notice period|when can you start|availability to start|start date/,
+    // "When are you available to start?" parked live because the pattern read
+    // "availability to start" and the form said "available to start". The answer
+    // stays `${days} days` rather than prose: that is what the duration rule in
+    // options.js fits onto "1 month" / "Less than 2 weeks" dropdowns, and prose
+    // would fit nothing.
+    test: /notice period|when (can|could|would) you (start|begin|commence)|availabilit(y|ies) to start|available to (start|commence|begin)|earliest (possible )?(start|available)|start date/,
     resolve: p => {
       if (!p.authorization?.confirmed) return park('notice period is not confirmed in the profile');
       return ok(`${p.authorization.noticePeriodDays} days`);
@@ -91,7 +96,17 @@ export const MATCHERS = [
     name: 'compensation',
     test: /salary|compensation|remuneration|expected (pay|package)|ctc|rate expectation/,
     resolve: (p, ctx) => {
-      if (ctx.fieldType === 'number') return park('a hard numeric salary figure is required');
+      // A control that will only take a number cannot take "Negotiable", so the
+      // fallback text is not an answer there — it parked live applications. An
+      // explicit expected figure is the only thing that satisfies those, and it is
+      // the candidate's own number, never an inferred one.
+      const expected = p.compensation?.expectedAnnual;
+      const wantsNumber = ctx.fieldType === 'number' || /^(number|numeric)$/i.test(ctx.fieldType || '');
+      if (wantsNumber) {
+        return Number.isFinite(Number(expected))
+          ? ok(String(Number(expected)))
+          : park('a hard numeric salary figure is required, and compensation.expectedAnnual is not set');
+      }
       return ok(p.compensation?.fallbackText || 'Negotiable');
     },
   },
@@ -157,8 +172,26 @@ export function extractSkill(question) {
   return skill && skill.length > 1 ? skill : null;
 }
 
+/**
+ * Fold the punctuation real forms are written with onto the ASCII the matchers
+ * are written in.
+ *
+ * Every pattern here uses a straight apostrophe, but ATS copy is typed in word
+ * processors: "Do you have a valid driver’s licence?" carries U+2019, so
+ * `/driver'?s? licen[sc]e/` never fired and a question the profile could answer
+ * outright went to the model instead — which correctly declined it, because the
+ * model is not allowed to assert a licence. One character cost the whole answer.
+ */
+export function normalisePunctuation(text) {
+  return String(text)
+    .replace(/[‘’ʼʹ′]/g, "'")   // curly / modifier apostrophes
+    .replace(/[“”]/g, '"')                      // curly double quotes
+    .replace(/[‐-―−]/g, '-')               // dashes and minus
+    .replace(/ /g, ' ');                             // non-breaking space
+}
+
 export function matchProfile(profile, ctx) {
-  const q = String(ctx.question || '').toLowerCase().trim();
+  const q = normalisePunctuation(ctx.question || '').toLowerCase().trim();
   for (const m of MATCHERS) {
     if (!m.test.test(q)) continue;
     const res = m.resolve(profile, ctx);

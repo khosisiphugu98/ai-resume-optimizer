@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { collectFieldsInPage, fillField } from '../src/apply/fields.js';
 import { canApply, withinHours, capRemaining } from '../src/apply/rate.js';
+import { HOURS } from '../src/config.js';
 import { db, bumpRate, setSetting } from '../src/db.js';
 import { CAPS } from '../src/config.js';
 
@@ -114,10 +115,15 @@ t('easy apply halted', canApply('external_ats', { ignoreHours: true }).ok, false
 t('  → reason mentions the challenge', /challenge/.test(canApply('external_ats', { ignoreHours: true }).reason), true);
 db.exec('DELETE FROM rate_ledger');
 
-section('operating hours');
+// HOURS is deliberately 24/7 (config.js:42) — the operator opened external and
+// email to round-the-clock volume, and the LinkedIn account is protected by the
+// daily caps and channel-aware pacing rather than by the clock. These assert that
+// policy; narrowing HOURS again should fail them and be a conscious change.
+section('operating hours — 24/7 by policy');
 t('Tuesday 10:00 SAST is in hours', withinHours(new Date('2026-07-21T08:00:00Z')).ok, true);
-t('Tuesday 03:00 SAST is not', withinHours(new Date('2026-07-21T01:00:00Z')).ok, false);
-t('Saturday is not', withinHours(new Date('2026-07-25T10:00:00Z')).ok, false);
+t('Tuesday 03:00 SAST is too', withinHours(new Date('2026-07-21T01:00:00Z')).ok, true);
+t('Saturday is too', withinHours(new Date('2026-07-25T10:00:00Z')).ok, true);
+t('the window is genuinely open', [HOURS.start, HOURS.end, HOURS.weekdaysOnly], [0, 24, false]);
 
 section('observe mode applies to nothing');
 setSetting('mode', 'observe');
