@@ -1,15 +1,19 @@
 # Apply-bot remediation plan
 
-> **Status — 28 Jul 2026.** Shipped and merged to `main`: **PR-0, 0e, PR-1a,
-> PR-2, PR-1b, PR-1c, PR-4a/4b/4c**, plus the skill-list cleanup. `npm test` green
-> (17 suites). Measured on the 30-field audit form: **required parks 7 → 0**.
+> **Status — 28 Jul 2026.** Shipped and merged to `main`: **PR-0, 0e, PR-1a, PR-2,
+> PR-1b, PR-1c, PR-3, PR-4a/4b/4c/4d**, plus the skill-list cleanup. `npm test`
+> green (17 suites). Measured on the 30-field audit form: **required parks 7 → 0**.
+> Recoverable volume on the current board: **~229 jobs**.
 >
-> Three items in this plan turned out to be wrong and were corrected while
-> building — see "Corrections made while building" at the end.
+> Four items in this plan turned out to be wrong and were corrected while
+> building — see "Corrections made while building" at the end. Two further bugs
+> were found only by running the thing (curly apostrophes; city-vs-country
+> precedence), and one by measuring a fix against the real board rather than
+> against its own tests (unbounded skill matching).
 >
-> **Still outstanding: PR-1d (the planner), PR-3 (volume — the title gate and the
-> ~294 recoverable jobs), PR-4d–4g (rate-limit correctness, adapters,
-> bookkeeping).**
+> **Still outstanding: PR-1d (the adaptive planner), PR-4e (the Greenhouse adapter
+> and unregistered vendors), PR-4f (outcome enum, retry accounting, `tailored_at`,
+> filename collisions, CLI secrets), PR-4g (the referees decision).**
 >
 > **Generic auto-submit is OFF.** `allow_generic_autosubmit` defaults to off, so
 > unrecognised forms are still filled and held. Turning it on is the switch that
@@ -474,3 +478,50 @@ duration rule fits onto a `1 month` dropdown. Prose would fit nothing.
    parked questions clear in the same pass.
 3. **Clear the poisoned skill list** — `npm run audit`, then unconfirm what the CVs
    cannot support.
+
+---
+
+## Corrections 3 and 4, and two bugs only a live run could find (28 Jul)
+
+### 3 — "test the description for a role-family term" was far too loose
+
+PR-3a's stated fix was to run the family regex over `jd_text` as well as the
+title. Measured against the real board, that admitted **956 of the 1187** gated
+jobs: a family term appearing anywhere in six thousand characters is nearly free,
+because almost every posting says "data" or "digital" somewhere. A gate that lets
+80% through is not a gate.
+
+**Corrected to** rescuing an off-title job only when the description names
+**four or more of the candidate's own confirmed skills** — the same evidence
+`worthScoring` already trusts. On the real board: 72 admitted on title, 45 on
+description, 1070 still turned away.
+
+### 4 — the skill matcher had never worked
+
+Calibrating that threshold produced nonsense: an *Executive Assistant* posting
+scored four skill matches. `heuristicScore` matched with a bare `includes()`, so
+`ml` matched inside **h·tml**, `cro` inside **mi·cro·soft**, `git` inside
+**lo·gi·stics**. Since `worthScoring` needs only two hits, the pre-LLM gate had
+silently stopped existing, and `overlap` — which feeds the degraded score — was
+measuring noise. Now word-bounded.
+
+This one is worth noting for how it was found: not by a test, but by disbelieving
+a number.
+
+### Two bugs that only appeared when the thing ran
+
+**Curly apostrophes.** `matchProfile` compared ASCII patterns against raw form
+text, so `driver’s licence` (U+2019, as every word processor types it) missed
+`/driver'?s? licen[sc]e/`. The question fell to the model, which correctly refused
+to assert a licence — so a fact the profile knew was never used. Punctuation is
+folded before matching now.
+
+**City beat country.** LinkedIn labels a country dropdown *"Country: Current
+Location"*. The city matcher owns "current location" and ran first, so it answered
+"Pretoria" — a true fact in the wrong control, which failed the option list and
+parked the application. Country is matched on the word "country" and tried first;
+matchers can now decline a label that merely overlapped.
+
+Both are the same lesson in different clothes: the fill layer is only as good as
+its reading of the question, and neither test fixtures nor static reading will
+show you what real ATS copy looks like.
