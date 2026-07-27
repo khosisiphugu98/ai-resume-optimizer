@@ -187,8 +187,16 @@ export class ChallengeDetected extends Error {
 export async function assertNoChallenge(page) {
   const url = page.url();
   if (/\/checkpoint\/|\/authwall|challengesV2/i.test(url)) throw new ChallengeDetected(url);
+  // Visibility matters. `page.$()` matches a hidden node just as happily as a
+  // shown one, and these pages ship challenge markup as inert templates — so a
+  // `display:none` skeleton would trip the kill switch and, until this was scoped
+  // to LinkedIn in rate.js, halt every channel for the rest of the day on a
+  // checkpoint that was never actually presented.
   for (const sel of SELECTORS.challenge) {
-    if (await page.$(sel)) throw new ChallengeDetected(sel);
+    const el = page.locator(sel).first();
+    if (await el.count().catch(() => 0) && await el.isVisible().catch(() => false)) {
+      throw new ChallengeDetected(sel);
+    }
   }
 }
 
