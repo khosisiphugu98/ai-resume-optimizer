@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { detectVendor, VENDORS, DEFERRED } from '../src/apply/adapters/index.js';
 import { applyExternal } from '../src/apply/external.js';
+import { setSetting } from '../src/db.js';
 
 let pass = 0, fail = 0;
 const t = (name, got, want) => {
@@ -149,8 +150,27 @@ const GEN = at('https://careers.randomco.com/apply/1', greenhouseForm().replace(
 const r7 = await applyExternal(page, { ...job(8007), external_apply_url: GEN }, ctx, { submit: true });
 t('vendor is generic', r7.vendor, 'generic');
 t('held for review despite submit:true', r7.outcome, 'ready');
-t('explains why it was held', /never auto-submits/.test(r7.heldForReview || ''), true);
+t('explains why it was held', /does not auto-submit/.test(r7.heldForReview || ''), true);
 t('nothing submitted', await page.locator('#done').isVisible(), false);
+
+// Holding an unknown form is policy, not physics, and there are exactly two ways
+// past it — both requiring a person. Without them, approving a generic job did
+// nothing: run.js set submit, external.js discarded it, and the job went back to
+// awaiting_review to be approved again on the next cycle, forever.
+const GEN_APPROVED = at('https://careers.randomco.com/apply/2', greenhouseForm().replace('id="application-form"', 'id="custom-form"'));
+const rApproved = await applyExternal(page, { ...job(8021), external_apply_url: GEN_APPROVED }, ctx, { submit: true, approved: true });
+t('an approved job gets past the generic hold', rApproved.outcome, 'submitted');
+
+const GEN_SETTING = at('https://careers.randomco.com/apply/3', greenhouseForm().replace('id="application-form"', 'id="custom-form"'));
+setSetting('allow_generic_autosubmit', '1');
+const rSetting = await applyExternal(page, { ...job(8022), external_apply_url: GEN_SETTING }, ctx, { submit: true });
+setSetting('allow_generic_autosubmit', '');
+t('so does the operator setting', rSetting.outcome, 'submitted');
+
+// And with neither, the default is unchanged.
+const GEN_DEFAULT = at('https://careers.randomco.com/apply/4', greenhouseForm().replace('id="application-form"', 'id="custom-form"'));
+const rDefault = await applyExternal(page, { ...job(8023), external_apply_url: GEN_DEFAULT }, ctx, { submit: true });
+t('default is still hold', rDefault.outcome, 'ready');
 
 section('deferred vendor short-circuits to manual');
 const r8 = await applyExternal(page, { ...job(8008), external_apply_url: 'https://acme.wd1.myworkdayjobs.com/careers/job/1' },

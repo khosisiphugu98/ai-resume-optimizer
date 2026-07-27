@@ -528,6 +528,26 @@ export function queueEmail(draft) {
   return info.lastInsertRowid;
 }
 
+/**
+ * The id of another job already applied to at this exact apply URL, or null.
+ *
+ * Duplicate postings are invisible until the apply URL is resolved: two agencies
+ * list the same role, both cards look distinct, and both reach the apply stage.
+ * Only outcomes that actually reached the employer count — a job that parked or
+ * failed has not been applied to, and must not block a real attempt.
+ */
+export function appliedUrlOwner(applyUrl, exceptJobId = null) {
+  if (!applyUrl) return null;
+  const row = db.prepare(`
+    SELECT j.id FROM jobs j
+    JOIN applications a ON a.job_id = j.id
+    WHERE j.external_apply_url = ?
+      AND (? IS NULL OR j.id != ?)
+      AND a.outcome IN ('submitted', 'submitted_unconfirmed')
+    ORDER BY j.id LIMIT 1`).get(applyUrl, exceptJobId, exceptJobId);
+  return row ? row.id : null;
+}
+
 export function outboxPending() {
   return db.prepare(`SELECT * FROM outbox WHERE status = 'held' ORDER BY send_after`).all();
 }
