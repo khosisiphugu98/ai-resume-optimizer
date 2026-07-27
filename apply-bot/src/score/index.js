@@ -5,7 +5,18 @@ import { callLLM, hasKey } from '../llm.js';
 import { roleFamiliesRe } from '../reject-criteria.js';
 
 /** The number that was picked out of the air. Now only the default (§8.4). */
-export const THRESHOLD = 65;
+/**
+ * The fit score below which a job is not applied to.
+ *
+ * Lowered from 65. Across 613 real model scores the distribution is bimodal — the
+ * 50-59 bucket holds 8 jobs and the 60-69 bucket holds 88 — so 65 cut straight
+ * through the densest band on the board, rejecting 55 jobs scoring 60-64 on a
+ * number backed by exactly one labelled outcome. 55 sits in the sparse gap
+ * between the two modes, which is where a cut belongs until there is evidence to
+ * place it better. `AUDIT.floor` below is what will eventually supply that
+ * evidence; it is now low enough to sample the jobs this rejects.
+ */
+export const THRESHOLD = 55;
 
 /**
  * The threshold in force. Lives in `settings` so the operator can move it from
@@ -34,7 +45,16 @@ export function setThreshold(value) {
 //
 // The fix is to deliberately let a few through. One in twenty, capped at two a
 // day, labelled separately, and excluded from the headline rate.
-export const AUDIT = { rate: 0.05, dailyCap: 2, floor: 40, reason: 'audit sample' };
+/**
+ * Deliberate applications below the threshold, so it can eventually be validated.
+ *
+ * `floor` was 40 and the cap 2 a day, which produced two audit samples in the
+ * system's entire history against the 40 labelled outcomes `calibrate.js` needs —
+ * a bar it would never have reached. The floor drops to 25 (a job scoring under
+ * that is not a near miss worth testing) and the cap rises, so the threshold
+ * starts accumulating the evidence that would justify moving it again.
+ */
+export const AUDIT = { rate: 0.08, dailyCap: 6, floor: 25, reason: 'audit sample' };
 
 /** Injectable so the tests can assert the rate without depending on chance. */
 export function shouldAuditSample(score, threshold, random = Math.random) {
@@ -52,13 +72,78 @@ standing with employers and job platforms.
 Weigh: required skills the candidate demonstrably has; seniority fit; domain
 overlap; whether the day-to-day work matches their background.
 
-"blockers" are disqualifiers, not weaknesses: a required clearance, a required
-degree they lack, a mandatory on-site location they cannot reach, a required
-language they do not speak. A blocker means do not apply regardless of score.
+"blockers" are hard disqualifiers, not weaknesses. Each one must be tagged with
+its kind:
+
+  auth      — a work-authorisation, visa, citizenship or clearance requirement the
+              candidate cannot meet.
+  language  — the role requires fluency in a language the candidate does not speak.
+              The posting being written in another language is itself evidence.
+  location  — the role is on-site somewhere the candidate genuinely cannot reach.
+              An on-site or hybrid role in the candidate's OWN COUNTRY is NOT a
+              blocker; they can travel and are willing to relocate.
+  credential — a required degree, certification or licence they lack.
+  experience — a required number of years or a domain they lack.
+
+Only include something that would make the application futile. A preference, a
+"nice to have", or a requirement stated as "or equivalent experience" is not a
+blocker — reflect it in the score instead. If there are none, return an empty
+array; never the string "None".
 
 Return JSON:
-{"score": <0-100>, "rationale": "<one sentence>", "blockers": ["..."],
+{"score": <0-100>, "rationale": "<one sentence>",
+ "blockers": [{"kind": "auth|language|location|credential|experience", "why": "..."}],
  "missingRequirements": ["..."]}`;
+
+/**
+ * Blocker kinds that end the application outright.
+ *
+ * The others are real, but they are matters of degree that the score already
+ * reflects: a preferred degree, a "5+ years" line, an on-site role in a city the
+ * candidate could commute to or move for. Treating all five as fatal rejected 42
+ * jobs that should have been applied to, 23 of them scoring 50 or better —
+ * including nine on-site roles inside South Africa, where the candidate lives.
+ */
+const FATAL_BLOCKERS = new Set(['auth', 'language']);
+
+/**
+ * Normalise whatever the model returned into `{kind, why}` entries worth acting on.
+ *
+ * Accepts the older bare-string shape so a stale response is not a crash, and
+ * discards the ways a model says "nothing here" — three jobs were rejected with
+ * the reason `blocker: None` because `["None"]` is a non-empty array.
+ */
+export function normaliseBlockers(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map(b => (typeof b === 'string' ? { kind: 'unknown', why: b } : b))
+    .filter(b => b && typeof b.why === 'string')
+    .map(b => ({ kind: String(b.kind || 'unknown').toLowerCase().trim(), why: b.why.trim() }))
+    .filter(b => b.why && !/^(none|n\/?a|nil|no blockers?|not applicable|-)\.?$/i.test(b.why));
+}
+
+/**
+ * Does this text name that skill, as a word rather than as a fragment?
+ *
+ * `jd.includes(skill)` looked reasonable until the short skills were counted:
+ * "ml" matched inside html, "cro" inside microsoft, "git" inside logistics, "r"
+ * inside everything. An Executive Assistant posting scored four skill matches
+ * that way. Since `worthScoring` needs only two hits, the gate it was supposed to
+ * be had quietly stopped existing, and `overlap` — which feeds the degraded
+ * score — was measuring noise.
+ */
+/**
+ * Confirmed skills a description must name before an off-title job is scored
+ * anyway. Four is enough to separate a genuine match from a posting that happens
+ * to mention Excel.
+ */
+export const BODY_RESCUE_SKILLS = 4;
+
+export function mentions(text, skill) {
+  if (!skill) return false;
+  const esc = skill.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9+#])${esc}(?![a-z0-9+#])`, 'i').test(text);
+}
 
 /**
  * Cheap heuristic before any LLM spend — kills the obvious misses for free.
@@ -70,19 +155,41 @@ export function heuristicScore(job, profile) {
     .filter(([n, m]) => !n.startsWith('_') && m?.confirmed)
     .map(([n]) => normaliseSkill(n));
 
-  const hits = skills.filter(s => jd.includes(s));
+  const hits = skills.filter(s => mentions(jd, s));
   const overlap = skills.length ? hits.length / skills.length : 0;
 
-  // Title relevance against the tiers the searches target. The families are
+  // Relevance against the tiers the searches target. The families are
   // operator-editable from the Rejected column (src/reject-criteria.js).
-  const titleRelevant = roleFamiliesRe().test(job.title || '');
+  //
+  // The description counts, not just the title. This gate decided the fate of
+  // 1188 of 2305 jobs on twelve substrings matched against the title alone, and a
+  // title is the one part of a posting written by marketing rather than by the
+  // hiring manager: "Specialist", "Associate", "Consultant" say nothing, while the
+  // body is wall-to-wall GA4 and Google Ads. 64 rejected postings had a family
+  // term in the description and none in the title. The JD is already in hand for
+  // the skill overlap two lines up, so consulting it costs nothing.
+  const families = roleFamiliesRe();
+  const titleRelevant = families.test(job.title || '');
+
+  // The rescue path for a title that says nothing. Deliberately NOT the family
+  // regex over the description: a family term appearing anywhere in six thousand
+  // characters is almost free, and testing that admitted 956 of the 1187 gated
+  // jobs — a gate that lets 80% through is not a gate. What actually distinguishes
+  // a mislabelled match from an unrelated posting is whether the description names
+  // the candidate's own confirmed skills, several of them, which is the same
+  // evidence `worthScoring` already trusts.
+  const bodyRelevant = !titleRelevant && hits.length >= BODY_RESCUE_SKILLS;
+  const relevant = titleRelevant || bodyRelevant;
 
   return {
     overlap,
     matchedSkills: hits,
-    titleRelevant,
+    titleRelevant: relevant,
+    // Kept apart so the rationale can say which one carried it — a job admitted on
+    // its description alone is worth being able to find later.
+    matchedOn: titleRelevant ? 'title' : (bodyRelevant ? 'description' : null),
     // Not a verdict — a gate on whether the LLM call is worth making.
-    worthScoring: titleRelevant && hits.length >= 2,
+    worthScoring: relevant && hits.length >= 2,
   };
 }
 
@@ -112,7 +219,14 @@ export async function scoreJob(job, profile) {
   const h = heuristicScore(job, profile);
 
   if (!h.titleRelevant) {
-    return { score: 0, rationale: 'Title is outside the targeted role families', blockers: [], heuristic: h };
+    // `gated` says this job was never judged. Without it the board wrote
+    // "fit 0 < 65" against 1188 jobs that no model ever looked at, which reads as
+    // a considered rejection and hid the largest single leak in the pipeline
+    // behind language that suggested the threshold was doing the work.
+    return {
+      score: 0, gated: true, blockers: [], heuristic: h,
+      rationale: 'Neither the title nor the description mentions a targeted role family — not scored',
+    };
   }
   if (!h.worthScoring) {
     return {
@@ -134,6 +248,17 @@ export async function scoreJob(job, profile) {
     { role: 'system', content: SYSTEM },
     { role: 'user', content:
         `CANDIDATE PROFILE\n${summariseForLLM(profile)}\n\n` +
+        // Spelled out because the model was inferring it and getting it wrong.
+        // Nine jobs were rejected as "on-site in Pretoria", "on-site in Cape Town",
+        // "office-based, Foreshore" — all inside the candidate's own country — and
+        // one, at fit 70, for requiring South African citizenship. The profile
+        // summary carried a location line, but nothing told the model that being
+        // based in the same country makes an on-site requirement reachable.
+        `WHERE THE CANDIDATE IS\n` +
+        `Lives in ${profile.identity?.city || 'unspecified'}, ${profile.identity?.country || 'unspecified'}. ` +
+        `Willing to relocate: ${profile.authorization?.willingToRelocate ? 'yes' : 'no'}. ` +
+        `An on-site or hybrid role anywhere in ${profile.identity?.country || 'their country'} is reachable ` +
+        `and must not be treated as a location blocker.\n\n` +
         fewShotBlock() +
         `JOB: ${job.title} at ${job.company} (${job.location})\n\n` +
         `DESCRIPTION\n${String(job.jd_text).slice(0, 6000)}` },
@@ -142,7 +267,7 @@ export async function scoreJob(job, profile) {
   return {
     score: Math.max(0, Math.min(100, Number(out.score) || 0)),
     rationale: out.rationale || '',
-    blockers: Array.isArray(out.blockers) ? out.blockers : [],
+    blockers: normaliseBlockers(out.blockers),
     missingRequirements: Array.isArray(out.missingRequirements) ? out.missingRequirements : [],
     heuristic: h,
   };
@@ -171,14 +296,18 @@ export async function runScoring({ limit = 30, audit = true, random = Math.rando
         continue;
       }
 
-      // A blocker disqualifies regardless of score.
-      if (r.blockers.length) {
+      // Only a fatal blocker ends it. The rest are weaknesses the score already
+      // carries, so they go on to be judged against the threshold like anything
+      // else — a preferred degree or an on-site role in the candidate's own city
+      // is not a reason to throw the job away unseen.
+      const fatal = r.blockers.find(b => FATAL_BLOCKERS.has(b.kind));
+      if (fatal) {
         updateJob(job.id, {
           fit_score: r.score, fit_rationale: r.rationale,
-          status: 'rejected', reject_reason: `blocker: ${r.blockers[0]}`,
+          status: 'rejected', reject_reason: `blocker (${fatal.kind}): ${fatal.why}`,
         });
         rejected++;
-        emit({ jobId: job.id, stage: 'score', message: `Rejected (blocker: ${r.blockers[0]}) — ${job.title} @ ${job.company}` });
+        emit({ jobId: job.id, stage: 'score', message: `Rejected (${fatal.kind}: ${fatal.why}) — ${job.title} @ ${job.company}` });
       } else if (r.score < threshold) {
         // Occasionally let one through anyway. Without a sample of what happens
         // below the line, the threshold can only ever be validated against jobs
@@ -196,12 +325,23 @@ export async function runScoring({ limit = 30, audit = true, random = Math.rando
               `Applied to deliberately so the threshold has evidence from below it.`,
           });
         } else {
+          // Say which gate closed. A job the family filter stopped was never
+          // scored, and calling that "fit 0 < 65" is how 1188 unjudged rejections
+          // passed for judgement.
+          const reason = r.gated
+            ? 'off-target: no role-family term in the title or description'
+            : `fit ${r.score} < ${threshold}`;
           updateJob(job.id, {
             fit_score: r.score, fit_rationale: r.rationale,
-            status: 'rejected', reject_reason: `fit ${r.score} < ${threshold}`,
+            status: 'rejected', reject_reason: reason,
           });
           rejected++;
-          emit({ jobId: job.id, stage: 'score', message: `Rejected (fit ${r.score}) — ${job.title} @ ${job.company}` });
+          emit({
+            jobId: job.id, stage: 'score',
+            message: r.gated
+              ? `Off-target (not scored) — ${job.title} @ ${job.company}`
+              : `Rejected (fit ${r.score}) — ${job.title} @ ${job.company}`,
+          });
         }
       } else {
         updateJob(job.id, { fit_score: r.score, fit_rationale: r.rationale, status: 'scored' });

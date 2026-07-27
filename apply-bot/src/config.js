@@ -96,9 +96,25 @@ export const REJECT_TITLE = new RegExp(`\\b(${SENIORITY_TERMS.join('|')})\\b`, '
 
 // Title families worth an LLM score — a posting outside these is off-target and
 // gated for free before any spend (see score/index.js heuristicScore).
+// Twelve terms matched against the title alone rejected 1188 of 2305 jobs without
+// spending a cent on judging them — including Google Ads Manager, Amazon PPC
+// Manager, Business Intelligence Engineer, Junior Media Buyer, CRM Manager, SEO
+// Manager and User Acquisition Specialist, all squarely on target. The vocabulary
+// of this field is wider than "analyst" and "marketing"; these are the words the
+// missing postings actually used.
 export const ROLE_FAMILY_TERMS = [
   'analyst', 'analytics', 'growth', 'marketing', 'adops', 'ad operations',
   'campaign', 'gtm', 'martech', 'revenue operations', 'programmatic', 'data',
+  // paid media and search
+  'media buyer', 'media buying', 'paid media', 'paid social', 'paid search',
+  'ppc', 'sem', 'seo', 'adwords', 'google ads', 'user acquisition', 'demand gen',
+  'demand generation', 'performance marketing', 'aso',
+  // lifecycle, CRM and revenue
+  'crm', 'lifecycle', 'retention', 'engagement', 'e-commerce', 'ecommerce',
+  // insight and reporting
+  'business intelligence', 'insights', 'reporting', 'bi developer', 'bi engineer',
+  // adjacent titles that carry the same work
+  'digital', 'social media', 'content strategist', 'seo specialist',
 ];
 
 // §2.3 — the highest-leverage filter. Applied before any LLM spend. Each default
