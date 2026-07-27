@@ -1,10 +1,19 @@
 # Apply-bot remediation plan
 
-> **Status — 27 Jul 2026: PR-0, 0e and PR-1a are implemented.** `npm test` green
-> (16 suites). Measured on the 30-field audit form: **required parks 7 → 3**.
-> Two items in this plan were wrong and were corrected during implementation —
-> see "Corrections made while building" at the end. Everything from PR-1b onward
-> is still outstanding.
+> **Status — 28 Jul 2026.** Shipped and merged to `main`: **PR-0, 0e, PR-1a,
+> PR-2, PR-1b, PR-1c, PR-4a/4b/4c**, plus the skill-list cleanup. `npm test` green
+> (17 suites). Measured on the 30-field audit form: **required parks 7 → 0**.
+>
+> Three items in this plan turned out to be wrong and were corrected while
+> building — see "Corrections made while building" at the end.
+>
+> **Still outstanding: PR-1d (the planner), PR-3 (volume — the title gate and the
+> ~294 recoverable jobs), PR-4d–4g (rate-limit correctness, adapters,
+> bookkeeping).**
+>
+> **Generic auto-submit is OFF.** `allow_generic_autosubmit` defaults to off, so
+> unrecognised forms are still filled and held. Turning it on is the switch that
+> lets applications go to employers on forms nobody has vetted the shape of.
 
 
 
