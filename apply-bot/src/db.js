@@ -273,6 +273,19 @@ const DAY_MS = 864e5;
  * `minAgeDays` exists because asking about something sent this morning is noise —
  * nothing has had time to happen yet.
  */
+/**
+ * The outcomes that mean an application reached an employer.
+ *
+ * `submitted_unconfirmed` is a real send: the submit control was pressed and the
+ * acknowledgement was not recognised, which is why it is terminal and never
+ * retried. Counting only `submitted` made every one of those invisible to the
+ * whole outcome layer — no Sent row, no reply tracking, no timeout to
+ * no_response — so an application that went out could never be answered, and
+ * every response rate was computed over a denominator that quietly excluded it.
+ */
+export const SENT_OUTCOMES = ['submitted', 'submitted_unconfirmed'];
+const SENT_SQL = `('${SENT_OUTCOMES.join("', '")}')`;
+
 export function pendingOutcomes({ minAgeDays = 7, limit = 100 } = {}) {
   const cutoff = new Date(Date.now() - minAgeDays * DAY_MS).toISOString();
   return db.prepare(`
@@ -280,7 +293,7 @@ export function pendingOutcomes({ minAgeDays = 7, limit = 100 } = {}) {
            j.title, j.company, j.fit_score, j.tier, j.url,
            CAST(julianday('now') - julianday(a.submitted_at) AS INTEGER) AS age_days
     FROM applications a JOIN jobs j ON j.id = a.job_id
-    WHERE a.outcome = 'submitted' AND a.submitted_at IS NOT NULL
+    WHERE a.outcome IN ${SENT_SQL} AND a.submitted_at IS NOT NULL
       AND a.outcome_state IS NULL AND a.submitted_at <= ?
     ORDER BY a.submitted_at
     LIMIT ?`).all(cutoff, limit);
@@ -305,7 +318,7 @@ export function autoTimeoutOutcomes({ days = OUTCOME_TIMEOUT_DAYS } = {}) {
   const cutoff = new Date(Date.now() - days * DAY_MS).toISOString();
   return db.prepare(`
     UPDATE applications SET outcome_state = 'no_response', outcome_at = ?, outcome_source = 'timeout'
-    WHERE outcome = 'submitted' AND submitted_at IS NOT NULL
+    WHERE outcome IN ${SENT_SQL} AND submitted_at IS NOT NULL
       AND outcome_state IS NULL AND submitted_at < ?`).run(now(), cutoff).changes;
 }
 
@@ -313,12 +326,14 @@ export function autoTimeoutOutcomes({ days = OUTCOME_TIMEOUT_DAYS } = {}) {
 export function outcomeSummary() {
   const row = db.prepare(`
     SELECT COUNT(*) AS submitted,
+           SUM(CASE WHEN outcome = 'submitted_unconfirmed' THEN 1 ELSE 0 END) AS unconfirmed,
            SUM(CASE WHEN outcome_state IS NOT NULL THEN 1 ELSE 0 END) AS labelled,
            SUM(CASE WHEN outcome_state IN ('rejected','screen','interview','offer') THEN 1 ELSE 0 END) AS responses,
            SUM(CASE WHEN outcome_note LIKE 'audit sample%' THEN 1 ELSE 0 END) AS audit
-    FROM applications WHERE outcome = 'submitted' AND submitted_at IS NOT NULL`).get();
+    FROM applications WHERE outcome IN ${SENT_SQL} AND submitted_at IS NOT NULL`).get();
   return {
     submitted: row.submitted || 0,
+    unconfirmed: row.unconfirmed || 0,
     labelled: row.labelled || 0,
     responses: row.responses || 0,
     audit: row.audit || 0,
@@ -552,16 +567,62 @@ export function queueEmail(draft) {
  * Only outcomes that actually reached the employer count — a job that parked or
  * failed has not been applied to, and must not block a real attempt.
  */
+/**
+ * Parameters that identify where a click came from, not which job it points at.
+ *
+ * Two LinkedIn cards for the same Agoda posting resolved to
+ * `.../jobs/5794753?gh_src=ec760f9d1` and `.../jobs/5794753?gh_src=e13c735b1` —
+ * one Greenhouse job, two tracking tokens. Compared literally they are different
+ * URLs, so the duplicate guard did not fire: job 1490 was submitted and job 2128
+ * then filled the same posting again, stopped only by an unrelated park.
+ *
+ * Named rather than dropping the query string wholesale, because plenty of ATS
+ * URLs carry the job id there and stripping it would collapse a whole board into
+ * one entry.
+ */
+const TRACKING_PARAMS = [
+  /^gh_src$/i, /^utm_/i, /^referralcode$/i, /^igbtracker$/i, /^trk$/i, /^trackingid$/i,
+  /^src$/i, /^source$/i, /^ref$/i, /^gclid$/i, /^fbclid$/i, /^msclkid$/i, /^lever-origin$/i,
+];
+
+/** The identity of an apply URL: the same posting always produces the same key. */
+export function normaliseApplyUrl(raw) {
+  if (!raw) return null;
+  let u;
+  try { u = new URL(String(raw)); } catch { return String(raw).trim().toLowerCase() || null; }
+
+  for (const key of [...u.searchParams.keys()]) {
+    if (TRACKING_PARAMS.some(re => re.test(key))) u.searchParams.delete(key);
+  }
+  u.searchParams.sort();
+  u.hash = '';
+  u.hostname = u.hostname.toLowerCase().replace(/^www\./, '');
+  u.pathname = u.pathname.replace(/\/+$/, '') || '/';
+  return u.toString().toLowerCase();
+}
+
+/**
+ * The job that already applied to this posting, or null.
+ *
+ * Compared on the normalised key rather than in SQL, because normalisation is
+ * not something SQLite can express and the set of already-applied jobs is small
+ * enough that reading it costs nothing.
+ */
 export function appliedUrlOwner(applyUrl, exceptJobId = null) {
   if (!applyUrl) return null;
-  const row = db.prepare(`
-    SELECT j.id FROM jobs j
+  const key = normaliseApplyUrl(applyUrl);
+  if (!key) return null;
+
+  const rows = db.prepare(`
+    SELECT DISTINCT j.id, j.external_apply_url FROM jobs j
     JOIN applications a ON a.job_id = j.id
-    WHERE j.external_apply_url = ?
+    WHERE j.external_apply_url IS NOT NULL
       AND (? IS NULL OR j.id != ?)
       AND a.outcome IN ('submitted', 'submitted_unconfirmed')
-    ORDER BY j.id LIMIT 1`).get(applyUrl, exceptJobId, exceptJobId);
-  return row ? row.id : null;
+    ORDER BY j.id`).all(exceptJobId, exceptJobId);
+
+  const hit = rows.find(r => normaliseApplyUrl(r.external_apply_url) === key);
+  return hit ? hit.id : null;
 }
 
 export function outboxPending() {

@@ -14,7 +14,13 @@
 export const VENDORS = [
   {
     vendor: 'greenhouse',
-    match: url => /(boards|job-boards)\.greenhouse\.io|greenhouse\.io\/embed/i.test(url),
+    // The EU subdomain is the same product on a different host, and requiring
+    // `job-boards` to sit immediately before `.greenhouse.io` missed it:
+    // job-boards.eu.greenhouse.io fell through to the generic adapter, losing
+    // the vetted submit selector and picking up the stricter CV-upload check.
+    // ClearScore and Meridial both took that path on 28 July. Lever's matcher
+    // already handled its regional variant; this one did not.
+    match: url => /(boards|job-boards)\.(eu\.)?greenhouse\.io|greenhouse\.io\/embed/i.test(url),
     formRoot: ['#application-form', '#application_form', 'form#application', '[data-testid="application-form"]', 'main form', 'form'],
     fileInput: ['input[type=file][name*="resume" i]', 'input[type=file][id*="resume" i]', 'input[type=file]'],
     submit: ['#submit_app', 'button[type=submit]', 'input[type=submit]'],

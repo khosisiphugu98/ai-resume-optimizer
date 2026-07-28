@@ -62,7 +62,7 @@ export function labelledApplications() {
            a.outcome_at, a.outcome_source, a.outcome_note,
            j.fit_score, j.tier, j.search_keywords, j.company, j.title
     FROM applications a JOIN jobs j ON j.id = a.job_id
-    WHERE a.outcome = 'submitted' AND a.outcome_state IS NOT NULL
+    WHERE a.outcome IN ('submitted', 'submitted_unconfirmed') AND a.outcome_state IS NOT NULL
     ORDER BY a.submitted_at`).all();
 }
 
@@ -179,7 +179,7 @@ export function calibrationReport({ minSample = 8, minTotal = 40 } = {}) {
 
   const pending = db.prepare(`
     SELECT COUNT(*) n FROM applications
-    WHERE outcome = 'submitted' AND outcome_state IS NULL`).get().n;
+    WHERE outcome IN ('submitted', 'submitted_unconfirmed') AND outcome_state IS NULL`).get().n;
 
   const auditResponses = audit.filter(responded).length;
 

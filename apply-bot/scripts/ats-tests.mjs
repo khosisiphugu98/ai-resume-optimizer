@@ -37,6 +37,11 @@ t('greenhouse (boards)',      detectVendor('https://boards.greenhouse.io/acme/jo
 t('greenhouse (job-boards)',  detectVendor('https://job-boards.greenhouse.io/acme/jobs/9').vendor, 'greenhouse');
 t('lever',                    detectVendor('https://jobs.lever.co/acme/abc-123/apply').vendor, 'lever');
 t('lever EU',                 detectVendor('https://jobs.eu.lever.co/acme/x').vendor, 'lever');
+// Two applications took the generic path on 28 July because the EU subdomain
+// was not matched — losing the vetted submit selector and picking up the
+// stricter CV-upload hold. Lever's matcher already handled its regional variant.
+t('greenhouse EU (D3)',       detectVendor('https://job-boards.eu.greenhouse.io/clearscore/jobs/4').vendor, 'greenhouse');
+t('greenhouse EU (boards)',   detectVendor('https://boards.eu.greenhouse.io/agency/jobs/7').vendor, 'greenhouse');
 t('ashby',                    detectVendor('https://jobs.ashbyhq.com/acme/uuid').vendor, 'ashby');
 t('workable',                 detectVendor('https://apply.workable.com/acme/j/ABC/').vendor, 'workable');
 t('smartrecruiters',          detectVendor('https://jobs.smartrecruiters.com/Acme/74400').vendor, 'smartrecruiters');

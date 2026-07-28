@@ -1,4 +1,4 @@
-import { db, updateJob, parkQuestions, bumpRate, appliedUrlOwner } from '../db.js';
+import { db, updateJob, parkQuestions, bumpRate, appliedUrlOwner, SENT_OUTCOMES } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { getContext, attachScreencast, stopRequested, ChallengeDetected } from '../browser.js';
 import { loadProfile } from '../profile.js';
@@ -55,7 +55,10 @@ function recordAttempt(job, channel, result, outcome, note = null) {
     // and a correction can pin back onto that plan.
     adapter: result.agent ? `agent:${result.agent.kind}` : (result.vendor ? `ats:${result.vendor}` : 'linkedin-easy'),
     fingerprint: result.agent?.fingerprint || null,
-    submitted_at: outcome === 'submitted' ? new Date().toISOString() : null,
+    // Stamped for an unconfirmed send too. Something went out at this moment,
+    // and every outcome query keys off this column — without it an application
+    // that reached an employer could never be replied to, timed out, or counted.
+    submitted_at: SENT_OUTCOMES.includes(outcome) ? new Date().toISOString() : null,
     evidence: result.evidence || null,
     outcome,
     filled: JSON.stringify(result.filled || []),
@@ -133,7 +136,11 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     return { attempted: 0, submitted: 0, queued: 0, parked: 0, failed: 0, manual: 0 };
   }
 
-  const stats = { attempted: 0, submitted: 0, queued: 0, parked: 0, failed: 0, manual: 0 };
+  // `sentUnconfirmed` is counted apart from `submitted` rather than folded into
+  // it. Both reached an employer — that is what the terminal state means — but
+  // one was acknowledged and the other was not, and an operator reading one line
+  // needs to know how many applications are waiting on a human to check.
+  const stats = { attempted: 0, submitted: 0, sentUnconfirmed: 0, queued: 0, parked: 0, failed: 0, manual: 0 };
 
   const channelOf = j => (j.apply_type === 'easy_apply' ? 'linkedin_easy' : 'external_ats');
   const blocked = new Set();
@@ -252,7 +259,12 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         const appId = recordAttempt(job, channel, result, 'submitted_unconfirmed');
         recordApplication(channel);
         updateJob(job.id, { status: 'manual_required', reject_reason: result.reason });
-        stats.manual++;
+        // Counted as sent, not as manual work. The run summary said "0 submitted"
+        // on the day this system made its first two real submissions, because the
+        // counter only incremented on outcome `submitted` — so the terminal state
+        // that exists precisely to mean "this went out" was invisible in the one
+        // line an operator reads.
+        stats.sentUnconfirmed++;
         // Logged like a confirmed submission: something went out, and the record
         // of what is exactly as valuable when the outcome is uncertain.
         recordSubmission({ job, channel, applicationId: appId, result, outcome: 'submitted_unconfirmed' });
@@ -314,6 +326,15 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         continue;
       }
 
+      // A hard failure is still an attempt on this posting.
+      //
+      // Job 453 failed with "form did not advance past step 3" and left no row
+      // at all — only an event-log line. Across the 28 July run, fourteen Easy
+      // Apply attempts produced three `applications` rows, so any conversion
+      // rate computed from that table silently omitted every structural failure
+      // and reported a fill rate over the attempts that happened to work.
+      recordAttempt(job, channel, { vendor: job.ats_vendor }, 'error', err.message.slice(0, 200));
+
       // A deterministic failure is already exhausted on attempt one: retrying
       // "no application form found" produces the same sentence twice more.
       const terminal = isDeterministic(err.message);
@@ -345,9 +366,12 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     }
   }
 
+  const sent = stats.submitted + stats.sentUnconfirmed;
   emit({
     stage: 'apply',
-    message: `Applications complete — ${stats.submitted} submitted, ${stats.queued} queued for review, ${stats.parked} parked, ${stats.manual} manual, ${stats.failed} failed`,
+    message: `Applications complete — ${sent} sent to employers`
+      + (stats.sentUnconfirmed ? ` (${stats.submitted} confirmed, ${stats.sentUnconfirmed} unconfirmed — check these by hand)` : '')
+      + `, ${stats.queued} queued for review, ${stats.parked} parked, ${stats.manual} manual, ${stats.failed} failed`,
   });
-  return stats;
+  return { ...stats, sent };
 }

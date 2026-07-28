@@ -223,10 +223,22 @@ const commands = {
       return;
     }
 
-    console.log(`\n  ${rows.length} submission(s), newest first:\n`);
+    // Only `submitted` and `submitted_unconfirmed` are applications that went
+    // out. Anything else is a correction to one — the ledger is append-only, so
+    // a retraction is a later line for the same application, and showing it
+    // without a label read as a second application to the same company.
+    const OUTCOME_FLAG = {
+      submitted: '',
+      submitted_unconfirmed: ' [UNCONFIRMED]',
+      error: ' [RETRACTED — did not reach the employer]',
+    };
+    const sent = rows.filter(r => String(r.outcome || '').startsWith('submitted')).length;
+
+    console.log(`\n  ${sent} application(s) sent, ${rows.length} record(s), newest first:\n`);
     for (const r of rows) {
-      const flag = r.outcome === 'submitted_unconfirmed' ? ' [UNCONFIRMED]' : '';
-      console.log(`  ${r.submittedAt.slice(0, 16).replace('T', ' ')}  ${r.job.title} @ ${r.job.company}${flag}`);
+      const flag = OUTCOME_FLAG[r.outcome] ?? ` [${String(r.outcome || 'unknown').toUpperCase()}]`;
+      const corrected = r.corrections ? `  (corrected ${r.corrections}×)` : '';
+      console.log(`  ${r.submittedAt.slice(0, 16).replace('T', ' ')}  ${r.job.title} @ ${r.job.company}${flag}${corrected}`);
       console.log(`     ${r.channel}${r.vendor ? `/${r.vendor}` : ''} · ${r.fieldCount} field(s) · CV: ${r.resume || 'none'}`);
       if (r.appliedAt) console.log(`     ${String(r.appliedAt).slice(0, 100)}`);
       if (verbose) {

@@ -54,6 +54,11 @@ export async function runWizard({
   // so the step is completed and captured before the run ends — see the note at
   // the resolve() call below.
   const parkedFields = [];
+  // Every control this run has already dealt with — filled, prefilled, parked or
+  // refused. Kept apart from `filled` because a question asked in two places is
+  // recorded once and applied twice, so the record and the set of handled
+  // controls are no longer the same list.
+  const handled = new Set();
   let steps = 0;
   let lastSignature = null;
 
@@ -65,10 +70,34 @@ export async function runWizard({
     let signatureNow = signature(nodes);
 
     for (let round = 0; round < MAX_RECOLLECTS; round++) {
-      const unfilled = nodes.filter(n => !filled.some(f => f.uid && f.uid === n.uid));
+      const unfilled = nodes.filter(n => n.uid && !handled.has(n.uid));
       if (!unfilled.length) break;
 
-      const { resolved, parked } = await resolve(unfilled);
+      // One question, however many controls carry it.
+      //
+      // The Agoda submission recorded 31 fields for 18 unique questions — 13
+      // asked twice and answered twice, identically, because the form root held
+      // two copies of the control set. Resolving each copy separately doubled
+      // the model spend on every such application and made every field count in
+      // the system wrong.
+      //
+      // So the question is resolved once and the answer applied to every control
+      // that asks it. That is what already happened in practice; it just cost
+      // twice as much and was recorded as though it were twice as much work.
+      const groups = new Map();
+      for (const n of unfilled) {
+        const key = fieldIdentity(n);
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(n);
+      }
+      // Keyed by the uid of the control actually asked about, because that is
+      // what comes back on the result. Re-deriving the identity from a resolver
+      // result would not work: a result carries `fieldType` where a node carries
+      // `role`, and those use different words for the same control.
+      const byRepresentative = new Map([...groups.values()].map(g => [g[0].uid, g]));
+      const askAbout = [...byRepresentative.values()].map(g => g[0]);
+
+      const { resolved, parked } = await resolve(askAbout);
 
       // A park is recorded and the step still gets filled.
       //
@@ -80,11 +109,18 @@ export async function runWizard({
       // submitted while `parkedFields` holds anything; the step simply finishes its
       // work first, and the wizard stops at the end of it.
       if (parked.length) parkedFields.push(...parked);
+      // A question that parked is settled for this step — asking again on the
+      // next re-collect would spend another model call to reach the same answer.
+      for (const p of parked) {
+        for (const n of byRepresentative.get(p.uid) || []) handled.add(n.uid);
+      }
 
       for (const r of resolved) {
-        if (r.status !== 'ok') continue;
-        const node = unfilled.find(n => n.uid === r.uid);
+        const group = byRepresentative.get(r.uid) || [];
+        const node = group[0];
         if (!node) continue;
+        for (const n of group) handled.add(n.uid);
+        if (r.status !== 'ok') continue;
 
         // Last line before anything is typed. The resolver rejects refusal words
         // at their two model paths, but this is the only point every value from
@@ -100,34 +136,56 @@ export async function runWizard({
           continue;
         }
 
-        // A board that parsed the resume may have already filled this in with the
-        // same value. Rewriting it risks clobbering a better value with our own,
-        // and several boards clear dependent fields when one is retyped.
-        if (node.currentValue && String(node.currentValue).trim() === String(r.value).trim()) {
-          filled.push({ uid: node.uid, question: r.question, value: r.value, tier: 'prefilled', kind: node.role, options: node.options || null });
-          continue;
+        // The answer goes into every control that asked the question, and is
+        // recorded once. `copies` says how many controls took it, so a form that
+        // renders itself twice is visible as that rather than as twice the work.
+        let landed = null;
+        let applied = 0;
+        let lastError = null;
+
+        for (const n of group) {
+          // A board that parsed the resume may have already filled this in with
+          // the same value. Rewriting it risks clobbering a better value with our
+          // own, and several boards clear dependent fields when one is retyped.
+          if (n.currentValue && String(n.currentValue).trim() === String(r.value).trim()) {
+            landed ??= r.value;
+            applied++;
+            continue;
+          }
+          try {
+            landed = await fill(n, r.value);
+            applied++;
+          } catch (err) {
+            lastError = err;
+          }
         }
 
-        try {
-          const landed = await fill(node, r.value);
-          // The options travel with the value. Without them a later reader — the
-          // pre-send check, or a person looking at the submission record — sees
-          // "South Africa +27" against a profile that says "+27 82 820 4538" and
-          // cannot tell a correct answer fitted onto a dropdown from a wrong one.
-          filled.push({
-            uid: node.uid, question: r.question, value: landed,
-            tier: r.tier, kind: node.role, probable: !!r.probable,
-            options: node.options || null,
-          });
-        } catch (err) {
+        if (!applied) {
           // A value that will not go into the control is not an answer. Record it
           // and carry on with the rest of the step — one stubborn control must not
           // cost the fields that would have gone in cleanly.
           parkedFields.push({
             question: r.question, fieldType: r.fieldType, options: node.options,
-            reason: `could not apply "${r.value}": ${err.message}`, tier: 'fill-error',
+            reason: `could not apply "${r.value}": ${lastError?.message || 'no control accepted it'}`,
+            tier: 'fill-error',
           });
+          continue;
         }
+
+        const prefilled = landed === r.value && node.currentValue
+          && String(node.currentValue).trim() === String(r.value).trim();
+
+        // The options travel with the value. Without them a later reader — the
+        // pre-send check, or a person looking at the submission record — sees
+        // "South Africa +27" against a profile that says "+27 82 820 4538" and
+        // cannot tell a correct answer fitted onto a dropdown from a wrong one.
+        filled.push({
+          uid: node.uid, question: r.question, value: landed,
+          tier: prefilled ? 'prefilled' : r.tier,
+          kind: node.role, probable: !prefilled && !!r.probable,
+          options: node.options || null,
+          ...(applied > 1 ? { copies: applied } : {}),
+        });
       }
 
       // Filling may have revealed more questions. If the shape did not change,
@@ -198,6 +256,24 @@ export async function runWizard({
  */
 export function stepSignature(items) {
   return items.map(i => `${i.role}|${i.question}`).sort().join('\n');
+}
+
+/**
+ * What makes two controls the same question.
+ *
+ * Role, label and offered choices — everything that decides what the answer is,
+ * and nothing that decides where it goes. A form rendering one question twice
+ * (a responsive duplicate, nested copies of a control set) produces two nodes
+ * with different uids and identical identities, and resolving both asks a model
+ * the same question twice to get the same answer.
+ *
+ * Deliberately includes the options: two selects labelled "Country" offering
+ * different lists are two questions, however alike they read.
+ */
+export function fieldIdentity(item) {
+  const question = String(item?.question ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const options = (item?.options || []).map(o => String(o).trim().toLowerCase()).join('');
+  return `${item?.role || item?.fieldType || ''}|${question}|${options}`;
 }
 
 /** Accessible-name patterns for moving forward and for finishing. */

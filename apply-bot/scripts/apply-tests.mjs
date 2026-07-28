@@ -8,7 +8,8 @@ import path from 'node:path';
 import { collectFieldsInPage, fillField, isSiteSearch } from '../src/apply/fields.js';
 import { canApply, withinHours, capRemaining, EXTERNAL_PAGEVIEW_SHARE } from '../src/apply/rate.js';
 import { HOURS } from '../src/config.js';
-import { db, bumpRate, setSetting } from '../src/db.js';
+import { db, bumpRate, setSetting, appliedUrlOwner, normaliseApplyUrl } from '../src/db.js';
+import { runWizard, stepSignature } from '../src/apply/wizard.js';
 import { CAPS } from '../src/config.js';
 
 let pass = 0, fail = 0;
@@ -117,6 +118,85 @@ t('and so is one that merely mentions searching',
 
 await browser.close();
 fs.rmSync(tmp, { force: true });
+
+// The Agoda submission recorded 31 fields for 18 unique questions — 13 asked
+// twice and answered twice, identically, because the form root held two copies
+// of the control set. That doubled the model spend on every such application and
+// made every field count in the system wrong.
+section('one question, however many controls carry it (D12)');
+{
+  const nodes = [
+    { uid: 'email-desktop', role: 'input', question: 'Email address', options: null },
+    { uid: 'email-mobile', role: 'input', question: 'Email address', options: null },
+    { uid: 'name', role: 'input', question: 'Full name', options: null },
+    // Same label, different choices — two questions, however alike they read.
+    { uid: 'country-a', role: 'select', question: 'Country', options: ['South Africa', 'Kenya'] },
+    { uid: 'country-b', role: 'select', question: 'Country', options: ['ZA', 'KE'] },
+  ];
+  const asked = [];
+  const typed = [];
+
+  const r = await runWizard({
+    submit: false,
+    collect: async () => nodes,
+    resolve: async items => {
+      asked.push(...items.map(i => i.uid));
+      return {
+        resolved: items.map(i => ({
+          status: 'ok', uid: i.uid, question: i.question, fieldType: 'text',
+          options: i.options, value: `v:${i.question}`, tier: 'profile',
+        })),
+        parked: [],
+      };
+    },
+    fill: async (node, value) => { typed.push(node.uid); return value; },
+    findAdvance: async () => null,
+    findTerminal: async () => ({ click: async () => {} }),
+    signature: stepSignature,
+  });
+
+  t('the duplicate control is never asked about', asked.includes('email-mobile'), false);
+  t('four questions asked, not five', asked.length, 4);
+  t('but every control is still typed into', typed.length, 5);
+  t('and the answer is recorded once', r.filled.length, 4);
+  t('carrying how many controls took it', r.filled.find(f => f.uid === 'email-desktop').copies, 2);
+  t('a single control records no copy count', r.filled.find(f => f.uid === 'name').copies, undefined);
+  t('two option lists are two questions', asked.filter(u => u.startsWith('country')).length, 2);
+}
+
+// Two LinkedIn cards for the same Agoda posting differed only by a tracking
+// token, so the duplicate guard did not fire: one was submitted and the other
+// filled the same posting again, stopped only by an unrelated park.
+section('the same posting, two tracking tokens (D13)');
+{
+  const GH = 'https://job-boards.greenhouse.io/agoda/jobs/5794753';
+  t('a tracking parameter is not part of the identity',
+    normaliseApplyUrl(`${GH}?gh_src=ec760f9d1`), normaliseApplyUrl(`${GH}?gh_src=e13c735b1`));
+  t('nor is utm, a fragment, a trailing slash or the www',
+    normaliseApplyUrl('https://www.acme.com/apply/?utm_source=li#form'),
+    normaliseApplyUrl('https://acme.com/apply'));
+  t('but a different job id still is',
+    normaliseApplyUrl(`${GH}?gh_src=a`) === normaliseApplyUrl('https://job-boards.greenhouse.io/agoda/jobs/1?gh_src=a'), false);
+  t('and a real query parameter is kept',
+    normaliseApplyUrl('https://acme.com/apply?jobId=42') === normaliseApplyUrl('https://acme.com/apply'), false);
+
+  db.prepare(`INSERT INTO jobs (id, external_id, url, title, company, discovered_at, apply_type, external_apply_url, status)
+              VALUES (9101, 'dup-a', 'x', 'Data Analyst', 'Agoda', datetime('now'), 'external', ?, 'submitted')`)
+    .run(`${GH}?gh_src=ec760f9d1`);
+  db.prepare(`INSERT INTO applications (job_id, channel, outcome) VALUES (9101, 'external_ats', 'submitted_unconfirmed')`).run();
+
+  t('a second card for the same posting finds its twin',
+    appliedUrlOwner(`${GH}?gh_src=e13c735b1`, 9102), 9101);
+  t('the job that sent it is not its own twin',
+    appliedUrlOwner(`${GH}?gh_src=ec760f9d1`, 9101), null);
+  t('a genuinely different posting is not blocked',
+    appliedUrlOwner('https://job-boards.greenhouse.io/agoda/jobs/999', 9102), null);
+
+  // Every suite shares one throwaway database, and a later one clears `jobs`.
+  // Leaving an application row behind would fail that delete on the foreign key.
+  db.prepare('DELETE FROM applications WHERE job_id = 9101').run();
+  db.prepare('DELETE FROM jobs WHERE id = 9101').run();
+}
 
 section('rate limiting — per-channel, not one shared budget');
 db.exec('DELETE FROM rate_ledger');

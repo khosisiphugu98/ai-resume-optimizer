@@ -79,14 +79,44 @@ export function recordSubmission({ job, channel, applicationId, result, outcome 
   }
 }
 
-/** Every recorded submission, newest first. Reads the append-only log. */
-export function listSubmissions({ limit = 100 } = {}) {
+/**
+ * Every recorded submission, newest first, one entry per application.
+ *
+ * The ledger is append-only on purpose — it is evidence, so nothing in it is
+ * ever rewritten — which means a corrected outcome arrives as a *new line* for
+ * an application that already has one:
+ *
+ *   3  2026-07-28T07:36:41Z  app 87  job 2136  submitted  Famous Brands
+ *   4  2026-07-28T12:09:32Z  app 87  job 2136  error      Famous Brands
+ *
+ * Returning every line made `npm run submissions` report five submissions where
+ * there were three real ones and one retraction, and showed the retraction as
+ * though it were a second application to the same company. Collapsing on
+ * `applicationId` and keeping the latest record is what the file already means;
+ * it was only ever read too literally.
+ */
+export function listSubmissions({ limit = 100, includeSuperseded = false, file = SUBMISSIONS_LOG } = {}) {
   try {
-    return fs.readFileSync(SUBMISSIONS_LOG, 'utf8')
+    const lines = fs.readFileSync(file, 'utf8')
       .split('\n')
       .filter(Boolean)
       .map(l => { try { return JSON.parse(l); } catch { return null; } })
-      .filter(Boolean)
+      .filter(Boolean);
+
+    if (includeSuperseded) return lines.reverse().slice(0, limit);
+
+    // Latest wins. Records with no applicationId cannot be collapsed onto
+    // anything, so they are kept as they are rather than merged by accident.
+    const latest = new Map();
+    const loose = [];
+    for (const r of lines) {
+      if (r.applicationId == null) { loose.push(r); continue; }
+      const prev = latest.get(r.applicationId);
+      latest.set(r.applicationId, prev ? { ...r, corrections: (prev.corrections || 0) + 1 } : r);
+    }
+
+    return [...latest.values(), ...loose]
+      .sort((a, b) => String(a.submittedAt).localeCompare(String(b.submittedAt)))
       .reverse()
       .slice(0, limit);
   } catch {

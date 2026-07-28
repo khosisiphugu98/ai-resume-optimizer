@@ -1,8 +1,14 @@
 // The last look before anything reaches an employer, and the rule it enforces:
 // Claude reads and objects, deterministic code decides, and the model never gets
 // to choose a value. No network — the reviewer is injected.
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { preflight, deterministicObjections, preflightGate } from '../src/apply/preflight.js';
 import { resolveFormBatch, resolveField, DETERMINISTIC_ONLY_REASON } from '../src/answer/resolver.js';
+import { listSubmissions } from '../src/apply/submission-log.js';
+
+const readSubmissionsFrom = (file, opts = {}) => listSubmissions({ file, limit: 100, ...opts });
 
 let pass = 0, fail = 0;
 const t = (name, got, want) => {
@@ -148,6 +154,39 @@ section('deterministicOnly — Claude finds the field, the profile fills it');
   t('and the flag is what does it, not the question',
     (await resolveFormBatch(form, { profile: P, countryCode: 'ZA' }))
       .resolved.find(r => r.uid === 'b')?.tier !== 'deterministic-only', true);
+}
+
+// The ledger is append-only because it is evidence, so a corrected outcome
+// arrives as a new line for an application that already has one. Reading every
+// line back reported five submissions where there were three real ones and one
+// retraction — and showed the retraction as a second application to the same
+// company.
+section('a corrected record is not a second application (D5)');
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'subs-'));
+  const log = path.join(dir, 'submissions.jsonl');
+  const line = (applicationId, at, outcome, company) => JSON.stringify({
+    submittedAt: at, outcome, applicationId, channel: 'external_ats',
+    job: { id: 2136, title: 'Data Analyst', company }, fieldCount: 3, fields: [],
+  });
+  fs.writeFileSync(log, [
+    line(85, '2026-07-28T06:00:00Z', 'submitted', 'Gulf Associates'),
+    line(87, '2026-07-28T07:36:41Z', 'submitted', 'Famous Brands'),
+    line(86, '2026-07-28T06:30:00Z', 'submitted_unconfirmed', 'Agoda'),
+    line(87, '2026-07-28T12:09:32Z', 'error', 'Famous Brands'),
+  ].join('\n') + '\n');
+
+  const rows = readSubmissionsFrom(log);
+  t('one record per application', rows.length, 3);
+  t('the latest record wins', rows.find(r => r.applicationId === 87).outcome, 'error');
+  t('and says it was corrected', rows.find(r => r.applicationId === 87).corrections, 1);
+  t('newest first', rows.map(r => r.applicationId), [87, 86, 85]);
+  t('an unconfirmed send is still a send',
+    rows.filter(r => String(r.outcome).startsWith('submitted')).length, 2);
+  t('the raw ledger is still readable in full',
+    readSubmissionsFrom(log, { includeSuperseded: true }).length, 4);
+
+  fs.rmSync(dir, { recursive: true, force: true });
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
