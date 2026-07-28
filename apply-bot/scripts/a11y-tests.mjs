@@ -18,6 +18,7 @@ import { collectFieldsInPage } from '../src/apply/fields.js';
 import { runWizard, stepSignature, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from '../src/apply/wizard.js';
 import { resolveFormBatch } from '../src/answer/resolver.js';
 import { applyExternal } from '../src/apply/external.js';
+import { getSetting, setSetting } from '../src/db.js';
 
 let pass = 0, fail = 0;
 const t = (name, got, want) => {
@@ -396,6 +397,29 @@ const PARTIAL = at('https://careers.partial.test/apply', `
     <button type="button" id="sub">Submit application</button>
   </form>`);
 
+// The first thing generic auto-submit ever sent was careerjunction's job-SEARCH
+// page: the model typed a keyword salad into the search bar, an email went into
+// the job-alert box, the button was pressed, "thank you" matched, and a
+// submitted application was recorded. Nothing reached an employer. An
+// unrecognised page has to prove it is an application form — by taking a CV —
+// before it may be sent.
+section('an unknown page without a CV upload is filled and held, never sent');
+const priorAuto = getSetting('allow_generic_autosubmit');
+setSetting('allow_generic_autosubmit', '1');
+const SEARCHPAGE = at('https://www.jobboard.test/a-job-1234.aspx', `
+  <form id="jobsearch">
+    <label for="q">Job title, skill or company</label><input id="q" type="text">
+    <label for="al">EMAIL</label><input id="al" type="text">
+    <button type="submit" id="go">Submit</button>
+  </form>`);
+const w6 = await applyExternal(page, { ...job(9107), external_apply_url: SEARCHPAGE }, ctx,
+  { submit: true, resumePath: null });
+t('not submitted', w6.outcome, 'ready');
+t('and it says why', /not an application form/i.test(w6.heldForReview || ''), true);
+t("the site's own search bar was never answered",
+  await page.locator('#q').inputValue(), '');
+setSetting('allow_generic_autosubmit', priorAuto ?? '');
+
 const w4 = await applyExternal(page, { ...job(9105), external_apply_url: PARTIAL }, ctx, { submit: true });
 t('an unanswerable field still parks the run', w4.outcome, 'parked');
 t('but the answerable fields were filled', w4.filled.length >= 3, true);
@@ -415,9 +439,17 @@ const DEAD = at('https://careers.dead.test/apply', `
     <button type="button" id="nx">Continue</button>
   </form>`);
 
+// The adaptive agent is pinned off for this one. It is a live operator setting,
+// and with it on a stuck page is handed to the agent instead of throwing —
+// which is correct behaviour, and made this assertion pass or fail depending on
+// which switches happened to be flipped when the suite ran. A test that reads
+// production settings is not testing the code.
+const agentWas = getSetting('agent_enabled');
+setSetting('agent_enabled', '0');
 let deadErr = null;
 await applyExternal(page, { ...job(9103), external_apply_url: DEAD }, ctx, { submit: false })
   .catch(err => { deadErr = err.message; });
+setSetting('agent_enabled', agentWas ?? '');
 t('a form that does not advance is abandoned', /did not advance/.test(deadErr || ''), true);
 t('and it happens early, not after the step ceiling', /step 1/.test(deadErr || ''), true);
 
@@ -442,7 +474,7 @@ t('a different form does not', sig(roles) === sig(shadow), false);
 t('signature ignores uids', /a11y-/.test(sig(roles)), false);
 
 await browser.close();
-for (let i = 9101; i <= 9106; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
+for (let i = 9101; i <= 9107; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

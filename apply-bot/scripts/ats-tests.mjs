@@ -175,6 +175,26 @@ const rSetting = await applyExternal(page, { ...job(8022), external_apply_url: G
 setSetting('allow_generic_autosubmit', '');
 t('so does the operator setting', rSetting.outcome, 'submitted');
 
+// But the setting is permission to send an application, not permission to send
+// anything with a button on it. The first page generic auto-submit ever reached
+// was careerjunction's job-SEARCH form: a keyword salad went into the search
+// bar, an email into the job-alert box, and a "thank you" match recorded it as
+// a submitted application. Nothing reached an employer. An unknown page now has
+// to look like an application — somewhere to put a CV — before it may be sent.
+const SEARCH_PAGE = at('https://www.board.test/a-job-99.aspx', `
+  <form id="jobsearch">
+    <label for="q">Job title, skill or company</label><input id="q" type="text">
+    <label for="al">EMAIL</label><input id="al" type="text">
+    <button type="submit" id="go">Submit</button>
+  </form>
+  <div id="done" style="display:none">Thank you</div>`);
+setSetting('allow_generic_autosubmit', '1');
+const rSearch = await applyExternal(page, { ...job(8024), external_apply_url: SEARCH_PAGE }, ctx, { submit: true });
+setSetting('allow_generic_autosubmit', '');
+t('a search page is not an application form', rSearch.outcome, 'ready');
+t('and says so', /not an application form/.test(rSearch.heldForReview || ''), true);
+t("the board's search bar was never answered", await page.locator('#q').inputValue(), '');
+
 // And with neither, the default is unchanged.
 const GEN_DEFAULT = at('https://careers.randomco.com/apply/4', greenhouseForm().replace('id="application-form"', 'id="custom-form"'));
 const rDefault = await applyExternal(page, { ...job(8023), external_apply_url: GEN_DEFAULT }, ctx, { submit: true });

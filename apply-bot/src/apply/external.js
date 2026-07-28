@@ -13,6 +13,19 @@ import { captureUnsolvedPage } from './agent/capture.js';
 import { runAgent } from './agent/index.js';
 
 /**
+ * A job board's own search bar, which sits at the top of every page it serves —
+ * including the page a posting's Apply link lands on.
+ *
+ * It is a text input with a label, so the collector sees a question, and the
+ * resolver has no idea it is not being asked anything. The one that got through
+ * was careerjunction's "Job title, skill or company", which the model answered
+ * with a keyword salad of the candidate's skills.
+ */
+const SITE_SEARCH = /^\s*(search|keywords?|job title,? ?(skill|keyword)|what (are you looking for|job)|find (a )?jobs?|search (for )?jobs?|search by)/i;
+
+export const isSiteSearch = q => SITE_SEARCH.test(String(q || ''));
+
+/**
  * Map an adaptive-agent result into the standard applyExternal return. The agent
  * is fill-only, so a solved page comes back as 'ready' (held for review) or
  * 'parked' — never 'submitted'.
@@ -245,11 +258,17 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   // form from it, which is worth having happen before anything is resolved.
   const uploaded = [];
   const uploadedUids = new Set();
+  // Whether the page ever offered somewhere to put a CV — tracked separately
+  // from whether one was attached, because they answer different questions.
+  // "Did it attach?" is about us; "was there a slot?" is about the page, and
+  // that is what says whether this is an application form at all.
+  let sawFileControl = false;
 
   const collect = async () => {
     const { items } = await collectFields(frame, rootSelector, vendor);
 
     for (const item of items) {
+      if (item.role === 'file') sawFileControl = true;
       if (item.role !== 'file' || !resumePath || uploadedUids.has(item.uid)) continue;
       uploadedUids.add(item.uid);
       try {
@@ -262,7 +281,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
       } catch { /* optional attachment slots are common */ }
     }
 
-    return items.filter(i => i.role !== 'file' && i.question);
+    return items.filter(i => i.role !== 'file' && i.question && !isSiteSearch(i.question));
   };
 
   // `requiresReview` is a policy about unrecognised forms, not a law of physics.
@@ -277,10 +296,36 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const override = approved || genericAutoSubmitAllowed();
   const maySubmit = submit && (!vendor.requiresReview || override);
 
+  // An unrecognised page with a button on it is not necessarily an application
+  // form. The first thing generic auto-submit ever sent was careerjunction's
+  // job-search page: it typed a keyword salad into the search bar, entered an
+  // email into a job-alert box, pressed the button, matched "thank you", and
+  // recorded a submitted application. Nothing reached an employer.
+  //
+  // So an unknown form has to prove itself before it may be sent. The proof is
+  // the CV: a real application takes an attachment, and a search page does not.
+  // Known vendors are exempt — their shape is already vetted — and so is a job
+  // a human explicitly approved, because at that point somebody has looked.
+  const mayFinish = vendor.vendor === 'generic' && !approved
+    ? async ({ filled }) => {
+      if (!sawFileControl) {
+        return `nowhere to attach a CV, so this is not an application form `
+          + `(${filled.length} field(s) filled). Filled and held rather than sent.`;
+      }
+      // There was a slot and we came empty-handed. A CV-less application to a
+      // form that asked for one is not worth sending under anyone's name.
+      if (resumePath && !uploaded.length) {
+        return 'the CV upload did not take. Held rather than applying without one.';
+      }
+      return null;
+    }
+    : null;
+
   const result = await runWizard({
     submit: maySubmit,
     collect,
 
+    mayFinish,
     resolve: items => resolveFormBatch(items, answerCtx),
     fill: (item, value) => fillCollected(frame, item, value),
 
@@ -329,9 +374,12 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
       // Why, in words the operator can act on. This string was already being built
       // and then dropped on the floor by run.js, so "Ready for review" in auto mode
       // looked like a bug rather than a policy.
-      heldForReview: !maySubmit && submit
-        ? `the ${vendor.vendor} adapter does not auto-submit — approve this application, or turn on generic auto-submit in settings`
-        : null,
+      // `result.reason` is set when the wizard reached submit and mayFinish
+      // refused it — that is the more specific answer, so it wins.
+      heldForReview: result.reason
+        || (!maySubmit && submit
+          ? `the ${vendor.vendor} adapter does not auto-submit — approve this application, or turn on generic auto-submit in settings`
+          : null),
     };
   }
 

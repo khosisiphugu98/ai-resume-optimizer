@@ -35,13 +35,19 @@ export const MAX_RECOLLECTS = 3;
  *   findTerminal()       → a locator that submits, or null
  *   signature(nodes)     → a comparable identity for the step
  *   onStep({ step })     → optional; screenshots, event emission
+ *   mayFinish({filled})  → optional; a reason to hold instead of pressing
+ *                          submit, or null to allow it. Checked at the
+ *                          terminal button, because that is the first moment
+ *                          the caller knows what the form actually turned out
+ *                          to be — `submit` is decided before a single field
+ *                          has been seen.
  *
  * Returns { outcome, filled, parked, steps, reason }. `outcome` is one of
  * `ready` (reached submit, did not press it), `submitted`, `parked`, `stuck`.
  */
 export async function runWizard({
   collect, resolve, fill, findAdvance, findTerminal, signature,
-  onStep = null, beforeAdvance = null, submit = false, maxSteps = MAX_STEPS,
+  onStep = null, beforeAdvance = null, mayFinish = null, submit = false, maxSteps = MAX_STEPS,
 }) {
   const filled = [];
   // Questions this run could not answer. Collected rather than returned on sight,
@@ -130,6 +136,8 @@ export async function runWizard({
     const terminal = await findTerminal();
     if (terminal) {
       if (!submit) return { outcome: 'ready', filled, steps };
+      const hold = mayFinish ? await mayFinish({ filled, steps }) : null;
+      if (hold) return { outcome: 'ready', filled, steps, reason: hold };
       return { outcome: 'submit', terminal, filled, steps };
     }
 
