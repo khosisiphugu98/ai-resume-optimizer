@@ -86,6 +86,20 @@ export async function runWizard({
         const node = unfilled.find(n => n.uid === r.uid);
         if (!node) continue;
 
+        // Last line before anything is typed. The resolver rejects refusal words
+        // at their two model paths, but this is the only point every value from
+        // every tier and adapter passes through — and the cost of being wrong
+        // here is a word like "unanswerable" sitting in an employer's ATS under
+        // the candidate's name. Cheap to check, so it is checked again.
+        if (NON_ANSWER_VALUE.test(String(r.value ?? ''))) {
+          parkedFields.push({
+            question: r.question, fieldType: r.fieldType, options: node.options,
+            reason: `refused to type "${String(r.value).trim()}" — a non-answer reached the fill layer at tier ${r.tier}`,
+            tier: 'sentinel-blocked',
+          });
+          continue;
+        }
+
         // A board that parsed the resume may have already filled this in with the
         // same value. Rewriting it risks clobbering a better value with our own,
         // and several boards clear dependent fields when one is retyped.
@@ -182,6 +196,21 @@ export function stepSignature(items) {
 }
 
 /** Accessible-name patterns for moving forward and for finishing. */
+/**
+ * A refusal, written out as if it were an answer.
+ *
+ * The resolver rejects these at both of its model paths, but this module is the
+ * only point every value from every tier and adapter passes through before it is
+ * typed — and on 28 July the literal string "unanswerable" went into a live form
+ * and was submitted to an employer, because the field was free text and so had
+ * no option list to fail against. Kept here, next to the other patterns, rather
+ * than imported: this file is a parameterised machine and owns no dependencies.
+ *
+ * Narrow on purpose — `N/A` and `None` are real answers to real questions and
+ * are not listed. See the matching note in answer/resolver.js.
+ */
+export const NON_ANSWER_VALUE = /^\s*(unanswerable|unknown|no answer|not specified|not provided|not available in (the )?profile|i (don'?t|do not) know|null|undefined|nil)\s*[.!]?\s*$/i;
+
 export const ADVANCE_NAME = /^\s*(next|continue|save and continue|proceed|review)/i;
 export const TERMINAL_NAME = /^\s*(submit|send application|finish|complete)/i;
 

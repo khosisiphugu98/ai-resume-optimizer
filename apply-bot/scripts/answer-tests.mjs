@@ -1,7 +1,8 @@
 // Phase 2 tests. The important ones are the anti-fabrication guarantees: these
 // answers go on real employment applications, so a wrong one has consequences
 // beyond a failing build. No network.
-import { resolveField, guardAnswer, unreadableQuestion } from '../src/answer/resolver.js';
+import { resolveField, guardAnswer, unreadableQuestion, isNonAnswer } from '../src/answer/resolver.js';
+import { NON_ANSWER_VALUE } from '../src/apply/wizard.js';
 import { resumeText } from '../src/answer/resume-context.js';
 import { extractSkill, matchProfile, normalisePunctuation, stripImperative, channelEmail } from '../src/answer/matchers.js';
 import { matchOption } from '../src/answer/options.js';
@@ -490,6 +491,35 @@ section('the email address follows the channel');
   // Without a LinkedIn address configured there is only one answer anywhere.
   t('one address means one answer',
     channelEmail(P, { ats: 'linkedin' }), P.identity.email);
+}
+
+// On 28 July the literal string "unanswerable" was typed into a live form and
+// submitted to an employer. The model had put the field in its `fills` array
+// with that as the *value* instead of in its `unanswerable` array; the field was
+// free text, so there was no option list to fail against, and guardAnswer has no
+// concept of a refusal. The whole design is park-don't-guess, and it answered a
+// question with its own word for "I can't".
+section('a refusal written as an answer never reaches a form');
+{
+  t('the exact string that was submitted', isNonAnswer('unanswerable'), true);
+  t('with trailing punctuation', isNonAnswer('Unanswerable.'), true);
+  t('programming nulls', isNonAnswer('undefined'), true);
+  t('a description of the profile, not an answer', isNonAnswer('not specified'), true);
+  t('spelled-out refusal', isNonAnswer("I don't know"), true);
+
+  // Narrow on purpose. These are things a candidate genuinely answers, and
+  // parking them would cost applications to prevent a harm that never happened.
+  t('"None" is a real answer to "list any convictions"', isNonAnswer('None'), false);
+  t('"N/A" is a real answer too', isNonAnswer('N/A'), false);
+  t('and so is "Not applicable"', isNonAnswer('Not applicable'), false);
+  t('a sentence containing the word is untouched',
+    isNonAnswer('None of my roles required a licence'), false);
+  t('an ordinary answer', isNonAnswer('Pretoria'), false);
+
+  // The wizard keeps its own copy — it is the only point every value from every
+  // tier and adapter passes through, and it owns no imports by design.
+  t('the fill layer blocks the same string', NON_ANSWER_VALUE.test('unanswerable'), true);
+  t('and lets a real answer through', NON_ANSWER_VALUE.test('Negotiable'), false);
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);

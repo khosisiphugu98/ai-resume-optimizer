@@ -10,6 +10,7 @@ import {
 } from '../src/email/extract.js';
 import { buildMimeMessage, toBase64Url } from '../src/email/mime.js';
 import { composeCoverEmail } from '../src/email/compose.js';
+import { verifyCoverLetter, extractClaims } from '../src/email/verify.js';
 import { draftEmailApplication, HOLD_MINUTES } from '../src/email/outbox.js';
 import { db, upsertJob, updateJob, outboxPending, cancelEmail, outboxDue } from '../src/db.js';
 
@@ -163,6 +164,58 @@ t('names the actual employer', body.includes('Hyve Mobile'), true);
 
 section('outbox — drafts hold, then send themselves');
 db.exec("DELETE FROM outbox");
+// The letter is the document a human reads first, and it was the one document
+// with no fabrication check. On 28 July, for an amplify5 posting whose
+// description asks for Azure and Microsoft Fabric, the model wrote "familiarity
+// with cloud technologies, including Azure" — a named product the profile has
+// never contained. The description is where the invented term came from, so the
+// description may not vouch for it.
+section('the covering letter cannot claim what the profile does not have');
+{
+  const P = {
+    identity: { firstName: 'Khosi', lastName: 'Siphugu', city: 'Pretoria', country: 'South Africa' },
+    current: { company: 'Hyve Mobile', title: 'AdOps Operations Assistant' },
+    education: [{ institution: 'University of Cape Town', degree: 'BBusSc', field: 'Management Studies' }],
+    certifications: [],
+    experience: [],
+    skills: { 'SQL': { confirmed: true }, 'Power BI': { confirmed: true }, 'cloud platforms': { confirmed: true } },
+  };
+  const JOB = { title: 'BI Engineer', company: 'amplify5' };
+  const opts = { job: JOB, docs: [] };
+
+  const azure = 'My proficiency in SQL and familiarity with cloud technologies, including Azure, align well with the role.';
+  const r1 = verifyCoverLetter(azure, P, opts);
+  t('the real fabrication is caught', r1.ok, false);
+  t('and it names the term', r1.unvouched.includes('Azure'), true);
+
+  const honest = 'I am currently AdOps Operations Assistant at Hyve Mobile. I work with SQL and Power BI daily.';
+  t('a letter making only supported claims passes', verifyCoverLetter(honest, P, opts).ok, true);
+
+  // The employer, the role and the candidate are named in every letter for
+  // reasons that have nothing to do with claiming a skill.
+  const named = 'I would like to apply for the BI Engineer position at Amplify 5. Kind regards, Khosi Siphugu.';
+  t('naming the company and role is not a claim', verifyCoverLetter(named, P, opts).ok, true);
+
+  // A phrase must not run across a full stop or a paragraph break.
+  t('claims do not span sentences',
+    extractClaims('We use Microsoft Fabric.\n\nAdditionally I report weekly.').includes('Microsoft Fabric.\n\nAdditionally'),
+    false);
+
+  // The evidence corpus vouches for what the CV says, even when the structured
+  // profile does not list it.
+  t('the CV can vouch for a claim the profile omits',
+    verifyCoverLetter('I have used Looker Studio for reporting.', P,
+      { job: JOB, docs: [{ text: 'Built dashboards in Looker Studio for campaign reporting.' }] }).ok,
+    true);
+
+  // The deterministic body is assembled from profile fields only, so it is the
+  // safe landing place when two model attempts both invent something.
+  const fb = await composeCoverEmail({ ...JOB, jd_text: '' }, {
+    ...P, identity: { ...P.identity, phone: '+27 82 820 4538', email: 'k@example.com' }, links: {},
+  }, {});
+  t('the fallback letter passes its own gate', verifyCoverLetter(fb, P, opts).ok, true);
+}
+
 db.exec("DELETE FROM events");
 db.exec("DELETE FROM jobs WHERE external_id LIKE 'em-%'");
 

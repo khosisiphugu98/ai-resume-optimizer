@@ -155,6 +155,9 @@ export async function resolveField(field, ctx) {
     try {
       const drafted = await draftAnswer(question, fieldType, options, ctx);
       if (drafted.value != null) {
+        if (isNonAnswer(drafted.value)) {
+          return { status: 'park', tier: 'llm', reason: `model returned "${String(drafted.value).trim()}", which is a refusal, not an answer`, ...base };
+        }
         const check = guardAnswer(question, drafted.value, ctx);
         if (check.ok) return { status: 'ok', tier: 'llm', value: drafted.value, ...base, ...(drafted.probable ? { probable: true } : {}) };
         // The model produced something the deterministic guard rejects. Park —
@@ -173,6 +176,29 @@ export async function resolveField(field, ctx) {
     reason: required ? 'no profile fact, no stored answer, and no LLM key' : 'optional field left unanswered',
   };
 }
+
+/**
+ * The words a model uses when it means "I cannot answer this".
+ *
+ * `batchMap` gives the model two channels — a `fills` array and an
+ * `unanswerable` array — and on 28 July it used the wrong one: it put
+ * "Portfolio / work samples" in `fills` with the *value* `"unanswerable"`.
+ * The field was free text, so there was no option list to fail against, and
+ * `guardAnswer` has no concept of a refusal, so the string was accepted as an
+ * ordinary answer, typed into the form, and submitted to an employer.
+ *
+ * A refusal expressed as prose is still a refusal. It parks.
+ *
+ * Deliberately narrow. `N/A`, `None` and `Not applicable` are **not** here:
+ * they are things a candidate genuinely answers ("List any accommodations you
+ * require" → "None"), and parking those would cost real applications to prevent
+ * a harm that never happened. What is here is the system's own vocabulary for
+ * absence — the schema keyword, the programming nulls, and phrases that describe
+ * the *profile's* state rather than answer the question.
+ */
+const NON_ANSWER = /^\s*(unanswerable|unknown|no answer|not specified|not provided|not available in (the )?profile|i (don'?t|do not) know|null|undefined|nil)\s*[.!]?\s*$/i;
+
+export const isNonAnswer = v => NON_ANSWER.test(String(v ?? ''));
 
 async function draftAnswer(question, fieldType, options, ctx) {
   const user = [
@@ -528,6 +554,12 @@ function settleModelValue(field, value, ctx) {
   const park = (tier, reason) => ({ status: 'park', tier, reason, ...base });
 
   if (value == null || value === '') return park('llm', 'model returned an empty answer');
+
+  // Checked before the option list, because a free-text field has no list to
+  // fail against — which is exactly how "unanswerable" reached an employer.
+  if (isNonAnswer(value)) {
+    return park('llm', `model returned "${String(value).trim()}", which is a refusal, not an answer`);
+  }
 
   // A select or radio answer must be one of the offered options. The model is told
   // to copy one character for character and mostly does; when it answers correctly

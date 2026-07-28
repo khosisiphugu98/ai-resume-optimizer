@@ -1,5 +1,7 @@
 import { callLLM, hasKey } from '../llm.js';
 import { summariseForLLM } from '../profile.js';
+import { verifyCoverLetter } from './verify.js';
+import { emit } from '../bus.js';
 
 const SYSTEM = `You write a short covering email for a job application, in the
 candidate's voice.
@@ -31,7 +33,7 @@ export async function composeCoverEmail(job, profile, spec) {
   let core;
 
   if (hasKey()) {
-    try {
+    const ask = async correction => {
       const out = await callLLM([
         { role: 'system', content: SYSTEM },
         { role: 'user', content:
@@ -40,10 +42,48 @@ export async function composeCoverEmail(job, profile, spec) {
             `JOB DESCRIPTION\n${String(job.jd_text || '').slice(0, 3000)}` +
             (spec.requiredBodyItems?.length
               ? `\n\nThe posting asks the email to state: ${spec.requiredBodyItems.join('; ')}`
-              : '') },
+              : '') +
+            (correction || '') },
       ], { maxTokens: 500, temperature: 0.4 });
-      core = String(out.body || '').trim();
-    } catch { /* fall through */ }
+      return String(out.body || '').trim();
+    };
+
+    try {
+      const draft = await ask();
+      const check = verifyCoverLetter(draft, profile, { job });
+
+      if (check.ok) {
+        core = draft;
+      } else {
+        // The prompt already forbids invention; saying so again achieves nothing.
+        // Naming the specific terms does — the model wrote "Azure" because the
+        // description asked for it, and it needs to be told that wanting a thing
+        // is not the same as the candidate having it.
+        emit({
+          jobId: job.id, stage: 'email', level: 'warn',
+          message: `Cover letter claimed ${check.unvouched.map(u => `"${u}"`).join(', ')} — not in the profile or CV. Rewriting.`,
+        });
+        const second = await ask(
+          `\n\nA previous draft claimed the following, which the candidate's profile and CV do NOT support: ` +
+          `${check.unvouched.join(', ')}. Do not name any tool, platform, vendor, certification or ` +
+          `methodology the profile does not list — not even to say the role requires it. Write the ` +
+          `letter again using only what the profile and CV actually contain.`,
+        );
+        const recheck = verifyCoverLetter(second, profile, { job });
+        if (recheck.ok) {
+          core = second;
+        } else {
+          // Two model attempts both invented something. Send the deterministic
+          // body instead — it is assembled from profile fields only, so it cannot
+          // claim anything the candidate does not have. A duller letter that is
+          // true beats a better one that is not.
+          emit({
+            jobId: job.id, stage: 'email', level: 'warn',
+            message: `Rewrite still claimed ${recheck.unvouched.map(u => `"${u}"`).join(', ')} — using the profile-only letter instead.`,
+          });
+        }
+      }
+    } catch { /* fall through to the deterministic body */ }
   }
 
   if (!core) core = fallbackBody(job, profile);
