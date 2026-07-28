@@ -104,20 +104,63 @@ export const collectFieldsInPage = (rootSelector) => {
       .trim();
 
     if (el.type === 'radio') {
-      const group = el.name;
-      if (!group || seenRadioGroups.has(group)) continue;
+      // What makes two radios the same question.
+      //
+      // The `name` attribute is the HTML answer and was the only one accepted
+      // here, so a group without one was skipped outright — `if (!group)
+      // continue`. LinkedIn's current form builder does exactly that: it renders
+      // each question as a <fieldset role="radiogroup"> whose inputs share a
+      // `urn:li:` id prefix and carry no name at all. Three required questions
+      // on job 280 were therefore never collected, the step was submitted with
+      // them blank, LinkedIn answered "This field is required" and re-rendered
+      // the same step, and the wizard reported "form did not advance past step
+      // 3". That is the largest single cause of this channel's 0/14 — not the
+      // answer layer, which had already filled every box it could see.
+      //
+      // So the group is the container when there is no name: the enclosing
+      // fieldset or [role=radiogroup]. It is tagged on first sight so the key is
+      // stable across re-collects, the same way selectorFor() reuses its tag —
+      // the wizard matches fields by uid between rounds and a fresh key would
+      // make an answered question look like a new one.
+      const container = el.closest('fieldset,[role="radiogroup"]');
+      let groupSelector;
+      let group = el.name;
+
+      if (group) {
+        groupSelector = `input[type="radio"][name="${CSS.escape(group)}"]`;
+      } else if (container) {
+        let key = container.getAttribute('data-bot-radiogroup');
+        if (!key) {
+          key = 'rg-' + Math.random().toString(36).slice(2, 10);
+          container.setAttribute('data-bot-radiogroup', key);
+        }
+        group = key;
+        groupSelector = `[data-bot-radiogroup="${key}"] input[type="radio"]`;
+      } else {
+        // No name and no container: nothing groups these, so the safest reading
+        // is one control on its own rather than a guess at its siblings.
+        group = selectorFor(el);
+        groupSelector = group;
+      }
+
+      if (seenRadioGroups.has(group)) continue;
       seenRadioGroups.add(group);
-      const radios = [...root.querySelectorAll(`input[type="radio"][name="${CSS.escape(group)}"]`)];
-      const fieldsetLegend = el.closest('fieldset')?.querySelector('legend')?.innerText.trim();
+
+      const radios = [...root.querySelectorAll(groupSelector)];
+      // The question sits in a legend on a classic fieldset and in a titled div
+      // on the form builder's. Both are the group's label, not the option's.
+      const groupLabel = container?.querySelector('legend, [data-test-form-builder-radio-button-form-component__title]')
+        ?.innerText.trim();
       out.push({
         kind: 'radio',
-        selector: `input[type="radio"][name="${CSS.escape(group)}"]`,
+        selector: groupSelector,
         name: group,
-        question: (fieldsetLegend || question || group).replace(/\s+/g, ' ').trim(),
+        question: (groupLabel || question || group).replace(/\s+/g, ' ').trim(),
         fieldType: 'radio',
         options: radios.map(r => (labelFor(r) || r.value || '').trim()).filter(Boolean),
         values: radios.map(r => r.value),
-        required: el.required || el.getAttribute('aria-required') === 'true',
+        required: el.required || el.getAttribute('aria-required') === 'true'
+          || container?.getAttribute('aria-required') === 'true',
         currentValue: radios.find(r => r.checked)?.value ?? null,
       });
       continue;

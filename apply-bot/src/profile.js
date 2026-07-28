@@ -113,6 +113,12 @@ export function unconfirmed(profile) {
   // "Johannesburg" on another. An empty value that reports itself as complete is
   // how a fabricated one reaches an employer.
   if (!profile.identity?.city) out.push('identity.city — empty (forms ask for it; the model guesses when it is blank)');
+  // 13.4% of postings ask for a portfolio or work samples, and an application
+  // that omits one the posting demanded is a wasted send — so those now route to
+  // manual_required. One URL turns that whole class back into an application.
+  if (!profile.links?.portfolio) {
+    out.push('links.portfolio — empty (13% of postings ask for work samples; those are held for you to do by hand)');
+  }
   if (profile.misc?.hasDriversLicense == null) out.push('misc.hasDriversLicense — unset (parks, and reads as a blocker when scoring)');
   if (!profile.misc?.startAvailability) out.push('misc.startAvailability — empty (asked as often as notice period)');
   if (profile.compensation?.expectedAnnual == null) {
@@ -166,6 +172,12 @@ export function editableGaps() {
   // reported rather than by hand-editing master-profile.json.
   if (!p.identity?.city) {
     rows.push({ path: 'identity.city', label: 'City you live in', value: '', type: 'text', group: 'identity' });
+  }
+  if (!p.links?.portfolio) {
+    rows.push({
+      path: 'links.portfolio', group: 'links', type: 'text', value: '',
+      label: 'Portfolio / work samples URL (13% of postings ask for one)',
+    });
   }
   if (p.misc?.hasDriversLicense == null) {
     rows.push({ path: 'misc.hasDriversLicense', label: 'Do you have a driver\'s licence?', value: 'false', type: 'bool', group: 'misc' });

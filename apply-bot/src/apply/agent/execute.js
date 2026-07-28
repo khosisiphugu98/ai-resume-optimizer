@@ -23,14 +23,33 @@ async function firstFrameLocator(page, build) {
   return null;
 }
 
+/**
+ * The ARIA role a planned field type is actually exposed as.
+ *
+ * `by: 'role'` used to build `getByRole('textbox')` whatever the field was, so
+ * a plan naming a radio group, a select or a checkbox could never locate it —
+ * the executor looked for a textbox with that accessible name and found
+ * nothing. On job 280 Claude correctly identified all six controls, three of
+ * them radio groups, and the plan still failed as "form did not advance"
+ * because half of what it had found was unreachable.
+ */
+const ROLE_FOR_TYPE = {
+  select: 'combobox',
+  radio: 'radiogroup',
+  checkbox: 'checkbox',
+  date: 'textbox',
+  textarea: 'textbox',
+};
+
 /** A plan field locator → a Playwright locator builder for one frame. */
-function fieldBuilder(loc) {
+function fieldBuilder(loc, type = 'text') {
+  const role = ROLE_FOR_TYPE[type] || 'textbox';
   return frame => {
     switch (loc.by) {
       case 'label': return frame.getByLabel(loc.value, { exact: false });
       case 'placeholder': return frame.getByPlaceholder(loc.value, { exact: false });
       case 'name': return frame.locator(`[name="${loc.value.replace(/"/g, '\\"')}"]`);
-      case 'role': return frame.getByRole('textbox', { name: loc.value });
+      case 'role': return frame.getByRole(role, { name: loc.value });
       case 'text': return frame.getByLabel(loc.value, { exact: false });
       default: return null;
     }
@@ -62,13 +81,44 @@ async function selectClosest(loc, value) {
   return m.option;
 }
 
+/**
+ * Check the option a value names, inside the group the plan located.
+ *
+ * `loc.check()` was called straight on the located element, which is right only
+ * when the plan happened to point at one radio. A plan describes a *question*,
+ * so the locator is the group — and checking a group does nothing.
+ */
+async function checkRadio(loc, value) {
+  const v = String(value);
+
+  const named = loc.getByRole('radio', { name: v }).first();
+  if (await named.count().catch(() => 0)) { await named.check({ force: true }); return v; }
+
+  const radios = loc.getByRole('radio');
+  const n = await radios.count().catch(() => 0);
+  // No radios inside it means the plan pointed at one, not at the group.
+  if (!n) { await loc.check({ force: true }); return v; }
+
+  const labels = [];
+  for (let i = 0; i < n; i++) {
+    const r = radios.nth(i);
+    const label = (await r.getAttribute('aria-label').catch(() => null))
+      || (await r.getAttribute('value').catch(() => null)) || '';
+    labels.push(label.trim());
+  }
+  const m = matchOption(v, labels, { semantic: true });
+  if (!m) throw new Error(`"${v}" is not one of: ${labels.join(' | ')}`);
+  await radios.nth(m.index).check({ force: true });
+  return m.option;
+}
+
 /** Apply one value to a plan-located control. Returns the landed value. */
 async function fillPlanField(item, value) {
   const loc = item.locator;
   switch (item.fieldType) {
     case 'select': return await selectClosest(loc, value);
     case 'checkbox': if (value === false || /^(no|false|unchecked)$/i.test(String(value))) await loc.uncheck(); else await loc.check(); return value;
-    case 'radio': await loc.check(); return value;
+    case 'radio': return await checkRadio(loc, value);
     default: await loc.fill(String(value)); return value;
   }
 }
@@ -97,7 +147,7 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
     const items = [];
     for (let i = 0; i < plan.fields.length; i++) {
       const f = plan.fields[i];
-      const loc = await firstFrameLocator(page, fieldBuilder(f.locator));
+      const loc = await firstFrameLocator(page, fieldBuilder(f.locator, f.type));
       if (!loc) continue;
 
       // Operator pin (Phase 4): a corrected answer for this vendor shape outranks

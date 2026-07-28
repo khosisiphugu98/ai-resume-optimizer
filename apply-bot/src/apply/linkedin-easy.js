@@ -3,7 +3,8 @@ import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
 import { bumpRate } from '../db.js';
-import { collectFieldsInPage, fillField, fromDomField, isSiteSearch } from './fields.js';
+import { isSiteSearch } from './fields.js';
+import { collectFields, fillCollected } from './external.js';
 import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
@@ -189,21 +190,32 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
   screenshots.push(await shot(page, job.id, 'step-0-open'));
 
   try {
+    // DOM first, accessibility tree when the DOM comes up short — the same rule
+    // and the same code the external adapter has used since it was written.
+    //
+    // Easy Apply was the one adapter with no fallback, so a control shape the
+    // DOM extractor cannot read was simply not there as far as this channel was
+    // concerned. That is how three required radio groups on job 280 came to be
+    // submitted blank. The immediate cause of that one is fixed in fields.js;
+    // this is so the next shape LinkedIn ships fails visibly rather than
+    // silently, which is what the external path already gets.
+    const easyApplyVendor = { formRoot: MODAL, a11y: false };
+
     const collect = async () => {
       await assertNoChallenge(page);
       const sel = await modalSelector(page);
       if (!sel) return [];
 
-      const fields = await page.evaluate(collectFieldsInPage, sel);
+      const { items } = await collectFields(page, sel, easyApplyVendor);
 
       // The resume upload is handled directly, not through the answer resolver.
-      for (const f of fields.filter(x => x.kind === 'file')) {
-        if (!resumePath || uploadedUids.has(f.selector)) continue;
-        uploadedUids.add(f.selector);
+      for (const item of items) {
+        if (item.role !== 'file' || !resumePath || uploadedUids.has(item.uid)) continue;
+        uploadedUids.add(item.uid);
         try {
-          await fillField(page, f, resumePath);
+          await fillCollected(page, item, resumePath);
           uploaded.push({
-            uid: f.selector, question: f.question,
+            uid: item.uid, question: item.question || 'Resume',
             value: path.basename(resumePath), tier: 'resume', kind: 'file',
           });
           await page.waitForTimeout(1500);
@@ -216,16 +228,14 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       // gone. Job 453 captured a "Search" textbox and a "Select language"
       // combobox as the application form; nothing was typed into them only
       // because the run was already stuck.
-      return fields
-        .filter(f => f.kind !== 'file' && f.question && !isSiteSearch(f.question))
-        .map(fromDomField);
+      return items.filter(i => i.role !== 'file' && i.question && !isSiteSearch(i.question));
     };
 
     const result = await runWizard({
       submit,
       collect,
       resolve: items => resolveFormBatch(items, ctx),
-      fill: (item, value) => fillField(page, item.field, value),
+      fill: (item, value) => fillCollected(page, item, value),
       // Read the whole application back before pressing submit. Easy Apply had
       // no such check: whatever the ladder produced went to the employer.
       mayFinish: preflightGate({

@@ -53,6 +53,25 @@ const FIXTURE = `<!DOCTYPE html><body><div class="jobs-easy-apply-modal">
     <label for="cover">Why do you want this role?</label>
     <textarea id="cover"></textarea>
   </div>
+  <!--
+    LinkedIn's current form builder, verified live on job 280 (JMR Software).
+    The radio inputs carry NO name attribute — the group is expressed by the
+    fieldset's role=radiogroup and by a shared urn:li: id prefix. Grouping on
+    the name attribute alone skipped these entirely, so three required questions
+    were invisible, the step was submitted with them blank, LinkedIn showed
+    "This field is required" and re-rendered, and the wizard reported "form did
+    not advance". That gap is the largest single cause of Easy Apply's 0/14.
+  -->
+  <fieldset role="radiogroup" data-test-form-builder-radio-button-form-component>
+    <div data-test-form-builder-radio-button-form-component__title>Do you have experience developing or working with Power BI semantic models?</div>
+    <input id="urn:li:fs-1-0" type="radio" value="Yes"><label for="urn:li:fs-1-0">Yes</label>
+    <input id="urn:li:fs-1-1" type="radio" value="No"><label for="urn:li:fs-1-1">No</label>
+  </fieldset>
+  <fieldset role="radiogroup" data-test-form-builder-radio-button-form-component>
+    <div data-test-form-builder-radio-button-form-component__title>Do you have experience contributing to data modelling or the design of data models?</div>
+    <input id="urn:li:fs-2-0" type="radio" value="Yes"><label for="urn:li:fs-2-0">Yes</label>
+    <input id="urn:li:fs-2-1" type="radio" value="No"><label for="urn:li:fs-2-1">No</label>
+  </fieldset>
   <input id="cv" type="file" aria-label="Upload resume">
   <input id="hidden-thing" type="hidden" value="x">
   <button id="btn" type="button">Not a field</button>
@@ -71,7 +90,23 @@ section('field extraction from an Easy Apply-shaped modal');
 const fields = await page.evaluate(collectFieldsInPage, '.jobs-easy-apply-modal');
 const byQ = q => fields.find(f => f.question === q);
 
-t('finds every visible field, skips hidden/buttons', fields.length, 8);
+t('finds every visible field, skips hidden/buttons', fields.length, 10);
+
+// The live failure: three required radio groups with no name attribute were
+// never collected, so the step was submitted blank and LinkedIn refused to
+// advance. The group is the fieldset, whether or not the inputs are named.
+section('a radio group LinkedIn did not give a name to');
+{
+  const q = 'Do you have experience developing or working with Power BI semantic models?';
+  const rg = byQ(q);
+  t('is collected at all', !!rg, true);
+  t('as one field, not two', fields.filter(f => f.question === q).length, 1);
+  t('with its options', rg?.options, ['Yes', 'No']);
+  t('and its title as the question', rg?.kind, 'radio');
+  t('both nameless groups are distinct',
+    new Set(fields.filter(f => f.kind === 'radio').map(f => f.selector)).size, 4);
+  t('a named group still groups on its name', !!byQ('Are you legally authorised to work in South Africa?'), true);
+}
 t('label[for] resolves the question', !!byQ('Email address'), true);
 t('reads the pre-filled value', byQ('Email address').currentValue, 'pre@filled.com');
 t('radio group collapses to one field', fields.filter(f => f.name === 'auth').length, 1);
@@ -90,6 +125,25 @@ t('  → landed in DOM', await page.inputValue('#phone'), '+27 82 000 0000');
 t('checks the right radio', await fillField(page, byQ('Do you require visa sponsorship?'), 'No'), 'No');
 t('  → No checked, Yes not', await page.evaluate(() => [document.getElementById('sp-n').checked, document.getElementById('sp-y').checked]), [true, false]);
 
+// The group has no name, so the selector is the tagged fieldset. Filling one
+// must not reach into the other — they offer identical Yes/No options and are
+// told apart only by their container.
+t('checks a radio in a nameless group',
+  await fillField(page, byQ('Do you have experience developing or working with Power BI semantic models?'), 'Yes'), 'Yes');
+t('  → the right group, and only that group',
+  await page.evaluate(() => [
+    document.getElementById('urn:li:fs-1-0').checked,
+    document.getElementById('urn:li:fs-2-0').checked,
+    document.getElementById('urn:li:fs-2-1').checked,
+  ]), [true, false, false]);
+t('and the second group answers independently',
+  await fillField(page, byQ('Do you have experience contributing to data modelling or the design of data models?'), 'No'), 'No');
+t('  → without disturbing the first',
+  await page.evaluate(() => [
+    document.getElementById('urn:li:fs-1-0').checked,
+    document.getElementById('urn:li:fs-2-1').checked,
+  ]), [true, true]);
+
 t('selects by label', await fillField(page, byQ('What is your notice period?'), '30 days'), '30 days');
 t('  → select value set', await page.inputValue('#notice'), '30 days');
 
@@ -107,7 +161,7 @@ t('a missing root collects no fields',
 t('an explicit body root still works',
   (await page.evaluate(collectFieldsInPage, 'body')).length > 0, true);
 t('the modal root is unaffected',
-  (await page.evaluate(collectFieldsInPage, '.jobs-easy-apply-modal')).length, 8);
+  (await page.evaluate(collectFieldsInPage, '.jobs-easy-apply-modal')).length, 10);
 
 section('the site\'s own chrome is not a screening question');
 t('LinkedIn\'s header search', isSiteSearch('Search'), true);
