@@ -41,7 +41,8 @@ const id = profile.identity || {};
  * disagrees with what the candidate actually said about themselves.
  */
 function concerns(rec) {
-  const out = [];
+  const out = [];    // worth a person's attention
+  const notes = [];  // worth seeing, not worth alarm
 
   if (rec.outcome === 'submitted_unconfirmed') {
     out.push('the confirmation page was not recognised — nobody knows whether this arrived');
@@ -55,9 +56,18 @@ function concerns(rec) {
     out.push(`only ${rec.fieldCount} field(s) filled — the form may not have been read properly`);
   }
 
-  const inferred = (rec.fields || []).filter(f => f.decidedBy === 'llm' || f.probable);
-  for (const f of inferred) {
-    out.push(`inferred, not known: ${JSON.stringify(f.question)} → ${JSON.stringify(f.value)}`);
+  // Two different things wear the `probable` flag, and conflating them buries
+  // the one that matters. A model-written answer is the machine speaking for
+  // the candidate. A known value matched to one of the form's own options by
+  // interpretation — "South Africa" onto "South Africa (+27)" — is not a guess
+  // about the candidate at all, and flagging it at the same volume on every
+  // submission trains the reader to skip the warnings.
+  for (const f of rec.fields || []) {
+    if (f.decidedBy === 'llm') {
+      out.push(`written by the model: ${JSON.stringify(f.question)} → ${JSON.stringify(f.value)}`);
+    } else if (f.probable) {
+      notes.push(`fitted to the form's options: ${JSON.stringify(f.question)} → ${JSON.stringify(f.value)}`);
+    }
   }
 
   // Cross-check the handful of facts that have exactly one right answer. A
@@ -66,7 +76,12 @@ function concerns(rec) {
   const check = (label, sent, truth) => {
     if (!sent || !truth) return;
     const norm = s => String(s).toLowerCase().replace(/[^a-z0-9@.]/g, '');
-    if (norm(sent) !== norm(truth)) out.push(`${label} sent as ${JSON.stringify(sent)}, profile says ${JSON.stringify(truth)}`);
+    if (norm(sent) === norm(truth)) return;
+    out.push(`${label} sent as ${JSON.stringify(sent)}, profile says ${JSON.stringify(truth)}`
+      // Contact details are the one category where being wrong is silent and
+      // total: the employer replies into an inbox nobody is watching, and the
+      // application reads as one that was never followed up.
+      + (label === 'email' ? ' — replies to this application will not reach the monitored inbox' : ''));
   };
   for (const f of rec.fields || []) {
     const q = String(f.question || '').toLowerCase();
@@ -75,7 +90,7 @@ function concerns(rec) {
     else if (/last name|surname/.test(q)) check('last name', f.value, id.lastName);
   }
 
-  return out;
+  return { out, notes };
 }
 
 function render(rec) {
@@ -98,7 +113,9 @@ function render(rec) {
     console.log(`        ${String(f.value ?? '').replace(/\s+/g, ' ').slice(0, 140)}`);
   }
 
-  for (const c of concerns(rec)) console.log(C.yellow(`  ⚠ ${c}`));
+  const { out, notes } = concerns(rec);
+  for (const n of notes) console.log(C.dim(`  · ${n}`));
+  for (const c of out) console.log(C.yellow(`  ⚠ ${c}`));
 }
 
 const seen = new Set();
