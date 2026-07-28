@@ -522,5 +522,139 @@ section('a refusal written as an answer never reaches a form');
   t('and lets a real answer through', NON_ANSWER_VALUE.test('Negotiable'), false);
 }
 
+// A screener question names the field you work in, not a product you have used.
+// Extracting nothing answered the question from the confirmed total; extracting
+// something the profile did not list verbatim parked it. So the better the
+// extractor worked the more applications died — three of the Easy Apply parks on
+// 28 July were this, and one required park abandons the whole application.
+section('years of experience in a field, as opposed to with a tool (D1)');
+{
+  // Titles and studies are what say which field this is. The tool side of the
+  // line is unchanged: one skill entry is not a career.
+  const M = {
+    ...P,
+    current: { company: 'Hyve Mobile', title: 'AdOps Operations Assistant', totalYearsExperience: 3, confirmed: true },
+    experience: [
+      { title: 'AdOps Operations Assistant', company: 'Hyve Mobile', start: '2023', end: 'Present' },
+      { title: 'Social Media & Advertising Intern', company: 'AfroStory', start: '2022', end: '2023' },
+      { title: 'Marketing Assistant', company: 'Markham', start: '2021', end: '2022' },
+    ],
+    education: [{ institution: 'UCT', degree: 'BBusSc', field: 'Marketing, Statistics & Quantitative Methods', end: '2020' }],
+    skills: {
+      SQL: { years: 3, confirmed: true },
+      'App Marketing': { years: 4, confirmed: true },
+      'data analysis techniques': { years: null, confirmed: true },
+      'data validation': { years: null, confirmed: true },
+      'exploratory data analysis': { years: null, confirmed: true },
+      'data engineering': { years: null, confirmed: true },
+      'root cause analysis': { years: null, confirmed: true },
+      AWS: { years: null, confirmed: true },
+    },
+  };
+  const yrs = q => matchProfile(M, { question: q });
+
+  t('a domain in the candidate\'s own titles',
+    yrs('How many years of Marketing experience do you currently have?')?.value, '3');
+  t('a compound domain — either half is enough',
+    yrs('How many years of Marketing and Advertising experience do you currently have?')?.value, '3');
+  t('a modifier that narrows nothing is dropped',
+    yrs('How many years of Online Media experience do you currently have?')?.value, '3');
+  t('a domain spread across the confirmed skills',
+    yrs('How many years of work experience do you have in data analysis and data profiling?')?.value, '3');
+  t('a derived answer is flagged for review',
+    yrs('How many years of Marketing experience do you currently have?')?.probable, true);
+
+  // The reason this is not a blanket fallback.
+  t('an unknown technology still parks',
+    !!yrs('How many years of experience do you have with Kubernetes?')?.park, true);
+  t('a confirmed skill with no years still parks — one entry is not a field',
+    !!yrs('How many years of experience do you have with AWS?')?.park, true);
+  t('a task description is not a field',
+    !!yrs('How many years of work experience in creating and maintaining Source to Target mappings?')?.park, true);
+
+  // The bug the first attempt shipped: four years of App Marketing is not four
+  // years of Marketing. A narrower skill's number may not answer a broader
+  // question — only a suffix that narrows nothing may be ignored.
+  t('a narrower skill does not answer a broader question',
+    yrs('How many years of Marketing experience do you currently have?')?.value, '3');
+  t('a generic suffix does, when it carries a number',
+    matchProfile({ ...M, skills: { 'data analysis techniques': { years: 2, confirmed: true } } },
+      { question: 'How many years of experience do you have with data analysis?' })?.value, '2');
+
+  t('an exact confirmed skill is unchanged, and not flagged',
+    yrs('How many years of experience do you have with SQL?')?.probable, undefined);
+  t('a yes/no threshold reads the same ladder',
+    matchProfile(M, { question: 'Do you have 2 years of Marketing experience?', options: ['Yes', 'No'] })?.value, 'Yes');
+}
+
+// A marketing opt-in was answered with the candidate's email address at tier
+// profile, because the matcher fires on the word "email" and could not tell a
+// request for an address from an offer to send newsletters.
+section('an "email" label that is an offer, not a question (D10)');
+{
+  const ask = q => matchProfile(P, { question: q, options: ['Yes', 'No'] });
+  t('the live label that opted the candidate in',
+    ask("Email me about other job openings within the Booking Holding's entities and recruitment-related newsletters")?.matcher,
+    'consent');
+  t('and it declines',
+    ask("Email me about other job openings and recruitment-related newsletters")?.value, 'No');
+  t('a real address question is untouched',
+    matchProfile(P, { question: 'Email address' })?.matcher, 'email');
+  t('so is "Contact email"', matchProfile(P, { question: 'Contact email' })?.value, 'k@example.com');
+  t('and "Enter your e-mail"', matchProfile(P, { question: 'Enter your e-mail' })?.value, 'k@example.com');
+}
+
+// Two legally meaningful consents were granted on the candidate's behalf by a
+// language model with nothing in the profile behind either. The defaults it
+// chose were defensible; they were the model's defaults, not the candidate's.
+section('consent comes from the profile, never from the model (D11)');
+{
+  const YN = ['Yes', 'No'];
+  const say = (q, consent) => matchProfile({ ...P, consent }, { question: q, options: YN });
+
+  t('third-party sharing defaults to no',
+    say('Do you agree we may share your data with third parties?')?.value, 'No');
+  t('SMS updates default to no',
+    say('Do you allow us to provide you TEXT/SMS updates?')?.value, 'No');
+  t('a talent pool defaults to no',
+    say('May we keep your details on file for future roles?')?.value, 'No');
+  // Consenting to have your application read is what applying is. Answering "no"
+  // there would withdraw the application in the act of making it.
+  t('processing your application defaults to yes',
+    say('I consent to the processing of my personal data in line with the privacy policy')?.value, 'Yes');
+  t('an unset preference is flagged so it gets settled once',
+    say('Do you allow us to provide you TEXT/SMS updates?')?.probable, true);
+
+  t('the profile overrides the default',
+    say('Do you allow us to provide you TEXT/SMS updates?', { smsUpdates: true })?.value, 'Yes');
+  t('and a stated preference is not flagged',
+    say('Do you agree we may share your data with third parties?', { dataSharing: false })?.probable, undefined);
+
+  // Asked twice in one batch on the same posting, the model answered "No" once
+  // and parked once. Neither was a decision anybody made.
+  t('an auditor-independence attestation always parks',
+    !!matchProfile(P, { question: "To avoid any impairment of our parent company's independent auditor, Deloitte, please confirm", options: YN })?.park, true);
+
+  t('the model may not answer a consent question either',
+    guardAnswer('Do you agree we may share your data with third parties?', 'Yes', ctx).ok, false);
+  t('a word overlapping is not a consent question',
+    matchProfile(P, { question: 'Are you willing to relocate?', options: YN })?.matcher, 'relocate');
+}
+
+// The parentheses are one vendor's house style, not the format. Meridial's list
+// carried none, so the control was never recognised as a dialling code, the
+// country went in as bare text, no option matched, and the application parked.
+section('a dialling-code list without parentheses (D9)');
+{
+  const BARE = ['United States +1', 'Åland Islands +358', 'South Africa +27'];
+  t('recognised as a code list',
+    matchProfile(P, { question: 'Phone country code', options: BARE })?.value, 'South Africa');
+  t('and the country fits the option',
+    matchOption('South Africa', BARE, { semantic: true })?.option, 'South Africa +27');
+  t('the parenthesised format still works',
+    matchProfile(P, { question: 'Phone country code', options: ['South Africa (+27)', 'United States (+1)'] })?.value,
+    'South Africa');
+}
+
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

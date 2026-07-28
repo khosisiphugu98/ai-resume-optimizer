@@ -119,8 +119,33 @@ export function unconfirmed(profile) {
     out.push('compensation.expectedAnnual — unset (a form demanding a number cannot take "Negotiable")');
   }
 
+  // Permissions the candidate grants an employer. Unset does not park — the
+  // matcher falls back to the privacy-preserving answer — but it does mean a
+  // model was one missing matcher away from deciding these, which is how two
+  // legally meaningful consents were granted on a live application.
+  for (const key of CONSENT_KEYS) {
+    if (typeof profile.consent?.[key] !== 'boolean') {
+      out.push(`consent.${key} — unset (answered with the privacy-preserving default until you say otherwise)`);
+    }
+  }
+
   return out;
 }
+
+/**
+ * The permissions an application form asks for, and what each one means in plain
+ * words. Kept here rather than in the answer layer because they are facts about
+ * the candidate, editable in the same place as everything else about them.
+ */
+export const CONSENT_KEYS = ['dataProcessing', 'dataSharing', 'marketingEmail', 'smsUpdates', 'talentPool'];
+
+const CONSENT_LABELS = {
+  dataProcessing: 'Allow employers to process your application data?',
+  dataSharing: 'Allow employers to share your data with third parties?',
+  marketingEmail: 'Receive marketing email and newsletters from employers?',
+  smsUpdates: 'Receive text/SMS updates from employers?',
+  talentPool: 'Allow employers to keep your details for future roles?',
+};
 
 /** Unconfirmed fields as editable rows for the dashboard. */
 export function editableGaps() {
@@ -150,6 +175,14 @@ export function editableGaps() {
   }
   if (p.compensation?.expectedAnnual == null) {
     rows.push({ path: 'compensation.expectedAnnual', label: `Expected annual salary (${p.compensation?.currency || 'ZAR'})`, value: '', type: 'number', group: 'compensation' });
+  }
+
+  for (const key of CONSENT_KEYS) {
+    if (typeof p.consent?.[key] === 'boolean') continue;
+    rows.push({
+      path: `consent.${key}`, label: CONSENT_LABELS[key],
+      value: String(key === 'dataProcessing'), type: 'bool', group: 'consent',
+    });
   }
 
   for (const [name, meta] of Object.entries(p.skills || {})) {

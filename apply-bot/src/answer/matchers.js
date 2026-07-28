@@ -1,4 +1,4 @@
-import { skillYears, authorisationFor } from '../profile.js';
+import { skillYears, authorisationFor, normaliseSkill } from '../profile.js';
 
 const ok = (value, extra = null) => ({ value, source: 'profile', ...extra });
 const park = reason => ({ park: reason });
@@ -41,7 +41,7 @@ export function meetsYearsThreshold(profile, question) {
 
   const skill = extractSkill(question);
   if (skill) {
-    const { value } = skillYears(profile, skill);
+    const { value } = yearsForPhrase(profile, skill);
     return typeof value === 'number' ? value >= need : false;
   }
 
@@ -49,9 +49,33 @@ export function meetsYearsThreshold(profile, question) {
   return typeof total === 'number' ? total >= need : null;
 }
 
-/** "South Africa (+27)" — the shape of a country-code option. */
-const isDiallingCode = opt => /\(\+\d{1,4}\)|^\+\d{1,4}$/.test(String(opt));
+/**
+ * "South Africa (+27)" — the shape of a country-code option.
+ *
+ * The parentheses are one vendor's house style, not the format. Meridial's list
+ * reads `United States +1 | Afghanistan +93 | ... | South Africa +27`, which the
+ * parenthesised pattern missed entirely: the control was not recognised as a
+ * dialling-code list, `identity.country` went in as a bare "South Africa", no
+ * option matched, and a live application parked. Match the code wherever it sits
+ * in the label, bracketed or not.
+ */
+const isDiallingCode = opt => /\(?\+\d{1,4}\)?(\s|$)/.test(String(opt).trim());
 const isEmailLike = opt => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(String(opt).trim());
+
+/**
+ * A label that says the form will email *you*, rather than asking for your
+ * address.
+ *
+ * On the Agoda submission, "Email me about other job openings within the Booking
+ * Holding's entities and recruitment-related newsletters" was answered
+ * `mksiphugu@gmail.com` at tier `profile` — the email matcher fires on the word
+ * "email" and had no way to tell a request for an address from an offer to send
+ * marketing. The candidate was opted into a recruitment newsletter by a keyword
+ * match. Same shape as the city-vs-country overlap: the matcher declines a label
+ * that merely contained its word.
+ */
+const EMAIL_IS_AN_OFFER =
+  /\b(e-?mail|text|contact|notify|inform|update|send|keep)\s+me\b|\bnewsletter|\bmailing list\b|\bsubscribe|\bopt[- ]?in\b|\bjob alerts?\b|\bmarketing (e-?mail|communication|material)|\bpromotional\b|\b(would you like to|do you want to|happy to)\s+(receive|be)\b|\breceive\s+(e-?mails?|updates|communications|news|information)\b/i;
 
 /**
  * Tier 1 of the resolution ladder — deterministic profile lookups. Anything
@@ -73,7 +97,110 @@ export function channelEmail(p, ctx = {}) {
   return (ctx.ats === 'linkedin' && linkedin) ? linkedin : p.identity?.email;
 }
 
+/**
+ * The kinds of permission a form asks for, and the profile key that settles each.
+ *
+ * Ordered narrowest-first: a marketing opt-in and an SMS opt-in are both worded
+ * as data permissions, so the specific reading has to be tried before the
+ * general one.
+ *
+ * `fallback` is the answer when the profile says nothing, and it is the
+ * privacy-preserving one in every case but `dataProcessing`. Consenting to have
+ * your application read is what applying *is* — answering "no" there would
+ * withdraw the application in the act of making it — whereas nothing about
+ * applying requires agreeing to a newsletter, an SMS list, or having your CV
+ * passed to third parties.
+ */
+export const CONSENT_KINDS = [
+  {
+    key: 'marketingEmail',
+    fallback: false,
+    what: 'marketing email about other roles',
+    test: /\b(e-?mail|contact|notify|inform|send|keep)\s+me\b|\bnewsletter|\bmailing list\b|\bsubscribe\b|\bjob alerts?\b|\bmarketing (e-?mail|communication|material)|\bpromotional\b|\breceive\s+(e-?mails?|updates|communications|news)\b/i,
+  },
+  {
+    key: 'smsUpdates',
+    fallback: false,
+    what: 'text message / SMS updates',
+    test: /\b(text|sms|whatsapp)\b.{0,40}\b(update|message|alert|notification|communication)|\breceive\s+(text|sms)\b|\btext\/sms\b/i,
+  },
+  {
+    key: 'talentPool',
+    fallback: false,
+    what: 'keeping your details on file for future roles',
+    test: /\btalent (pool|community|network|pipeline)\b|\b(keep|retain|store|hold|save)\b.{0,40}\b(details|data|cv|resume|résumé|profile|application|record)\b.{0,50}\b(future|other|further|later|upcoming)\b|\bconsider(ed)?\b.{0,30}\b(other|future|similar)\s+(roles?|positions?|opportunit|vacanc)/i,
+  },
+  {
+    key: 'dataSharing',
+    fallback: false,
+    what: 'sharing your personal data with third parties',
+    test: /\bthird[- ]part(y|ies)\b|\b(share|shared|sharing|disclose|disclosed|transfer|transferred|provide)\b.{0,60}\b(partners?|affiliates?|group companies|other entities|subsidiar|vendors?|agents?|clients?)\b/i,
+  },
+  {
+    key: 'dataProcessing',
+    fallback: true,
+    what: 'processing your application data',
+    test: /\b(consent|agree|permission|authorise|authorize|acknowledge)\b.{0,80}\b(process|processing|use|using|collect|collection|stor(e|ing|age)|retain|handling)\b.{0,40}\b(personal (data|information)|my (data|information)|your (data|information))\b|\bprivacy (policy|notice|statement)\b|\bdata protection\b|\bpopia\b|\bgdpr\b/i,
+  },
+];
+
+/** What the profile says about one kind of permission, or null when unset. */
+export function consentPreference(profile, key) {
+  const v = profile?.consent?.[key];
+  return typeof v === 'boolean' ? v : null;
+}
+
+/**
+ * Attestations about the candidate's relationships and conflicts of interest.
+ *
+ * Not consent and not preference — statements of fact with legal weight, about
+ * things the profile does not record. Agoda asked the same auditor-independence
+ * question on two postings in one batch: the model answered "No" on one and
+ * parked on the other. Neither was a decision anyone made. These always park, so
+ * the operator answers once and the answer bank carries it everywhere after.
+ */
+const ATTESTATION =
+  /\bindependent auditor\b|\bauditor independence\b|\bimpairment of\b.{0,40}\bauditor\b|\bconflicts? of interest\b|\brelated[- ]part(y|ies)\b|\b(are|is) (you|any)\b.{0,60}\b(related to|relative of|family member of)\b.{0,40}\b(employee|director|officer|shareholder)\b/i;
+
 export const MATCHERS = [
+  // ---- Consent and attestation — first, deliberately ------------------------
+  //
+  // These run ahead of everything else because the cost of a looser matcher
+  // winning is not a wrong answer in a field, it is a permission granted on the
+  // candidate's behalf. "Email me about other job openings" was answered with an
+  // email address; two legally meaningful consents were answered "Yes" by a
+  // language model with nothing in the profile behind either. A consent question
+  // is answered from the consent block or it is not answered.
+  {
+    name: 'consent',
+    // Built from the kinds themselves rather than written out again. A separate
+    // broad pattern is a second place to keep in step, and it was already out of
+    // step on the first attempt: "May we keep your details on file for future
+    // roles?" matched the talent-pool kind and never reached it, because the
+    // gate in front of it mentioned none of those words.
+    test: new RegExp(CONSENT_KINDS.map(k => `(?:${k.test.source})`).join('|'), 'i'),
+    resolve: (p, ctx) => {
+      const q = ctx.question || '';
+      const kind = CONSENT_KINDS.find(k => k.test.test(q));
+      if (!kind) return null;   // a word overlapped; this is not a permission question
+
+      const stated = consentPreference(p, kind.key);
+      if (stated != null) return ok(yesNo(stated, ctx));
+
+      // Nothing in the profile. Take the privacy-preserving answer rather than
+      // asking a model to have a preference on the candidate's behalf, and flag
+      // it so it is seen once and can be settled in the profile for good.
+      return ok(yesNo(kind.fallback, ctx), { probable: true });
+    },
+  },
+  {
+    name: 'attestation',
+    test: ATTESTATION,
+    resolve: () => park(
+      'this is a legal attestation about relationships or conflicts of interest, ' +
+      'and the profile records no answer — answer it once here and it will be reused'),
+  },
+
   // ---- Identity -----------------------------------------------------------
   { name: 'firstName', test: /^(first|given)\s*name$|^forename/, resolve: p => ok(p.identity.firstName) },
   { name: 'lastName',  test: /^(last|family|sur)\s*name$|^surname/, resolve: p => ok(p.identity.lastName) },
@@ -94,6 +221,11 @@ export const MATCHERS = [
     name: 'email',
     test: /e[- ]?mail/,
     resolve: (p, ctx) => {
+      // "Email me about other openings" is not asking for an address. Declining
+      // lets the search continue to the consent matcher below, which is where a
+      // marketing opt-in actually belongs.
+      if (EMAIL_IS_AN_OFFER.test(ctx.question || '')) return null;
+
       const mine = channelEmail(p, ctx);
       const opts = ctx.options || [];
       if (!opts.length || !opts.every(isEmailLike)) return ok(mine);
@@ -192,11 +324,13 @@ export const MATCHERS = [
         if (typeof total === 'number') return ok(String(total));
         return park('total years of experience is not confirmed in the profile');
       }
-      const { value, reason, inferred } = skillYears(p, skill);
-      if (value == null) return park(`years of experience with "${skill}" — ${reason}`);
-      // A figure derived from the CV timeline answers the question, but is flagged
-      // so it is seen once before an application carrying it submits itself.
-      return ok(String(value), inferred ? { probable: true } : null);
+      const hit = yearsForPhrase(p, skill);
+      if (hit.value == null) return park(`years of experience with "${skill}" — ${hit.reason}`);
+      // A figure derived from the CV timeline, from a related skill entry, or from
+      // the candidate's field rather than the exact phrase asked about, answers the
+      // question — but is flagged so it is seen once before an application
+      // carrying it submits itself unattended.
+      return ok(String(hit.value), hit.exact ? null : { probable: true });
     },
   },
 
@@ -315,6 +449,206 @@ export function extractSkill(question) {
   if (GENERIC_EXPERIENCE_QUALIFIERS.test(skill)) return null;
 
   return skill;
+}
+
+// ---------------------------------------------------------------------------
+// Years of experience in a *field*, as opposed to with a *tool*.
+//
+// The matcher used to be punished for succeeding. Extracting nothing from
+// "How many years of experience do you have?" routed the question to the
+// confirmed total and answered it; extracting something the profile does not
+// list verbatim parked it with no fallback. LinkedIn's screener questions name a
+// domain rather than a tool — "Marketing and Advertising", "Online Media",
+// "data analysis and data profiling" — so the better the extractor worked, the
+// more applications died. Three of this channel's parks on 28 July were that,
+// and one required park abandons the whole application.
+//
+// The distinction that has to be preserved is domain versus tool. A Marketing
+// Data Analyst with three confirmed years can answer "how many years of
+// Marketing experience"; nobody can answer "how many years of Kubernetes" from
+// that same fact. Both sides of the line are derived from the profile itself
+// rather than from a list somebody has to maintain.
+// ---------------------------------------------------------------------------
+
+/** How many distinct confirmed skills must carry a word before it reads as a field. */
+const DOMAIN_SKILL_SPREAD = 3;
+
+/**
+ * Adjectives that describe the medium or the seriousness of work, not its
+ * subject. "Digital Marketing" is Marketing; "Online Media" is Media. Dropping
+ * these narrows nothing, and keeping them fails a domain the candidate plainly
+ * works in on a word that carries no content.
+ */
+const NON_NARROWING = new Set([
+  'online', 'digital', 'general', 'overall', 'broad', 'commercial', 'professional',
+  'practical', 'direct', 'modern', 'core', 'full', 'related', 'relevant', 'applicable',
+  'hands', 'on', 'end', 'strategic', 'operational',
+]);
+
+const PHRASE_STOPWORDS = new Set([
+  'and', 'or', 'with', 'in', 'of', 'for', 'the', 'a', 'an', 'to', 'at', 'as', 'by',
+  'using', 'use', 'work', 'working', 'experience', 'exp', 'years', 'year', 'your',
+  'you', 'do', 'have', 'has', 'role', 'roles', 'field', 'area', 'industry', 'sector',
+  'environment', 'environments', 'space', 'domain', 'discipline',
+]);
+
+const wordsOf = text => String(text).toLowerCase().split(/[^a-z0-9+#]+/i).filter(Boolean);
+
+/** The words in a phrase that actually name something. */
+function contentWords(phrase) {
+  return wordsOf(phrase).filter(w => w.length >= 3 && !PHRASE_STOPWORDS.has(w) && !NON_NARROWING.has(w));
+}
+
+/**
+ * Two words naming the same thing.
+ *
+ * A five-character prefix is enough morphology for the cases that come up —
+ * analysis/analytics/analytical, market/marketing, advertise/advertising — and
+ * short enough to write down. Words under six characters must match outright,
+ * because a five-letter prefix of a five-letter word is the word.
+ */
+const sameWord = (a, b) =>
+  a === b || (a.length >= 6 && b.length >= 6 && a.slice(0, 5) === b.slice(0, 5));
+
+/** Every word the candidate's own job titles and fields of study are made of. */
+function roleWords(profile) {
+  const text = [
+    profile.current?.title,
+    ...(profile.experience || []).map(e => e.title),
+    ...(profile.education || []).map(e => e.field),
+  ].filter(Boolean).join(' ');
+  return wordsOf(text).filter(w => w.length >= 3 && !PHRASE_STOPWORDS.has(w));
+}
+
+/** word → how many distinct confirmed skills mention it. */
+function skillWordSpread(profile) {
+  const spread = new Map();
+  for (const [name, meta] of Object.entries(profile.skills || {})) {
+    if (name.startsWith('_') || !meta || typeof meta !== 'object' || !meta.confirmed) continue;
+    for (const w of new Set(wordsOf(name))) {
+      if (w.length < 3) continue;
+      spread.set(w, (spread.get(w) || 0) + 1);
+    }
+  }
+  return spread;
+}
+
+/**
+ * Whether a phrase names the field the candidate works in.
+ *
+ * Two independent kinds of evidence, and every content word needs one of them:
+ * the word appears in their own job titles or fields of study, or it runs across
+ * enough separate confirmed skills to be a subject rather than a product. A tool
+ * shows up once — `AWS` is one entry, `Kubernetes` is none — while a field shows
+ * up everywhere: `data` spans a dozen skills, `analysis` several more.
+ *
+ * That asymmetry is the whole control. "How many years of AWS?" still parks even
+ * though AWS is a confirmed skill, because one entry is not a career.
+ */
+export function isDomainPhrase(profile, phrase) {
+  const words = contentWords(phrase);
+  if (!words.length) return false;
+
+  const roles = roleWords(profile);
+  const spread = skillWordSpread(profile);
+
+  return words.every(w =>
+    roles.some(r => sameWord(r, w)) ||
+    (spread.get(w) || 0) >= DOMAIN_SKILL_SPREAD);
+}
+
+/** "Marketing and Advertising" → ["Marketing", "Advertising"]. */
+const splitCompound = phrase => String(phrase)
+  .split(/\s+(?:and|&|\+)\s+|\s*\/\s*|\s*,\s*/i)
+  .map(s => s.trim())
+  .filter(s => s.length > 1);
+
+/**
+ * Words that name no subject of their own, so a skill entry ending in one is the
+ * same skill as the entry without it. "Data analysis techniques" is data
+ * analysis; "marketing technology" is not marketing.
+ */
+const GENERIC_SKILL_SUFFIX = new Set([
+  'technique', 'techniques', 'tool', 'tools', 'skill', 'skills', 'software',
+  'method', 'methods', 'methodology', 'methodologies', 'principle', 'principles',
+  'fundamentals', 'practice', 'practices', 'concepts', 'knowledge', 'expertise',
+  'experience', 'work', 'ability', 'abilities', 'basics',
+]);
+
+/**
+ * A confirmed skill that says the same thing the question asked, with a years
+ * figure on it.
+ *
+ * Deliberately hard to satisfy, because the two obvious looser rules are both
+ * wrong in the same direction — they let a number that is true of something
+ * narrow answer a question about something broad. Matching a skill *inside* the
+ * question would let three years of "Power BI" answer "Power BI Premium".
+ * Matching the question anywhere inside a skill would let four years of
+ * "App Marketing" answer "how many years of Marketing" — which is what it did
+ * on the first run of this code.
+ *
+ * So the question must be the *start* of the skill's name, and everything the
+ * skill adds after it must be a word that narrows nothing.
+ */
+function skillYearsBySubstring(profile, phrase) {
+  const want = normaliseSkill(phrase);
+  if (want.length < 4) return null;
+  for (const [name, meta] of Object.entries(profile.skills || {})) {
+    if (name.startsWith('_') || !meta || typeof meta !== 'object') continue;
+    const have = normaliseSkill(name);
+    if (have === want || !have.startsWith(`${want} `)) continue;
+    const tail = have.slice(want.length).trim().split(/\s+/);
+    if (!tail.every(w => GENERIC_SKILL_SUFFIX.has(w))) continue;
+    if (!meta.confirmed || typeof meta.years !== 'number') continue;
+    return { value: meta.years, name, inferred: meta.yearsSource === 'inferred' };
+  }
+  return null;
+}
+
+/**
+ * Years of experience with whatever the question named.
+ *
+ * The ladder, narrowest first: the phrase as a confirmed skill; each half of a
+ * compound phrase as one; a confirmed skill that says something more specific;
+ * and finally the candidate's confirmed total, but only when the phrase names
+ * their field rather than a tool.
+ *
+ * `exact` marks the first rung. Everything below it answered a question slightly
+ * different from the one asked, so the caller flags it for review.
+ */
+export function yearsForPhrase(profile, phrase) {
+  const direct = skillYears(profile, phrase);
+  if (typeof direct.value === 'number') {
+    return { value: direct.value, exact: !direct.inferred, reason: null };
+  }
+
+  const parts = splitCompound(phrase);
+  const candidates = parts.length > 1 ? [phrase, ...parts] : [phrase];
+
+  for (const part of parts.length > 1 ? parts : []) {
+    const hit = skillYears(profile, part);
+    if (typeof hit.value === 'number') return { value: hit.value, exact: false, reason: null };
+  }
+
+  for (const part of candidates) {
+    const hit = skillYearsBySubstring(profile, part);
+    if (hit) return { value: hit.value, exact: false, reason: null };
+  }
+
+  const total = profile.current?.confirmed ? profile.current.totalYearsExperience : null;
+  if (typeof total === 'number') {
+    for (const part of candidates) {
+      if (isDomainPhrase(profile, part)) return { value: total, exact: false, reason: null };
+    }
+  }
+
+  // Nothing fit. Report the most specific reason available — the direct lookup's,
+  // which names the skill, rather than a generic miss.
+  return {
+    value: null,
+    exact: false,
+    reason: `${direct.reason}, and it does not name a field the profile's own titles, studies or skills cover`,
+  };
 }
 
 /**

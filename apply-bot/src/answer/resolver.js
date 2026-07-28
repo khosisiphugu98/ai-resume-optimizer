@@ -1,7 +1,7 @@
-import { matchProfile, extractSkill } from './matchers.js';
+import { matchProfile, extractSkill, yearsForPhrase, CONSENT_KINDS } from './matchers.js';
 import { lookupExact, lookupFuzzy, saveAnswer, recordUse, normaliseQuestion } from './bank.js';
 import { matchOption } from './options.js';
-import { skillYears, authorisationFor, summariseForLLM } from '../profile.js';
+import { summariseForLLM } from '../profile.js';
 import { callLLM, hasKey } from '../llm.js';
 
 const SYSTEM = `You fill in job application forms on behalf of one candidate.
@@ -247,10 +247,22 @@ export function guardAnswer(question, value, ctx) {
       }
       return { ok: true };
     }
-    const { value: years } = skillYears(ctx.profile, skill);
+    const { value: years } = yearsForPhrase(ctx.profile, skill);
     if (years == null) return { ok: false, reason: `model answered a years question about "${skill}", which is not confirmed in the profile` };
     if (!v.includes(String(years))) return { ok: false, reason: `model answered "${v}" but the profile says ${years} years of ${skill}` };
     return { ok: true };
+  }
+
+  // Consent is not something to infer.
+  //
+  // On the Agoda submission the model granted two legally meaningful permissions
+  // on the candidate's behalf — sharing personal data with third parties, and
+  // TEXT/SMS updates — both "Yes", with nothing in the profile expressing a
+  // preference. The defaults it chose were defensible; they were the model's
+  // defaults, not the candidate's. These resolve from the `consent` block or
+  // they park, exactly like work authorisation above.
+  if (CONSENT_KINDS.some(k => k.test.test(question))) {
+    return { ok: false, reason: 'permissions and consents resolve from the profile\'s consent block, not the model' };
   }
 
   // Authorisation, nationality and citizenship are matters of legal fact. They
