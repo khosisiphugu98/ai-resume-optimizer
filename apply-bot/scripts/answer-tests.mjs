@@ -3,7 +3,7 @@
 // beyond a failing build. No network.
 import { resolveField, guardAnswer, unreadableQuestion } from '../src/answer/resolver.js';
 import { resumeText } from '../src/answer/resume-context.js';
-import { extractSkill, matchProfile, normalisePunctuation, stripImperative } from '../src/answer/matchers.js';
+import { extractSkill, matchProfile, normalisePunctuation, stripImperative, channelEmail } from '../src/answer/matchers.js';
 import { matchOption } from '../src/answer/options.js';
 import { normaliseQuestion, similarity, saveAnswer, learnFromApproved } from '../src/answer/bank.js';
 import { skillYears } from '../src/profile.js';
@@ -470,6 +470,27 @@ t('irrelevant title gated out', heuristicScore({ title: 'Chef de Partie', jd_tex
 db.exec("DELETE FROM jobs WHERE external_id LIKE 'pk-%'");
 db.exec("DELETE FROM answers WHERE question_raw LIKE 'TEST %'");
 db.exec("DELETE FROM parked_questions");
+
+// LinkedIn holds the iCloud address and offers only what it has verified, so an
+// Easy Apply must carry that one. Everywhere else the Gmail address goes,
+// because that is the mailbox the reply-watcher reads — an external application
+// carrying the iCloud address gets a reply nothing is watching, and reads as one
+// that was never followed up.
+section('the email address follows the channel');
+{
+  const twoInbox = {
+    ...P,
+    identity: { ...P.identity, email: 'monitored@gmail.com', linkedinEmail: 'other@icloud.com' },
+  };
+  t('easy apply carries the LinkedIn address',
+    channelEmail(twoInbox, { ats: 'linkedin' }), 'other@icloud.com');
+  t('an external ATS carries the monitored one',
+    channelEmail(twoInbox, { ats: 'greenhouse' }), 'monitored@gmail.com');
+  t('so does email outreach', channelEmail(twoInbox, {}), 'monitored@gmail.com');
+  // Without a LinkedIn address configured there is only one answer anywhere.
+  t('one address means one answer',
+    channelEmail(P, { ats: 'linkedin' }), P.identity.email);
+}
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

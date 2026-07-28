@@ -97,7 +97,9 @@ function resolveDeterministic(field, ctx) {
   // continues, and the tier-1 park is only the answer if nothing below resolves.
   let deferredPark = null;
 
-  const hit = matchProfile(ctx.profile, { ...base, countryCode: ctx.countryCode, question });
+  // `ats` rides along because a few answers are channel-dependent — the email
+  // address in particular: LinkedIn offers only the addresses it has verified.
+  const hit = matchProfile(ctx.profile, { ...base, countryCode: ctx.countryCode, ats: ctx.ats, question });
   if (hit?.park) {
     deferredPark = { status: 'park', tier: 'profile', reason: hit.park, ...base };
   } else if (hit?.value != null && hit.value !== '') {

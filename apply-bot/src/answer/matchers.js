@@ -60,6 +60,19 @@ const isEmailLike = opt => /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/i.test(String(opt).trim
  * Order matters: the years-of-experience matcher must come before generic
  * numeric matchers, and EEO before anything that mentions "identify".
  */
+/**
+ * The address to use on this channel.
+ *
+ * `identity.email` is the monitored mailbox and the default everywhere.
+ * `identity.linkedinEmail`, when set, is the address LinkedIn has verified on
+ * the account — used only for Easy Apply, where the form offers a fixed list
+ * and the profile address is not on it.
+ */
+export function channelEmail(p, ctx = {}) {
+  const linkedin = p.identity?.linkedinEmail;
+  return (ctx.ats === 'linkedin' && linkedin) ? linkedin : p.identity?.email;
+}
+
 export const MATCHERS = [
   // ---- Identity -----------------------------------------------------------
   { name: 'firstName', test: /^(first|given)\s*name$|^forename/, resolve: p => ok(p.identity.firstName) },
@@ -70,11 +83,18 @@ export const MATCHERS = [
   // verified on the account. The profile address is frequently not among them, and
   // string equality against the list can only fail. Match on the mailbox instead,
   // and otherwise prefer a real address over an Apple private-relay alias.
+  //
+  // Which address is "mine" depends on the channel. LinkedIn holds the iCloud
+  // address and offers only what it has verified, so that is the one an Easy
+  // Apply carries; everywhere else the Gmail address is used, because that is
+  // the mailbox the reply-watcher reads. Sending the iCloud address to an
+  // external ATS would mean the employer's reply lands somewhere nothing is
+  // watching, and the application reads as one that was never followed up.
   {
     name: 'email',
     test: /e[- ]?mail/,
     resolve: (p, ctx) => {
-      const mine = p.identity.email;
+      const mine = channelEmail(p, ctx);
       const opts = ctx.options || [];
       if (!opts.length || !opts.every(isEmailLike)) return ok(mine);
 

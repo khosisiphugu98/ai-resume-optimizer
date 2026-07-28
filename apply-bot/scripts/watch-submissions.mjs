@@ -22,6 +22,7 @@
 import fs from 'node:fs';
 import { SUBMISSIONS_LOG, listSubmissions } from '../src/apply/submission-log.js';
 import { loadProfile } from '../src/profile.js';
+import { channelEmail } from '../src/answer/matchers.js';
 
 const C = {
   dim: s => `\x1b[2m${s}\x1b[0m`,
@@ -85,7 +86,9 @@ function concerns(rec) {
   };
   for (const f of rec.fields || []) {
     const q = String(f.question || '').toLowerCase();
-    if (/e-?mail/.test(q)) check('email', f.value, id.email);
+    // Which address is correct depends on the channel: LinkedIn carries the
+    // address it has verified, everything else carries the monitored mailbox.
+    if (/e-?mail/.test(q)) check('email', f.value, channelEmail(profile, { ats: rec.channel === 'linkedin_easy' ? 'linkedin' : null }));
     else if (/first name/.test(q)) check('first name', f.value, id.firstName);
     else if (/last name|surname/.test(q)) check('last name', f.value, id.lastName);
   }
