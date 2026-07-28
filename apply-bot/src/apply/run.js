@@ -8,6 +8,8 @@ import { detectVendor } from './adapters/index.js';
 import { canApply, recordApplication, currentMode, applicationGap } from './rate.js';
 import { AUDIT } from '../score/index.js';
 import { resumeText } from '../answer/resume-context.js';
+import path from 'node:path';
+import { recordSubmission } from './submission-log.js';
 
 // A posting that fails this many times stays in apply_failed and stops being
 // re-queued. High enough to ride out transient failures, low enough that a
@@ -201,20 +203,37 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
           message: `Parked — ${result.parked[0].question} (${result.parked[0].reason})`,
         });
       } else if (result.outcome === 'submitted') {
-        recordAttempt(job, channel, result, 'submitted');
+        const appId = recordAttempt(job, channel, result, 'submitted');
         recordApplication(channel);
         updateJob(job.id, { status: 'submitted' });
         stats.submitted++;
-        emit({ jobId: job.id, stage: 'apply', message: `Submitted — ${job.title} @ ${job.company}` });
+        // What actually went to the employer, written where it can be read back
+        // without the database — see submission-log.js.
+        recordSubmission({ job, channel, applicationId: appId, result, outcome: 'submitted' });
+        emit({
+          jobId: job.id, stage: 'apply',
+          message: `Submitted — ${job.title} @ ${job.company} · ${result.filled?.length || 0} field(s)`
+            + `${job.resume_path ? ` · ${path.basename(job.resume_path)}` : ''}`
+            + ` · logged to artifacts/submissions/${job.id}-${appId}.json`,
+        });
+        for (const f of result.filled || []) {
+          emit({
+            jobId: job.id, stage: 'apply', level: 'debug',
+            message: `  sent [${f.tier || '?'}] ${String(f.question || '').slice(0, 60)} = ${JSON.stringify(String(f.value ?? '').slice(0, 60))}`,
+          });
+        }
       } else if (result.outcome === 'submitted_unconfirmed') {
         // We pressed submit and could not verify what happened. This is terminal on
         // purpose: `manual_required` is never re-selected, so the application is not
         // sent a second time on the strength of an unrecognised confirmation page.
         // It counts against the daily cap, because something did go out.
-        recordAttempt(job, channel, result, 'submitted_unconfirmed');
+        const appId = recordAttempt(job, channel, result, 'submitted_unconfirmed');
         recordApplication(channel);
         updateJob(job.id, { status: 'manual_required', reject_reason: result.reason });
         stats.manual++;
+        // Logged like a confirmed submission: something went out, and the record
+        // of what is exactly as valuable when the outcome is uncertain.
+        recordSubmission({ job, channel, applicationId: appId, result, outcome: 'submitted_unconfirmed' });
         emit({
           jobId: job.id, stage: 'apply', level: 'warn',
           message: `Submitted but unconfirmed — ${job.title} @ ${job.company}. ${result.reason} Check the employer's site or your inbox before re-applying.`,

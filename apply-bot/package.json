@@ -30,7 +30,8 @@
     "gmail:auth": "node src/cli.js gmail:auth",
     "email": "node src/cli.js email",
     "outbox": "node src/cli.js outbox",
-    "replies": "node src/cli.js replies"
+    "replies": "node src/cli.js replies",
+    "submissions": "node src/cli.js submissions"
   },
   "keywords": [],
   "author": "",
