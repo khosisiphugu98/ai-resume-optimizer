@@ -6,8 +6,15 @@ import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
 import { emit } from './bus.js';
 import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures, listPagePlans } from './db.js';
+import { applySecretsToEnv } from './secrets.js';
 
 const cmd = process.argv[2];
+
+// Only server.js did this, so every stage run from the CLI — score, tailor,
+// apply, the whole `npm run cycle` — started with no API keys in the
+// environment and silently degraded to its keyless path. The same run through
+// the dashboard had them. Same code, different answers, no error either way.
+applySecretsToEnv();
 
 closeBrowserOnExit();
 
