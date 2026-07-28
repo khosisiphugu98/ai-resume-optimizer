@@ -10,6 +10,7 @@ import { AUDIT } from '../score/index.js';
 import { resumeText } from '../answer/resume-context.js';
 import path from 'node:path';
 import { recordSubmission } from './submission-log.js';
+import { unmeetableRequirements } from '../discover/jd-instructions.js';
 
 // A posting that fails this many times stays in apply_failed and stops being
 // re-queued. High enough to ride out transient failures, low enough that a
@@ -128,6 +129,12 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
             AND (status = 'tailored' OR (status = 'apply_failed' AND apply_attempts < ?)))
       )
     ORDER BY CASE status WHEN 'approved' THEN 0 WHEN 'tailored' THEN 1 ELSE 2 END,
+             -- A stated closing date is the cheapest prioritisation signal there
+             -- is, and it was sitting unread in 4% of descriptions. A posting
+             -- that shuts on Friday outranks a slightly better-fitting one that
+             -- is open for a month, because the second will still be there.
+             CASE WHEN json_extract(jd_instructions, '$.closingDate') IS NULL THEN 1 ELSE 0 END,
+             json_extract(jd_instructions, '$.closingDate'),
              fit_score DESC, id
     LIMIT ?`).all(...activeTypes, APPLY_MAX_ATTEMPTS, limit);
 
@@ -159,6 +166,26 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         emit({ stage: 'apply', level: 'warn', message: `Holding ${channel}: ${gate.reason}` });
       }
       if (jobs.slice(i + 1).every(j => blocked.has(channelOf(j)))) break;
+      continue;
+    }
+
+    // What the posting demanded that this system cannot supply.
+    //
+    // 13.4% of descriptions ask for a portfolio or work samples and 1.5% for an
+    // assessment, and nothing in the pipeline had ever read either. An
+    // application that silently omits a required artefact is a wasted send —
+    // worse than one not made, because it looks like an answer. An approved job
+    // still goes: a human has looked at it and said go.
+    const instructions = job.jd_instructions ? JSON.parse(job.jd_instructions) : {};
+    const unmeetable = job.status === 'approved' ? [] : unmeetableRequirements(instructions, profile);
+    if (unmeetable.length) {
+      updateJob(job.id, { status: 'manual_required', reject_reason: unmeetable[0].slice(0, 200) });
+      stats.manual++;
+      emit({
+        jobId: job.id, stage: 'apply', level: 'warn',
+        message: `Manual required — ${unmeetable.join('; ')}. Apply to this one by hand.`,
+      });
+      emitBoard();
       continue;
     }
 

@@ -147,8 +147,27 @@ export function missingAttachments(required = []) {
     .filter(a => UNAVAILABLE_ATTACHMENTS.has(a));
 }
 
+/**
+ * The subject line, and when the posting's own wins.
+ *
+ * The one email this system has sent went out as "Application for BI Engineer
+ * Position" — no candidate name, no reference, and the real title ("Business
+ * Intelligence Engineer") abbreviated into something a recruiter cannot search
+ * for. That was not this function; it was `subjectTemplate`, which the model
+ * fills in on every extraction whether or not the posting asked for anything,
+ * and which unconditionally outranked what is built here.
+ *
+ * A posting that dictates a subject line must be obeyed — a recruiter filtering
+ * on a reference will never see anything else. A posting that says nothing about
+ * it should not have a subject invented for it. So the template is honoured only
+ * when the posting genuinely instructed one, which `jd_instructions` records
+ * deterministically, and everything else gets a subject that carries the real
+ * title, the reference if there is one, and the candidate's name.
+ */
 export function buildSubject(spec, job, profile) {
-  if (spec.subjectTemplate) return spec.subjectTemplate;
+  const dictated = spec.instructedSubject || (spec.subjectWasInstructed ? spec.subjectTemplate : null);
+  if (dictated) return dictated;
+
   const who = `${profile.identity.firstName} ${profile.identity.lastName}`;
   const ref = spec.referenceNumber ? ` — Ref ${spec.referenceNumber}` : '';
   return `Application: ${job.title}${ref} — ${who}`;

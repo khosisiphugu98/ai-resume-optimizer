@@ -144,6 +144,11 @@ addColumn('applications', 'plan_fingerprint', 'TEXT');
 // "optimisation changed nothing" and can never catch "optimisation changed the
 // same things for four unrelated jobs" — which is 14% of one run's output.
 addColumn('jobs', 'resume_text_hash', 'TEXT');
+// What the posting itself said about how to apply — the apply address, a
+// reference code, a subject line, required artefacts, a closing date. `jd_text`
+// was always passed to the model so it could reason from it, and nothing ever
+// extracted an instruction and acted on one. See discover/jd-instructions.js.
+addColumn('jobs', 'jd_instructions', 'TEXT');
 
 const now = () => new Date().toISOString();
 /**

@@ -11,6 +11,7 @@ import { canApply, recordApplication } from '../apply/rate.js';
 import { extractEmailApplication, missingAttachments, buildSubject, looksLikeEmailApplication } from './extract.js';
 import { composeCoverEmail } from './compose.js';
 import { preflight } from '../apply/preflight.js';
+import { unmeetableRequirements } from '../discover/jd-instructions.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import * as gmail from './gmail.js';
 
@@ -32,6 +33,29 @@ export async function draftEmailApplication(job, profile) {
 
   const spec = await extractEmailApplication(job);
   if (!spec.to) throw new Error('No application email address found in the posting');
+
+  // What the posting literally instructed, read at enrich time. It outranks the
+  // model's reading of the same text: a reference code and a dictated subject
+  // line are things the description says in words, and a recruiter filtering on
+  // one will never see an email that paraphrases it.
+  const instructions = job.jd_instructions ? JSON.parse(job.jd_instructions) : {};
+  if (instructions.referenceNumber) spec.referenceNumber = instructions.referenceNumber;
+  if (instructions.subjectLine) spec.instructedSubject = instructions.subjectLine;
+
+  // 13.4% of postings ask for a portfolio and nothing in this pipeline ever read
+  // that. An application that silently omits an artefact the posting demanded is
+  // a wasted send — worse than one not made, because it looks like an answer.
+  const unmeetable = unmeetableRequirements(instructions, profile);
+  if (unmeetable.length) {
+    return {
+      outcome: 'parked',
+      parked: unmeetable.map(why => ({
+        question: `${why}. Send this one by hand, or fill the gap in the profile.`,
+        questionNorm: normaliseQuestion(`jd requirement ${why}`),
+        fieldType: 'text', reason: why, tier: 'jd-instruction',
+      })),
+    };
+  }
 
   // Documents we do not have. Sending an incomplete application is worse than
   // parking it, and we will not fabricate a transcript.

@@ -8,6 +8,10 @@ import {
   looksLikeEmailApplication, extractHeuristically, missingAttachments, buildSubject,
   detectRequiredDocuments,
 } from '../src/email/extract.js';
+import {
+  extractInstructions, isClosed, unmeetableRequirements,
+} from '../src/discover/jd-instructions.js';
+import { classifyApply } from '../src/discover/linkedin.js';
 import { buildMimeMessage, toBase64Url } from '../src/email/mime.js';
 import { composeCoverEmail } from '../src/email/compose.js';
 import { verifyCoverLetter, extractClaims } from '../src/email/verify.js';
@@ -53,14 +57,88 @@ t('reference with "Ref:" form',
   extractHeuristically('Apply to a@b.co.za. Ref: ABC-123').referenceNumber, 'ABC-123');
 
 section('subject lines — ZA postings bin applications with no reference');
-t('uses the posting template when given',
-  buildSubject({ subjectTemplate: 'Application - MKT/2026/04' }, { title: 'X' }, PROFILE), 'Application - MKT/2026/04');
+// The one email this system has sent went out as "Application for BI Engineer
+// Position": no name, no reference, the real title abbreviated into something a
+// recruiter cannot search for. That came from `subjectTemplate`, which the model
+// fills in on every extraction whether or not the posting asked for a subject,
+// and which unconditionally beat the subject built here.
+t('a subject the posting dictated is obeyed',
+  buildSubject({ instructedSubject: 'Application - MKT/2026/04' }, { title: 'X' }, PROFILE),
+  'Application - MKT/2026/04');
+t('a subject the model invented is not',
+  buildSubject({ subjectTemplate: 'Application for BI Engineer Position' },
+    { title: 'Business Intelligence Engineer' }, PROFILE),
+  'Application: Business Intelligence Engineer — Khosi Siphugu');
+t('unless the posting really did instruct it',
+  buildSubject({ subjectTemplate: 'Quote ref MKT/2026/04', subjectWasInstructed: true }, { title: 'X' }, PROFILE),
+  'Quote ref MKT/2026/04');
 t('otherwise includes the reference',
   buildSubject({ referenceNumber: 'MKT/2026/04' }, { title: 'Marketing Analyst' }, PROFILE),
   'Application: Marketing Analyst — Ref MKT/2026/04 — Khosi Siphugu');
 t('plain subject when there is no reference',
   buildSubject({}, { title: 'Marketing Analyst' }, PROFILE),
   'Application: Marketing Analyst — Khosi Siphugu');
+
+// jd_text was always passed to the model so it could reason from it, and
+// nothing in the pipeline ever extracted an instruction from a posting and
+// acted on one.
+section('reading what the posting actually told you to do (§7)');
+{
+  const i = jd => extractInstructions(jd);
+
+  // Of 50 postings naming an address to apply to, 11 were misrouted. The
+  // address is read from the sentence that instructs it, not from the document.
+  t('an apply address in the instruction sentence',
+    i('Suitable candidates should send their CV to careers@pineapple.co.za').applyEmail,
+    'careers@pineapple.co.za');
+  t('another phrasing entirely',
+    i('Applications must be emailed to nsmith@redglobal.com before month end.').applyEmail,
+    'nsmith@redglobal.com');
+  // legal@metricgroup.net was extracted as the apply address for a Maintenance
+  // Foreman post. A role inbox is not an invitation.
+  t('a role inbox is never the apply address',
+    i('Send your CV to legal@metricgroup.net').applyEmail, null);
+  t('an address that is not an instruction is ignored',
+    i('For data queries contact dpo@acme.co.za. Apply via the button above.').applyEmail, null);
+  t('and the router follows it',
+    classifyApply({ jd: 'Suitable candidates should send their CV to careers@pineapple.co.za', applyRoute: 'unknown' }),
+    { applyType: 'email', applyEmail: 'careers@pineapple.co.za' });
+  t('a posting with no instruction keeps its scraped route',
+    classifyApply({ jd: 'A great role on our data team.', applyRoute: 'external' }).applyType, 'external');
+
+  t('a reference code', i('Please quote reference number MKT/2026/04').referenceNumber, 'MKT/2026/04');
+  t('a dictated subject line',
+    i('Email us with the subject line: Data Analyst Application 2026').subjectLine,
+    'Data Analyst Application 2026');
+
+  t('a portfolio request', i('Please include a link to your portfolio.').requires, ['portfolio']);
+  t('an assessment', i('You will be required to complete an online test.').requires, ['assessment']);
+  t('a cover letter', i('Attach a covering letter with your application.').requires, ['cover_letter']);
+  t('an ordinary posting demands nothing', i('We are hiring a data analyst.').requires, []);
+
+  t('a closing date, day-first', i('Closing date: 15/08/2026').closingDate, '2026-08-15');
+  t('written out', i('Applications close on 15 August 2026').closingDate, '2026-08-15');
+  t('already ISO', i('Deadline: 2026-08-15').closingDate, '2026-08-15');
+  // A bare date in a description is far more often a start date than a deadline.
+  t('an unlabelled date is not a deadline', i('Start date 15 August 2026').closingDate, null);
+  t('a passed date closes the posting', isClosed({ closingDate: '2026-01-01' }, new Date('2026-07-29')), true);
+  t('a future one does not', isClosed({ closingDate: '2026-12-01' }, new Date('2026-07-29')), false);
+  t('and no date never closes it', isClosed({}, new Date('2026-07-29')), false);
+
+  // 13.4% of postings ask for a portfolio, and an application that silently
+  // omits one is a wasted send.
+  const noPortfolio = { links: { portfolio: '' } };
+  t('a portfolio nobody has is a blocker',
+    unmeetableRequirements({ requires: ['portfolio'] }, noPortfolio).length, 1);
+  t('and one that is on file is not',
+    unmeetableRequirements({ requires: ['portfolio'] }, { links: { portfolio: 'https://khosi.dev' } }).length, 0);
+  t('an assessment is never satisfiable unattended',
+    unmeetableRequirements({ requires: ['assessment'] }, { links: { portfolio: 'https://khosi.dev' } }).length, 1);
+  // A covering letter is written for every email application, and most ATS forms
+  // offer somewhere to put one. Recorded, not held.
+  t('a cover letter is not a blocker',
+    unmeetableRequirements({ requires: ['cover_letter'] }, noPortfolio).length, 0);
+}
 
 section('required-document detection is deterministic, not model-dependent');
 t('certified ID copy', detectRequiredDocuments('Send a certified copy of your ID document'), ['id_document']);

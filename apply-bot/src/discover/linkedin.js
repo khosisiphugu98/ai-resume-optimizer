@@ -10,6 +10,7 @@ import {
 import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked, getSetting } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { looksLikeEmailApplication } from '../email/extract.js';
+import { extractInstructions, hasInstructions, applyAddressIn, isClosed } from './jd-instructions.js';
 import { fetchGuestPosting, seniorityReject } from './jd-fetch.js';
 
 /** The date-posted window in force, resolved from the setting with a safe fallback. */
@@ -212,6 +213,19 @@ export function classifyApply({ jd, applyRoute }) {
   if (looksLikeEmailApplication(jd) && emailMatch) {
     return { applyType: 'email', applyEmail: emailMatch[0] };
   }
+
+  // The same rule, applied to the postings the sentence patterns above miss.
+  //
+  // Of 50 stored postings that name an address to apply to, 39 routed to email
+  // and 11 did not — seven left as `unknown`, two sent to Easy Apply and two to
+  // an external form, including `careers@pineapple.co.za` for an Actuarial and
+  // Data Analyst. `looksLikeEmailApplication` needs the instruction in one of a
+  // handful of phrasings; this reads the sentence the address actually sits in,
+  // which is both wider and more precise — it will not pick up a posting's
+  // data-protection contact the way scanning the whole document does.
+  const instructed = applyAddressIn(jd);
+  if (instructed) return { applyType: 'email', applyEmail: instructed };
+
   return { applyType: applyRoute || 'unknown', applyEmail: null };
 }
 
@@ -300,9 +314,18 @@ function recordEnrichment(job, post) {
   // The company name is only trustworthy once the posting itself has been read —
   // card subtitles are frequently the recruiter, not the employer — so the
   // blocklist is applied here as well as at discovery.
+  // What the posting told you to do, read once here rather than re-parsed by
+  // every channel that needs a piece of it.
+  const instructions = extractInstructions(post.jd);
+
   const reason = preFilter({ title, location, jd: post.jd })
     || seniorityReject(post.criteria)
-    || (isCompanyBlocked(company) ? `blocked company: ${company}` : null);
+    || (isCompanyBlocked(company) ? `blocked company: ${company}` : null)
+    // The posting says when it stops accepting applications. Nothing read that
+    // before, so a closed vacancy was scored, tailored and applied to like any
+    // other — spending a CV, a pageview and a slot in the daily cap on a form
+    // nobody was going to read.
+    || (isClosed(instructions) ? `closed: applications closed on ${instructions.closingDate}` : null);
 
   const common = {
     title, company, location,
@@ -311,6 +334,7 @@ function recordEnrichment(job, post) {
     apply_email: applyEmail,
     external_apply_url: post.applyUrl || null,
     posted_at: post.postedAt || job.posted_at,
+    jd_instructions: hasInstructions(instructions) ? JSON.stringify(instructions) : null,
   };
 
   if (reason) {
