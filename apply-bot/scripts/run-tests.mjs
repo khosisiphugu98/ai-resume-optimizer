@@ -19,6 +19,7 @@ const SUITES = [
   'answer-tests.mjs',
   'evidence-tests.mjs',
   'apply-tests.mjs',
+  'preflight-tests.mjs',
   'easyapply-integration.mjs',
   'ats-tests.mjs',
   'a11y-tests.mjs',

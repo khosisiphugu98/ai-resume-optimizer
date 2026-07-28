@@ -10,6 +10,7 @@ import { loadProfile } from '../profile.js';
 import { canApply, recordApplication } from '../apply/rate.js';
 import { extractEmailApplication, missingAttachments, buildSubject, looksLikeEmailApplication } from './extract.js';
 import { composeCoverEmail } from './compose.js';
+import { preflight } from '../apply/preflight.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import * as gmail from './gmail.js';
 
@@ -90,6 +91,9 @@ export async function flushOutbox({ force = false } = {}) {
 
   if (!due.length) return { sent: 0, failed: 0, skipped: 0 };
 
+  const profile = loadProfile();
+  const jobFor = id => db.prepare('SELECT id, title, company FROM jobs WHERE id = ?').get(id) || null;
+
   if (!gmail.isConfigured()) {
     emit({
       stage: 'email', level: 'warn',
@@ -109,6 +113,28 @@ export async function flushOutbox({ force = false } = {}) {
     }
 
     try {
+      // Last look, on the thing that is about to leave. Email is the channel
+      // where being wrong costs most: it cannot be unsent, the recipient is a
+      // named human, and the covering letter is the document they read first.
+      // The evidence gate in compose.js already checked the letter for invented
+      // claims when it was written; this reads the finished message — subject,
+      // body and all — the way a person would before pressing send.
+      const check = await preflight({
+        profile, job: jobFor(row.job_id), channel: 'email',
+        subject: row.subject, body: row.body,
+      });
+      if (!check.ok) {
+        markEmailFailed(row.id, check.reason);
+        updateJob(row.job_id, { status: 'manual_required', reject_reason: check.reason.slice(0, 200) });
+        failed++;
+        emit({
+          jobId: row.job_id, stage: 'email', level: 'warn',
+          message: `Not sent — ${check.reason} Rewrite it by hand, or fix the profile and re-draft.`,
+        });
+        emitBoard();
+        continue;
+      }
+
       const res = await gmail.sendEmail({
         to: row.to_addr,
         cc: row.cc_addr ? row.cc_addr.split(',').map(s => s.trim()).filter(Boolean) : [],

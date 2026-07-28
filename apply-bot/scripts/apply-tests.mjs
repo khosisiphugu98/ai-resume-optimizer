@@ -5,7 +5,7 @@
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
-import { collectFieldsInPage, fillField } from '../src/apply/fields.js';
+import { collectFieldsInPage, fillField, isSiteSearch } from '../src/apply/fields.js';
 import { canApply, withinHours, capRemaining, EXTERNAL_PAGEVIEW_SHARE } from '../src/apply/rate.js';
 import { HOURS } from '../src/config.js';
 import { db, bumpRate, setSetting } from '../src/db.js';
@@ -94,6 +94,26 @@ t('  → select value set', await page.inputValue('#notice'), '30 days');
 let threw = null;
 try { await fillField(page, byQ('What is your notice period?'), '45 days'); } catch (e) { threw = e.message; }
 t('rejects a value not on offer', /not one of/.test(threw || ''), true);
+
+// Job 453 got stuck at step 3 and reported LinkedIn's own navigation as the
+// application form — a "Search" textbox, a "Select language" combobox, another
+// "Search". The modal had closed under the collector, and `|| document.body`
+// quietly widened the root to the whole site.
+section('a root that has gone away yields nothing, not the whole page (D4)');
+t('a missing root collects no fields',
+  (await page.evaluate(collectFieldsInPage, '.no-such-modal')).length, 0);
+t('an explicit body root still works',
+  (await page.evaluate(collectFieldsInPage, 'body')).length > 0, true);
+t('the modal root is unaffected',
+  (await page.evaluate(collectFieldsInPage, '.jobs-easy-apply-modal')).length, 8);
+
+section('the site\'s own chrome is not a screening question');
+t('LinkedIn\'s header search', isSiteSearch('Search'), true);
+t('and its language picker', isSiteSearch('Select language'), true);
+t('CareerJunction\'s search bar', isSiteSearch('Job title, skill or company'), true);
+t('a real question is untouched', isSiteSearch('How many years of SQL experience?'), false);
+t('and so is one that merely mentions searching',
+  isSiteSearch('Describe your approach to keyword search'), false);
 
 await browser.close();
 fs.rmSync(tmp, { force: true });

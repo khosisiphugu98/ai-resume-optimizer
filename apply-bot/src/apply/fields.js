@@ -1,6 +1,21 @@
 import { matchOptionIndex } from '../answer/options.js';
 
 /**
+ * A control that belongs to the site rather than to the application.
+ *
+ * It is a labelled input, so the collector sees a question and the resolver has
+ * no idea it is not being asked anything. Two of these have reached production:
+ * CareerJunction's "Job title, skill or company" search bar, which the model
+ * answered with a keyword salad of the candidate's skills, and — after the Easy
+ * Apply modal closed under it — LinkedIn's own header, which offered a "Search"
+ * textbox and a "Select language" combobox as though they were screening
+ * questions. Both adapters filter on this, because both have hit it.
+ */
+const SITE_CHROME = /^\s*(search|keywords?|job title,? ?(skill|keyword)|what (are you looking for|job)|find (a )?jobs?|search (for )?jobs?|search by|select language|language preference|skip to|feedback)/i;
+
+export const isSiteSearch = q => SITE_CHROME.test(String(q || ''));
+
+/**
  * Generic form-field extraction, shared by every adapter.
  *
  * Runs in the page and returns a serialisable FieldSpec[]. Label resolution
@@ -11,7 +26,19 @@ import { matchOptionIndex } from '../answer/options.js';
  * Radio groups collapse to one field keyed on `name`.
  */
 export const collectFieldsInPage = (rootSelector) => {
-  const root = document.querySelector(rootSelector) || document.body;
+  // A root that is not there is not the whole page.
+  //
+  // Falling back to document.body meant that whenever the container went away
+  // between being chosen and being read — an Easy Apply modal closing, a step
+  // re-rendering — the collector quietly widened to everything the site ships.
+  // Job 453 came back with LinkedIn's own navigation as the application form:
+  // a "Search" textbox, a "Select language" combobox, another "Search". That is
+  // the same shape as the CareerJunction search bar the external path was fixed
+  // for. An empty list says "the form is gone", which is true and safe; the
+  // page's chrome says something false. Callers that genuinely want the whole
+  // document pass 'body', which always matches.
+  const root = rootSelector ? document.querySelector(rootSelector) : document.body;
+  if (!root) return [];
   const out = [];
   const seenRadioGroups = new Set();
 

@@ -3,7 +3,7 @@ import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { bumpRate, getSetting } from '../db.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
-import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
+import { collectFieldsInPage, fillField, fromDomField, isSiteSearch } from './fields.js';
 import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
 import { runWizard, buttonByName, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
@@ -11,19 +11,7 @@ import { normaliseQuestion } from '../answer/bank.js';
 import { detectVendor } from './adapters/index.js';
 import { captureUnsolvedPage } from './agent/capture.js';
 import { runAgent } from './agent/index.js';
-
-/**
- * A job board's own search bar, which sits at the top of every page it serves —
- * including the page a posting's Apply link lands on.
- *
- * It is a text input with a label, so the collector sees a question, and the
- * resolver has no idea it is not being asked anything. The one that got through
- * was careerjunction's "Job title, skill or company", which the model answered
- * with a keyword salad of the candidate's skills.
- */
-const SITE_SEARCH = /^\s*(search|keywords?|job title,? ?(skill|keyword)|what (are you looking for|job)|find (a )?jobs?|search (for )?jobs?|search by)/i;
-
-export const isSiteSearch = q => SITE_SEARCH.test(String(q || ''));
+import { preflightGate } from './preflight.js';
 
 /**
  * Map an adaptive-agent result into the standard applyExternal return. The agent
@@ -306,7 +294,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   // the CV: a real application takes an attachment, and a search page does not.
   // Known vendors are exempt — their shape is already vetted — and so is a job
   // a human explicitly approved, because at that point somebody has looked.
-  const mayFinish = vendor.vendor === 'generic' && !approved
+  const looksLikeAnApplication = vendor.vendor === 'generic' && !approved
     ? async ({ filled }) => {
       if (!sawFileControl) {
         return `nowhere to attach a CV, so this is not an application form `
@@ -320,6 +308,15 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
       return null;
     }
     : null;
+
+  // The CV check asks whether this is an application at all. The pre-send review
+  // asks whether the answers are true — and it runs on every vendor, not just
+  // the unrecognised ones, because both defects that reached employers on
+  // 28 July were on pages the adapters handled perfectly well.
+  const mayFinish = preflightGate({
+    profile: ctx.profile, job, channel: 'external_ats', ats: vendor.vendor,
+    countryCode: ctx.countryCode, also: looksLikeAnApplication,
+  });
 
   const result = await runWizard({
     submit: maySubmit,

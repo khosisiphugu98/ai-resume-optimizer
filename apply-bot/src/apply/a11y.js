@@ -27,7 +27,11 @@ import { matchOptionIndex } from '../answer/options.js';
  * a conditionally revealed field is told apart from a form that is not advancing.
  */
 export const collectA11yInPage = (rootSelector) => {
-  const root = (rootSelector && document.querySelector(rootSelector)) || document.body;
+  // Same rule as collectFieldsInPage: a root that has gone away yields nothing,
+  // rather than silently widening to the whole document and reporting the site's
+  // navigation chrome as an application form.
+  const root = rootSelector ? document.querySelector(rootSelector) : document.body;
+  if (!root) return [];
 
   // 1. Deep query — pierce open shadow roots, which querySelectorAll will not.
   const deepQueryAll = (node, out = []) => {

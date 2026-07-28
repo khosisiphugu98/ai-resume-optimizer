@@ -104,15 +104,20 @@ export async function runWizard({
         // same value. Rewriting it risks clobbering a better value with our own,
         // and several boards clear dependent fields when one is retyped.
         if (node.currentValue && String(node.currentValue).trim() === String(r.value).trim()) {
-          filled.push({ uid: node.uid, question: r.question, value: r.value, tier: 'prefilled', kind: node.role });
+          filled.push({ uid: node.uid, question: r.question, value: r.value, tier: 'prefilled', kind: node.role, options: node.options || null });
           continue;
         }
 
         try {
           const landed = await fill(node, r.value);
+          // The options travel with the value. Without them a later reader — the
+          // pre-send check, or a person looking at the submission record — sees
+          // "South Africa +27" against a profile that says "+27 82 820 4538" and
+          // cannot tell a correct answer fitted onto a dropdown from a wrong one.
           filled.push({
             uid: node.uid, question: r.question, value: landed,
             tier: r.tier, kind: node.role, probable: !!r.probable,
+            options: node.options || null,
           });
         } catch (err) {
           // A value that will not go into the control is not an answer. Record it

@@ -149,7 +149,10 @@ export async function executePlan(page, plan, { job = null, ctx = {}, resumePath
 
   // Reached the terminal with submit intent: the gate decides whether to press it.
   if (result.outcome === 'submit') {
-    if (!submitGate(filled, result.parked || [])) return { outcome: 'ready', filled, steps: result.steps };
+    // Awaited: the gate is a policy check today and a pre-send review tomorrow,
+    // and a synchronous call would have silently treated a pending Promise as
+    // "allowed" the moment either one needed to do I/O.
+    if (!await submitGate(filled, result.parked || [])) return { outcome: 'ready', filled, steps: result.steps };
     const before = page.url();
     await result.terminal.click();
     await page.waitForTimeout(4000);

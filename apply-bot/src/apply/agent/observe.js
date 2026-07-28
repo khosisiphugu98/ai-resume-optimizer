@@ -18,15 +18,17 @@ function safeHost(url) {
 }
 
 /** Visible button/anchor labels across every frame — what the planner can click. */
-async function collectButtons(page) {
+async function collectButtons(page, rootSelector = 'body') {
   const labels = [];
   for (const frame of page.frames()) {
-    const found = await frame.evaluate(() =>
-      Array.from(document.querySelectorAll('button, a[role="button"], [role="button"], input[type="submit"], a'))
+    const found = await frame.evaluate((sel) => {
+      const root = sel ? document.querySelector(sel) : document.body;
+      if (!root) return [];
+      return Array.from(root.querySelectorAll('button, a[role="button"], [role="button"], input[type="submit"], a'))
         .map(el => (el.getAttribute('aria-label') || el.value || el.textContent || '').replace(/\s+/g, ' ').trim())
         .filter(t => t && t.length <= 60)
-        .slice(0, 40),
-    ).catch(() => []);
+        .slice(0, 40);
+    }, rootSelector).catch(() => []);
     labels.push(...found);
   }
   // Dedupe, keep order — the first occurrence is usually the most prominent.
@@ -34,14 +36,17 @@ async function collectButtons(page) {
 }
 
 /**
+ * @param rootSelector  narrow the observation to one container. Easy Apply passes
+ *                      its modal so the planner sees the application rather than
+ *                      the LinkedIn page it is sitting on.
  * @returns {Promise<{host, url, title, frames, controls, outline, buttons, traps, fingerprint}>}
  */
-export async function observePage(page) {
+export async function observePage(page, { rootSelector = 'body' } = {}) {
   const url = page.url();
   const host = safeHost(url);
   const title = await page.title().catch(() => '');
-  const snapshot = await buildSnapshot(page);
-  const buttons = await collectButtons(page);
+  const snapshot = await buildSnapshot(page, rootSelector);
+  const buttons = await collectButtons(page, rootSelector);
   const fingerprint = fingerprintOf(host, snapshot.controls);
 
   const fillable = snapshot.controls.length;

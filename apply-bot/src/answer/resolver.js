@@ -150,6 +150,10 @@ export async function resolveField(field, ctx) {
   const deterministic = resolveDeterministic(field, ctx);
   if (deterministic) return deterministic;
 
+  if (ctx.deterministicOnly) {
+    return { status: 'park', tier: 'deterministic-only', reason: DETERMINISTIC_ONLY_REASON, ...base };
+  }
+
   // Tier 4 — LLM draft, hard-constrained
   if (hasKey()) {
     try {
@@ -199,6 +203,11 @@ export async function resolveField(field, ctx) {
 const NON_ANSWER = /^\s*(unanswerable|unknown|no answer|not specified|not provided|not available in (the )?profile|i (don'?t|do not) know|null|undefined|nil)\s*[.!]?\s*$/i;
 
 export const isNonAnswer = v => NON_ANSWER.test(String(v ?? ''));
+
+/** Why a field parked on a path that does not let a model choose values. */
+export const DETERMINISTIC_ONLY_REASON =
+  'no profile fact and no stored answer, and this path does not let a model write one — ' +
+  'answer it once here and it will be reused';
 
 async function draftAnswer(question, fieldType, options, ctx) {
   const user = [
@@ -485,6 +494,23 @@ export async function resolveFormBatch(rawFields, ctx) {
   }
 
   if (!needsModel.length) return finishForm(resolved, parked);
+
+  // The model finds fields; it does not decide what goes in them.
+  //
+  // On 28 July the deterministic tiers put 29 of 45 values on real applications
+  // and every one of them was right. All four accuracy defects came from the
+  // model: the "unanswerable" sentinel typed into Gulf Associates' form, two
+  // consents granted with no policy behind them, and "Advanced Excel" against a
+  // profile that says intermediate. So a path where Claude located the controls
+  // runs with this on — it has already exercised the judgement it is good at,
+  // and letting it also choose the values would put the one demonstrably weak
+  // step downstream of the one demonstrably strong one. What the profile and the
+  // answer bank cannot settle is parked for a person, which is the same rule
+  // this system applies everywhere else.
+  if (ctx.deterministicOnly) {
+    for (const f of needsModel) park(f, 'deterministic-only', DETERMINISTIC_ONLY_REASON);
+    return finishForm(resolved, parked);
+  }
 
   if (!hasKey()) {
     for (const f of needsModel) {

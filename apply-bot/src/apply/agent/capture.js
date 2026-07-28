@@ -49,13 +49,23 @@ function pageOutline() {
   return { tags, landmarks, bodyChars: (document.body?.innerText || '').length };
 }
 
-/** Walk every frame, gathering the controls both collectors can see. */
-export async function buildSnapshot(page) {
+/**
+ * Walk every frame, gathering the controls both collectors can see.
+ *
+ * `rootSelector` narrows that to one container. Easy Apply needs it: the form is
+ * a modal sitting on top of a full LinkedIn page, and snapshotting the document
+ * captures the site's navigation instead of the application. Three of the stuck
+ * Easy Apply attempts on 28 July shared one fingerprint whose entire control set
+ * was a "Search" textbox, a "Select language" combobox and another "Search" —
+ * so the planner was being asked to fill in LinkedIn's header, and every one of
+ * those pages hashed to the same useless shape.
+ */
+export async function buildSnapshot(page, rootSelector = 'body') {
   const frames = [];
   const controls = [];
   for (const frame of page.frames()) {
-    const a11y = await frame.evaluate(collectA11yInPage, 'body').catch(() => []);
-    const dom = await frame.evaluate(collectFieldsInPage, 'body').catch(() => []);
+    const a11y = await frame.evaluate(collectA11yInPage, rootSelector).catch(() => []);
+    const dom = await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
     const fillable = a11y.filter(n => n.name || n.role === 'file');
     frames.push({ url: frame.url(), a11yControls: fillable.length, domFields: dom.length });
     for (const n of fillable) controls.push({ role: n.role, name: n.name });
@@ -71,12 +81,12 @@ export async function buildSnapshot(page) {
  *
  * @returns the capture row id, or null if capture failed.
  */
-export async function captureUnsolvedPage(page, { job = null, vendor = null, stage, reason = '' } = {}) {
+export async function captureUnsolvedPage(page, { job = null, vendor = null, stage, reason = '', rootSelector = 'body' } = {}) {
   try {
     const url = page.url();
     const host = safeHost(url);
     const title = await page.title().catch(() => '');
-    const snapshot = await buildSnapshot(page);
+    const snapshot = await buildSnapshot(page, rootSelector);
     const fingerprint = fingerprintOf(host, snapshot.controls);
 
     const id = upsertPageCapture({

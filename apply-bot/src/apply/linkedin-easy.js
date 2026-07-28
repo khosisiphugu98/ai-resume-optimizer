@@ -3,11 +3,13 @@ import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { assertNoChallenge, ChallengeDetected } from '../browser.js';
 import { bumpRate } from '../db.js';
-import { collectFieldsInPage, fillField, fromDomField } from './fields.js';
+import { collectFieldsInPage, fillField, fromDomField, isSiteSearch } from './fields.js';
 import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
 import { captureUnsolvedPage } from './agent/capture.js';
+import { runAgent } from './agent/index.js';
+import { preflightGate } from './preflight.js';
 
 const MODAL = [
   // Verified live on the server-driven UI: the Easy Apply modal is a native
@@ -75,6 +77,39 @@ async function abandon(page) {
 }
 
 /**
+ * Map an adaptive-agent result into the shape applyEasy returns.
+ *
+ * The agent runs `deterministicOnly` on this channel, so anything it could not
+ * settle from the profile or the answer bank comes back parked rather than
+ * written by a model — which is why a solved page here is `ready` or `parked`
+ * far more often than `submitted`. That is the intended trade: the deterministic
+ * tiers got 44 of 45 values right on 28 July, and every accuracy defect that run
+ * produced came from the model choosing a value.
+ */
+function agentResult(a, { screenshots = [], filled = [] } = {}) {
+  const base = {
+    filled: [...filled, ...(a.filled || [])],
+    screenshots,
+    steps: a.steps || 0,
+    agent: { kind: a.planKind, fingerprint: a.fingerprint },
+  };
+  if (a.outcome === 'submitted') return { outcome: 'submitted', ...base, evidence: a.evidence || null };
+  if (a.outcome === 'parked') {
+    return {
+      outcome: 'parked', ...base,
+      parked: (a.parked || []).map(p => ({
+        question: p.question, questionNorm: normaliseQuestion(p.question),
+        fieldType: p.fieldType, options: p.options, reason: p.reason, tier: p.tier,
+      })),
+    };
+  }
+  return {
+    outcome: 'ready', ...base,
+    heldForReview: 'the adaptive agent filled this form — approve it to submit',
+  };
+}
+
+/**
  * Drive one LinkedIn Easy Apply application.
  *
  * The step machine itself lives in `wizard.js` — this file is now the LinkedIn
@@ -103,10 +138,23 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
   // posting and reports it closed.
   const applyBtn = await waitForFirstVisible(page, BTN.apply, { timeout: 10_000 });
   if (!applyBtn) {
-    const ctx = await captureFailureContext(page, shot, job.id, 'no-apply-button');
-    throw new Error(
+    const failure = await captureFailureContext(page, shot, job.id, 'no-apply-button');
+    const why =
       `No apply button after 10s — posting may have closed, or the selector broke. ` +
-      `url=${ctx.url} title="${ctx.title}" buttons=[${ctx.buttons.join(' | ')}]`);
+      `url=${failure.url} title="${failure.title}" buttons=[${failure.buttons.join(' | ')}]`;
+
+    // Three of fourteen attempts died here on 28 July, on postings that were
+    // open. The apply control is the one thing on this page a hand-written
+    // selector must find, and LinkedIn changes it; a page whose form sits behind
+    // a button it cannot name is precisely what the planner's `landing` kind is
+    // for. It reads the page and says which control opens the application.
+    const agent = await runAgent(page, {
+      job, ctx: { ...ctx, ats: 'linkedin' }, resumePath, submit,
+      stage: 'no-apply-button', reason: why, deterministicOnly: true,
+    });
+    if (agent) return agentResult(agent, { screenshots });
+
+    throw new Error(why);
   }
 
   const label = (await applyBtn.innerText().catch(() => '')) || '';
@@ -116,10 +164,18 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
 
   const opened = await waitForModal(page, 8000);
   if (!opened) {
-    const ctx = await captureFailureContext(page, shot, job.id, 'modal-did-not-open');
-    throw new Error(
+    const failure = await captureFailureContext(page, shot, job.id, 'modal-did-not-open');
+    const why =
       `Easy Apply modal did not open within 8s after clicking Apply. ` +
-      `url=${ctx.url} title="${ctx.title}" buttons=[${ctx.buttons.join(' | ')}]`);
+      `url=${failure.url} title="${failure.title}" buttons=[${failure.buttons.join(' | ')}]`;
+
+    const agent = await runAgent(page, {
+      job, ctx: { ...ctx, ats: 'linkedin' }, resumePath, submit,
+      stage: 'modal-did-not-open', reason: why, deterministicOnly: true,
+    });
+    if (agent) return agentResult(agent, { screenshots });
+
+    throw new Error(why);
   }
 
   // The modal's first step renders progressively — the <dialog> mounts before its
@@ -154,7 +210,15 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
         } catch { /* LinkedIn often pre-selects a stored resume; upload is optional */ }
       }
 
-      return fields.filter(f => f.kind !== 'file' && f.question).map(fromDomField);
+      // LinkedIn's own header is not a screening question. When the modal closes
+      // under the collector this is the second line of defence — the first is
+      // collectFieldsInPage refusing to widen to the document when its root has
+      // gone. Job 453 captured a "Search" textbox and a "Select language"
+      // combobox as the application form; nothing was typed into them only
+      // because the run was already stuck.
+      return fields
+        .filter(f => f.kind !== 'file' && f.question && !isSiteSearch(f.question))
+        .map(fromDomField);
     };
 
     const result = await runWizard({
@@ -162,6 +226,12 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       collect,
       resolve: items => resolveFormBatch(items, ctx),
       fill: (item, value) => fillField(page, item.field, value),
+      // Read the whole application back before pressing submit. Easy Apply had
+      // no such check: whatever the ladder produced went to the employer.
+      mayFinish: preflightGate({
+        profile: ctx.profile, job, channel: 'linkedin_easy', ats: 'linkedin',
+        countryCode: ctx.countryCode,
+      }),
       // Verified live: the Next button is just <button>Next</button> — no
       // aria-label, no data attribute — so the aria-label selectors in BTN.next
       // match nothing. Find the footer controls by accessible name (text), the
@@ -198,17 +268,39 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
     }
 
     if (result.outcome === 'stuck') {
+      // Eight of fourteen attempts on 28 July ended here — "form did not advance
+      // past step 2", "step 1 has no next/submit control" — and this channel had
+      // no agent coverage at all, so every one of them was simply thrown away.
+      // A modal whose footer control the hand-written selectors cannot name is
+      // the same problem the planner already solves on unknown ATS pages.
+      //
+      // Scoped to the modal, which matters twice over: the planner sees the
+      // application rather than the LinkedIn page it sits on, and the plan is
+      // cached against the shape of a form rather than the shape of a website.
+      const modal = await modalSelector(page);
+      const agent = await runAgent(page, {
+        job, ctx: { ...ctx, ats: 'linkedin' }, resumePath, submit,
+        stage: 'stuck', reason: result.reason,
+        rootSelector: modal || 'body', deterministicOnly: true,
+      });
+      if (agent) {
+        await abandon(page).catch(() => {});
+        return agentResult(agent, { screenshots, filled });
+      }
+
       // Capture before abandoning — abandon() closes the modal, after which the
-      // stuck form is gone. Easy Apply is a known vendor, but a form that won't
-      // advance is exactly the unanswerable-structure case the planner learns from.
-      await captureUnsolvedPage(page, { job, vendor: 'linkedin_easy', stage: 'stuck', reason: result.reason });
+      // stuck form is gone.
+      await captureUnsolvedPage(page, {
+        job, vendor: 'linkedin_easy', stage: 'stuck', reason: result.reason,
+        rootSelector: modal || 'body',
+      });
       await abandon(page);
       throw new Error(result.reason);
     }
 
     if (result.outcome === 'ready') {
       await abandon(page);
-      return { outcome: 'ready', filled, screenshots, steps: result.steps };
+      return { outcome: 'ready', filled, screenshots, steps: result.steps, heldForReview: result.reason || null };
     }
 
     await result.terminal.click();

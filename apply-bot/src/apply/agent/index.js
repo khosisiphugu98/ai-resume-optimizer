@@ -16,6 +16,7 @@ import { observePage } from './observe.js';
 import { planPage } from './plan.js';
 import { executePlan } from './execute.js';
 import { autoSubmitAllowed } from './gate.js';
+import { preflight } from '../preflight.js';
 
 export function agentEnabled() {
   return getSetting('agent_enabled') === '1';
@@ -26,22 +27,46 @@ export function agentEnabled() {
 // submitted. Only 'stuck' means the plan didn't fit.
 const worked = outcome => outcome === 'ready' || outcome === 'parked' || outcome === 'submitted';
 
-// The Phase-5 gate as a callback executePlan can consult after filling. Never
-// manufactures submit intent — `submit` comes from the run (auto/approved).
-const makeGate = (submit, planSuccessCount) =>
-  (filled, parked) => autoSubmitAllowed({ submitIntent: submit, planSuccessCount, filled, parked });
+/**
+ * The Phase-5 gate as a callback executePlan can consult after filling. Never
+ * manufactures submit intent — `submit` comes from the run (auto/approved).
+ *
+ * Two conditions in order, cheap first. `autoSubmitAllowed` is a policy question
+ * about provenance — is this shape proven, did every value come from a grounded
+ * tier — and answers without leaving the process. The pre-send review is a
+ * question about the content, and costs a model call, so it only runs on a
+ * payload the policy already accepts.
+ */
+const makeGate = (submit, planSuccessCount, { profile = null, job = null, ats = null } = {}) =>
+  async (filled, parked) => {
+    if (!autoSubmitAllowed({ submitIntent: submit, planSuccessCount, filled, parked })) return false;
+    const check = await preflight({ filled, profile, job, ats, channel: 'agent' });
+    if (check.ok) return true;
+    emit({ jobId: job?.id, stage: 'apply', level: 'warn', message: `Agent held back from submitting — ${check.reason}` });
+    return false;
+  };
 
 /**
  * @returns null, or { outcome: 'ready'|'parked'|'submitted', filled, parked, steps, planKind, fingerprint, replayed }
  */
-export async function runAgent(page, { job = null, ctx = {}, resumePath = null, stage = '', reason = '', submit = false } = {}, deps = {}) {
+export async function runAgent(page, {
+  job = null, ctx = {}, resumePath = null, stage = '', reason = '', submit = false,
+  rootSelector = 'body', deterministicOnly = false,
+} = {}, deps = {}) {
   if (!agentEnabled()) return null;
   const { observeFn = observePage, planFn = planPage, executeFn = executePlan } = deps;
+
+  // What the agent is for is *finding* controls on a page the deterministic
+  // selectors could not read. Whether a value may be written into one of them is
+  // a separate question, and on the Easy Apply path the answer is that only the
+  // profile and the answer bank may write it. See resolver.js's note on
+  // deterministicOnly.
+  const answerCtx = deterministicOnly ? { ...ctx, deterministicOnly: true } : ctx;
 
   try {
     emit({ jobId: job?.id, stage: 'apply', message: `Agent escalation (${stage}) — ${reason}` });
 
-    const observation = await observeFn(page);
+    const observation = await observeFn(page, { rootSelector });
     const fp = observation.fingerprint;
     const shape = fp.slice(0, 8);
 
@@ -57,7 +82,8 @@ export async function runAgent(page, { job = null, ctx = {}, resumePath = null, 
       // and never vouches for a shape nobody has seen succeed.
       const proven = cached.success_count > 0 ? hostPlanSuccess(observation.host) : 0;
       const result = await executeFn(page, cached.plan, {
-        job, ctx, resumePath, pins: cached.pins, submitGate: makeGate(submit, proven),
+        job, ctx: answerCtx, resumePath, pins: cached.pins,
+        submitGate: makeGate(submit, proven, { profile: ctx.profile, job, ats: ctx.ats }),
       });
       if (worked(result.outcome)) {
         bumpPlanSuccess(fp);
@@ -80,7 +106,10 @@ export async function runAgent(page, { job = null, ctx = {}, resumePath = null, 
 
     // First sight of a shape never auto-submits, however well the site has done
     // before. It fills, goes for review, and earns its first success there.
-    const result = await executeFn(page, plan, { job, ctx, resumePath, submitGate: makeGate(submit, 0) });
+    const result = await executeFn(page, plan, {
+      job, ctx: answerCtx, resumePath,
+      submitGate: makeGate(submit, 0, { profile: ctx.profile, job, ats: ctx.ats }),
+    });
     if (!worked(result.outcome)) {
       emit({ jobId: job?.id, stage: 'apply', level: 'warn', message: `Agent plan did not solve the page — ${result.reason || 'stuck'}` });
       return null;

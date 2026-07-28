@@ -330,7 +330,7 @@ await test('runAgent auto-submits a proven, grounded replay; a 0-success shape d
   resetPlans();
   setSetting('agent_enabled', '1');
   // The injected executor consults the real gate runAgent builds and reports back.
-  const execViaGate = async (_page, _plan, opts) => (opts.submitGate([{ tier: 'profile' }], [])
+  const execViaGate = async (_page, _plan, opts) => (await opts.submitGate([{ tier: 'profile' }], [])
     ? { outcome: 'submitted', filled: [{ tier: 'profile' }], steps: 1 }
     : { outcome: 'ready', filled: [{ tier: 'profile' }], steps: 1 });
 
@@ -359,7 +359,7 @@ setSetting('agent_enabled', '0');   // leave the switch as a fresh install would
 await test('confidence accrues per site, but only vouches for a shape already proven', async () => {
   resetPlans();
   setSetting('agent_enabled', '1');
-  const execViaGate = async (_page, _plan, opts) => (opts.submitGate([{ tier: 'profile' }], [])
+  const execViaGate = async (_page, _plan, opts) => (await opts.submitGate([{ tier: 'profile' }], [])
     ? { outcome: 'submitted', filled: [{ tier: 'profile' }], steps: 1 }
     : { outcome: 'ready', filled: [{ tier: 'profile' }], steps: 1 });
 
