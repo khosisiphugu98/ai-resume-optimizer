@@ -2,7 +2,7 @@
 // no-op optimisation exports the untailored seed CV under a job-specific filename,
 // and every downstream check passes it. 19 of 164 résumés on disk were duplicates
 // that way, including the only application ever emailed. No network.
-import { normaliseResumeText } from '../src/tailor/optimiser.js';
+import { normaliseResumeText, outputName } from '../src/tailor/optimiser.js';
 import { validateResumePdf, CORE_RESUME_SKILLS } from './extract-text.mjs';
 
 let pass = 0, fail = 0;
@@ -64,6 +64,21 @@ section('single-page ratio');
   t('a real export passes', overLimit(675, 897), false);
   t('A4 passes', overLimit(675, 954), false);
   t('a doubled document fails', overLimit(675, 1794), true);
+}
+
+// Company and title are both truncated to 40 characters, so two long postings
+// at the same employer produced the same path and one job's CV overwrote the
+// other's: 190 tailored rows mapped to 159 distinct files on disk.
+section('two postings never write to the same file');
+{
+  const who = { identity: { firstName: 'Khosi', lastName: 'Siphugu' } };
+  const long = c => `Senior Performance Marketing and Digital Analytics ${c}`;
+  const a = outputName({ id: 1401, company: 'Standard Bank Group', title: long('Manager') }, who);
+  const b = outputName({ id: 1402, company: 'Standard Bank Group', title: long('Specialist') }, who);
+  t('truncated titles still differ', a === b, false);
+  t('the same job re-tailors to the same file',
+    outputName({ id: 1401, company: 'Standard Bank Group', title: long('Manager') }, who), a);
+  t('still a name a recruiter can read', /^Khosi_Siphugu_CV_Standard_Bank_Group_/.test(a), true);
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);

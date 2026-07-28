@@ -51,15 +51,26 @@ async function shot(page, jobId, label) {
  * contains form controls.
  */
 export async function formScope(page, vendor) {
+  // Pick the richest root, not the first one with any input at all.
+  //
+  // `formRoot` is an ordered list of guesses, and taking the first match meant a
+  // narrow container that happens to hold one control won over the real form
+  // sitting further down the list. That is why Greenhouse applications filled the
+  // CV attachment and nothing else across eight attempts: an early selector
+  // matched a wrapper holding only the file input, so the name, email and phone
+  // fields were never in scope. Counting first costs one extra query per
+  // candidate and removes the ordering trap entirely. `a11yScope` below already
+  // worked this way.
+  let best = null;
   for (const frame of page.frames()) {
     for (const sel of vendor.formRoot) {
       const n = await frame.locator(sel).count().catch(() => 0);
       if (!n) continue;
       const inputs = await frame.locator(`${sel} input, ${sel} select, ${sel} textarea`).count().catch(() => 0);
-      if (inputs > 0) return { frame, rootSelector: sel };
+      if (inputs > 0 && (!best || inputs > best.count)) best = { frame, rootSelector: sel, count: inputs };
     }
   }
-  return null;
+  return best ? { frame: best.frame, rootSelector: best.rootSelector } : null;
 }
 
 /**

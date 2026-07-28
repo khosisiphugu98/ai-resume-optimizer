@@ -8,6 +8,8 @@ import { detectVendor } from './adapters/index.js';
 import { canApply, recordApplication, currentMode, applicationGap } from './rate.js';
 import { AUDIT } from '../score/index.js';
 import { resumeText } from '../answer/resume-context.js';
+import path from 'node:path';
+import { recordSubmission } from './submission-log.js';
 
 // A posting that fails this many times stays in apply_failed and stops being
 // re-queued. High enough to ride out transient failures, low enough that a
@@ -15,8 +17,28 @@ import { resumeText } from '../answer/resume-context.js';
 // and pageview budget on every cycle forever.
 export const APPLY_MAX_ATTEMPTS = 3;
 
+/**
+ * Failures that will fail identically on every retry.
+ *
+ * The retry budget exists for transient trouble — a slow render, a lost popup
+ * race, a network blip. Spending it on a posting whose form does not exist, or
+ * whose vendor we do not automate, proves the same thing three times and burns
+ * three pageviews doing it. These go straight to terminal.
+ */
+const DETERMINISTIC_FAILURE = [
+  /no application form found/i,
+  /no fillable fields/i,
+  /posting (is |has )?(closed|expired|no longer)/i,
+  // Deliberately narrow: a bare "not found" also matches Playwright's selector
+  // errors, which are usually a timing problem and worth another go.
+  /\b404\b|page not found/i,
+  /requires? (an? )?(account|sign[- ]?in|login)/i,
+];
+
+export const isDeterministic = msg => DETERMINISTIC_FAILURE.some(re => re.test(msg || ''));
+
 /** Persist an attempt so the dashboard can show exactly what was filled. */
-function recordAttempt(job, channel, result, outcome) {
+function recordAttempt(job, channel, result, outcome, note = null) {
   const info = db.prepare(`
     INSERT INTO applications (job_id, channel, resume_path, ats_vendor, adapter_used,
                               submitted_at, confirmation_evidence, outcome,
@@ -42,7 +64,9 @@ function recordAttempt(job, channel, result, outcome) {
     // Carried onto the application so the calibration report can hold audit
     // samples out of the headline rate — they were sent *because* they scored
     // below the threshold, so counting them with the rest would understate it.
-    note: job.reject_reason === AUDIT.reason ? AUDIT.reason : null,
+    // The audit marker wins the slot when present — the calibration report keys
+    // off it — otherwise the note says why this attempt ended where it did.
+    note: job.reject_reason === AUDIT.reason ? AUDIT.reason : note,
   });
   return info.lastInsertRowid;
 }
@@ -185,7 +209,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
       }
 
       if (result.outcome === 'manual') {
-        recordAttempt(job, channel, result, 'blocked');
+        recordAttempt(job, channel, result, 'unsupported', result.reason);
         updateJob(job.id, { status: 'manual_required', ats_vendor: result.vendor, reject_reason: result.reason });
         stats.manual++;
         emit({
@@ -194,27 +218,44 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         });
       } else if (result.outcome === 'parked') {
         parkQuestions(job.id, result.parked);
-        recordAttempt(job, channel, result, 'abandoned');
+        recordAttempt(job, channel, result, 'abandoned', `parked: ${result.parked[0]?.question || ''} (${result.parked[0]?.reason || ''})`.slice(0, 200));
         stats.parked++;
         emit({
           jobId: job.id, stage: 'apply', level: 'warn',
           message: `Parked — ${result.parked[0].question} (${result.parked[0].reason})`,
         });
       } else if (result.outcome === 'submitted') {
-        recordAttempt(job, channel, result, 'submitted');
+        const appId = recordAttempt(job, channel, result, 'submitted');
         recordApplication(channel);
         updateJob(job.id, { status: 'submitted' });
         stats.submitted++;
-        emit({ jobId: job.id, stage: 'apply', message: `Submitted — ${job.title} @ ${job.company}` });
+        // What actually went to the employer, written where it can be read back
+        // without the database — see submission-log.js.
+        recordSubmission({ job, channel, applicationId: appId, result, outcome: 'submitted' });
+        emit({
+          jobId: job.id, stage: 'apply',
+          message: `Submitted — ${job.title} @ ${job.company} · ${result.filled?.length || 0} field(s)`
+            + `${job.resume_path ? ` · ${path.basename(job.resume_path)}` : ''}`
+            + ` · logged to artifacts/submissions/${job.id}-${appId}.json`,
+        });
+        for (const f of result.filled || []) {
+          emit({
+            jobId: job.id, stage: 'apply', level: 'debug',
+            message: `  sent [${f.tier || '?'}] ${String(f.question || '').slice(0, 60)} = ${JSON.stringify(String(f.value ?? '').slice(0, 60))}`,
+          });
+        }
       } else if (result.outcome === 'submitted_unconfirmed') {
         // We pressed submit and could not verify what happened. This is terminal on
         // purpose: `manual_required` is never re-selected, so the application is not
         // sent a second time on the strength of an unrecognised confirmation page.
         // It counts against the daily cap, because something did go out.
-        recordAttempt(job, channel, result, 'submitted_unconfirmed');
+        const appId = recordAttempt(job, channel, result, 'submitted_unconfirmed');
         recordApplication(channel);
         updateJob(job.id, { status: 'manual_required', reject_reason: result.reason });
         stats.manual++;
+        // Logged like a confirmed submission: something went out, and the record
+        // of what is exactly as valuable when the outcome is uncertain.
+        recordSubmission({ job, channel, applicationId: appId, result, outcome: 'submitted_unconfirmed' });
         emit({
           jobId: job.id, stage: 'apply', level: 'warn',
           message: `Submitted but unconfirmed — ${job.title} @ ${job.company}. ${result.reason} Check the employer's site or your inbox before re-applying.`,
@@ -224,8 +265,8 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         // awaiting_review is what made approval an infinite loop: re-filling the
         // live vendor form on every cycle and never finishing. It stops here, with
         // the reason, so the operator can do it by hand rather than approve again.
-        recordAttempt(job, channel, result, 'blocked');
         const why = result.heldForReview || 'the form could not be submitted automatically';
+        recordAttempt(job, channel, result, 'needs_human', why);
         updateJob(job.id, { status: 'manual_required', reject_reason: why });
         stats.manual++;
         emit({
@@ -234,7 +275,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         });
       } else {
         // Filled and captured, not sent.
-        recordAttempt(job, channel, result, 'blocked');
+        recordAttempt(job, channel, result, 'held_for_review', result.heldForReview || 'mode is review — awaiting approval');
         updateJob(job.id, { status: 'awaiting_review' });
         stats.queued++;
         emit({
@@ -246,7 +287,12 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     } catch (err) {
       if (err instanceof ChallengeDetected) {
         bumpRate('challenges_hit');
-        updateJob(job.id, { status: 'tailored' });
+        // Refund the attempt. A challenge says nothing about this posting — the
+        // job never got its turn. Charging it burnt a third of the retry budget
+        // each time LinkedIn asked us to prove we were human, and six jobs
+        // reached 3 attempts that way: permanently unselectable, never actually
+        // tried.
+        updateJob(job.id, { status: 'tailored', apply_attempts: job.apply_attempts || 0 });
         emit({
           jobId: job.id, stage: 'apply', level: 'critical',
           message: `${err.message} — ALL APPLYING HALTED. Clear it by hand in the browser, then run: npm run resume`,
@@ -268,13 +314,24 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         continue;
       }
 
-      updateJob(job.id, { status: 'apply_failed', reject_reason: err.message.slice(0, 200) });
+      // A deterministic failure is already exhausted on attempt one: retrying
+      // "no application form found" produces the same sentence twice more.
+      const terminal = isDeterministic(err.message);
+      const exhausted = terminal || attemptNo >= APPLY_MAX_ATTEMPTS;
+      // `apply_failed` under the attempt cap was invisible rather than finished:
+      // the selector skips it, but nothing says so, so it reads as still-queued
+      // on the board. `apply_exhausted` is the honest terminal state.
+      updateJob(job.id, {
+        status: exhausted ? 'apply_exhausted' : 'apply_failed',
+        reject_reason: err.message.slice(0, 200),
+      });
       stats.failed++;
-      const exhausted = attemptNo >= APPLY_MAX_ATTEMPTS;
       emit({
         jobId: job.id, stage: 'apply', level: 'error',
         message: `Failed: ${err.message}` +
-          (exhausted ? ` — giving up after ${attemptNo} attempts (won't retry automatically)` : ` — will retry next cycle (${attemptNo}/${APPLY_MAX_ATTEMPTS})`),
+          (terminal ? ' — this will not change on a retry; giving up (needs a human, or the posting is gone)'
+            : exhausted ? ` — giving up after ${attemptNo} attempts (won't retry automatically)`
+            : ` — will retry next cycle (${attemptNo}/${APPLY_MAX_ATTEMPTS})`),
       });
     }
 

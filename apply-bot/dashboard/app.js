@@ -13,6 +13,10 @@ const COLUMNS = [
   ['manual_required', 'Manual'],
   ['tailor_failed', 'Tailor failed'],
   ['apply_failed', 'Apply failed'],
+  // Failed and out of retries, or failed in a way retrying cannot fix. Kept
+  // apart from 'Apply failed' because that column is things still coming back
+  // round; these need a person or nothing at all.
+  ['apply_exhausted', 'Gave up'],
   ['rejected', 'Rejected'],
 ];
 

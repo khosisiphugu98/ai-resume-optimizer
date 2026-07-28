@@ -42,6 +42,14 @@ t('workable',                 detectVendor('https://apply.workable.com/acme/j/AB
 t('smartrecruiters',          detectVendor('https://jobs.smartrecruiters.com/Acme/74400').vendor, 'smartrecruiters');
 t('unknown falls back',       detectVendor('https://careers.randomco.com/apply').vendor, 'generic');
 
+// A bare `workday.com` also matched the marketing site, so a blog post linked
+// from a posting was routed to manual as though it were an application wizard.
+t('marketing site is not the ATS', detectVendor('https://blog.workday.com/en-us/posts/x').deferred, undefined);
+t('www is not the ATS',           detectVendor('https://www.workday.com/').vendor, 'generic');
+// Oracle Recruiting was in neither list — it fell to generic and failed as
+// "no fillable fields" rather than handing off honestly.
+t('oracle deferred',              detectVendor('https://iagjme.fa.ocs.oraclecloud.com/hcmUI/x').deferred, true);
+
 section('deferred vendors route to manual, never to the generic adapter');
 t('workday deferred',  detectVendor('https://acme.wd1.myworkdayjobs.com/en-US/careers/job/x').deferred, true);
 t('taleo deferred',    detectVendor('https://acme.taleo.net/careersection/x').deferred, true);

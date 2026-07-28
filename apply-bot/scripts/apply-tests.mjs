@@ -144,10 +144,23 @@ t('the window is genuinely open', [HOURS.start, HOURS.end, HOURS.weekdaysOnly], 
 
 section('observe mode applies to nothing');
 setSetting('mode', 'observe');
-const { runApplications } = await import('../src/apply/run.js');
+const { runApplications, isDeterministic } = await import('../src/apply/run.js');
 const r = await runApplications({ mode: 'observe' });
 t('no attempts made', r.attempted, 0);
 db.exec("DELETE FROM events");
+
+// The retry budget is for transient trouble. Spending it on a posting whose
+// form does not exist proves the same thing three times and costs three
+// pageviews doing it.
+section('retries are only spent where a retry could help');
+t('missing form is terminal',    isDeterministic('No application form found'), true);
+t('unfillable page is terminal', isDeterministic('no fillable fields on this page'), true);
+t('login wall is terminal',      isDeterministic('This posting requires an account'), true);
+t('a timeout is not terminal',   isDeterministic('Timeout 30000ms exceeded waiting for selector'), false);
+t('a lost popup is not terminal', isDeterministic('Target page, context or browser has been closed'), false);
+t('a missing selector is not terminal', isDeterministic('locator.click: Element not found'), false);
+t('a real 404 is terminal',      isDeterministic('page.goto: 404 Not Found'), true);
+t('no message is not terminal',  isDeterministic(''), false);
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

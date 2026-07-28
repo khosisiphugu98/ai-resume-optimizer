@@ -50,7 +50,14 @@ CREATE TABLE IF NOT EXISTS applications (
   adapter_used           TEXT,
   submitted_at           TEXT,
   confirmation_evidence  TEXT,
-  outcome                TEXT             -- submitted|abandoned|blocked|error
+  -- submitted | submitted_unconfirmed | held_for_review | unsupported
+  -- | needs_human | abandoned | error
+  --
+  -- 'blocked' used to cover the middle three, which made the number
+  -- meaningless: "24 blocked" mixed applications sitting ready for a human to
+  -- approve with postings on a vendor we do not automate at all. Different
+  -- problems, different fixes. outcome_note carries the specific reason.
+  outcome                TEXT
 );
 
 CREATE TABLE IF NOT EXISTS answers (

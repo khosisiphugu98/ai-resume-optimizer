@@ -6,8 +6,15 @@ import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
 import { emit } from './bus.js';
 import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures, listPagePlans } from './db.js';
+import { applySecretsToEnv } from './secrets.js';
 
 const cmd = process.argv[2];
+
+// Only server.js did this, so every stage run from the CLI — score, tailor,
+// apply, the whole `npm run cycle` — started with no API keys in the
+// environment and silently degraded to its keyless path. The same run through
+// the dashboard had them. Same code, different answers, no error either way.
+applySecretsToEnv();
 
 closeBrowserOnExit();
 
@@ -204,6 +211,34 @@ const commands = {
     console.log(`\n  Connected as ${await gmail.profileAddress()}\n`);
   },
 
+  // What actually went to employers. Reads the append-only submission log.
+  async submissions() {
+    const { listSubmissions, SUBMISSIONS_DIR } = await import('./apply/submission-log.js');
+    const verbose = process.argv.includes('--fields');
+    const rows = listSubmissions({ limit: Number(process.argv[3]) || 50 });
+
+    if (!rows.length) {
+      console.log('\n  Nothing submitted yet. Every submission is recorded under');
+      console.log(`  ${SUBMISSIONS_DIR}/ as it happens.\n`);
+      return;
+    }
+
+    console.log(`\n  ${rows.length} submission(s), newest first:\n`);
+    for (const r of rows) {
+      const flag = r.outcome === 'submitted_unconfirmed' ? ' [UNCONFIRMED]' : '';
+      console.log(`  ${r.submittedAt.slice(0, 16).replace('T', ' ')}  ${r.job.title} @ ${r.job.company}${flag}`);
+      console.log(`     ${r.channel}${r.vendor ? `/${r.vendor}` : ''} · ${r.fieldCount} field(s) · CV: ${r.resume || 'none'}`);
+      if (r.appliedAt) console.log(`     ${String(r.appliedAt).slice(0, 100)}`);
+      if (verbose) {
+        for (const f of r.fields) {
+          console.log(`       [${String(f.decidedBy || '?').padEnd(11)}] ${String(f.question || '').slice(0, 44).padEnd(46)} = ${JSON.stringify(String(f.value ?? '').slice(0, 44))}${f.probable ? '  (interpreted)' : ''}`);
+        }
+      }
+      console.log('');
+    }
+    if (!verbose) console.log('  npm run submissions -- --fields   show every value sent\n');
+  },
+
   async searches() {
     for (const s of allSearches()) {
       console.log(`  ${s.enabled ? ' ' : '·'} [${s.tier}] ${s.keywords.padEnd(34)} ${s.location}` +
@@ -304,6 +339,7 @@ if (!commands[cmd]) {
     npm run discover    Discovery only
     npm run enrich [n]  Fetch JDs and resolve apply routes
     npm run searches    List configured searches
+    npm run submissions List everything that has been sent to an employer
     npm run captures    List unknown application pages the apply flow couldn't fill
     npm run plans       List learned plans the agent replays (Phase 3)
     npm run stop        Write the kill switch

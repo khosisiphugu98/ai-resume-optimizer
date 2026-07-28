@@ -107,11 +107,19 @@ async function pdfPageCount(file) {
   return pdf.numPages;
 }
 
-/** Filenames a recruiter sorts by. Never ship "resume(11).pdf". */
+/**
+ * Filenames a recruiter sorts by. Never ship "resume(11).pdf".
+ *
+ * The job id is on the end because company and title are both truncated to 40
+ * characters, and long postings at the same employer collide after truncation:
+ * 190 tailored rows mapped to 159 distinct paths, so 31 jobs were carrying a
+ * CV written for a different posting. The id makes the path unique per job
+ * while staying stable when the same job is re-tailored.
+ */
 export function outputName(job, profile) {
   const slug = s => String(s || '').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 40);
   const who = `${profile.identity.firstName}_${profile.identity.lastName}`;
-  return `${who}_CV_${slug(job.company)}_${slug(job.title)}.pdf`;
+  return `${who}_CV_${slug(job.company)}_${slug(job.title)}_${job.id}.pdf`;
 }
 
 async function optimiserError(page) {
@@ -422,7 +430,10 @@ export async function runTailoring({ limit = 10 } = {}) {
     try {
       emit({ jobId: job.id, stage: 'tailor', message: `Tailoring for ${job.title} @ ${job.company}` });
       const r = await tailorForJob(page, job, profile);
-      updateJob(job.id, { status: 'tailored', resume_path: r.path });
+      // tailored_at exists as a column and was written by nothing, so every row
+      // read NULL and there was no way to tell a CV built this morning from one
+      // built three weeks ago against a posting that has since changed.
+      updateJob(job.id, { status: 'tailored', resume_path: r.path, tailored_at: new Date().toISOString() });
       done++;
 
       // Skills this job asked for that the candidate hasn't vouched for. They were
