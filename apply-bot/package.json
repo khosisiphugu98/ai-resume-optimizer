@@ -31,7 +31,8 @@
     "email": "node src/cli.js email",
     "outbox": "node src/cli.js outbox",
     "replies": "node src/cli.js replies",
-    "submissions": "node src/cli.js submissions"
+    "submissions": "node src/cli.js submissions",
+    "watch:submissions": "node scripts/watch-submissions.mjs"
   },
   "keywords": [],
   "author": "",
