@@ -13,7 +13,7 @@ import { executePlan } from '../src/apply/agent/execute.js';
 import { runAgent } from '../src/apply/agent/index.js';
 import {
   db, setSetting, getPlan, savePlan, bumpPlanSuccess, bumpPlanFail, PLAN_DEMOTE_AT,
-  pinPlanField, deletePlan,
+  pinPlanField, deletePlan, hostPlanSuccess,
 } from '../src/db.js';
 import { normaliseQuestion } from '../src/answer/bank.js';
 import { autoSubmitAllowed, AUTOSUBMIT_MIN_SUCCESS } from '../src/apply/agent/gate.js';
@@ -349,6 +349,63 @@ await test('runAgent auto-submits a proven, grounded replay; a 0-success shape d
 });
 
 setSetting('agent_enabled', '0');   // leave the switch as a fresh install would
+
+
+// The ramp was unreachable in production: savePlan writes success_count = 0 and
+// nothing bumped it on the first success, while the fingerprint (host + every
+// control's role:name) never repeated — 17 captures produced 17 distinct
+// fingerprints. A counter keyed on something that never recurs reads zero
+// forever, so AUTOSUBMIT_MIN_SUCCESS could never be met.
+await test('confidence accrues per site, but only vouches for a shape already proven', async () => {
+  resetPlans();
+  setSetting('agent_enabled', '1');
+  const execViaGate = async (_page, _plan, opts) => (opts.submitGate([{ tier: 'profile' }], [])
+    ? { outcome: 'submitted', filled: [{ tier: 'profile' }], steps: 1 }
+    : { outcome: 'ready', filled: [{ tier: 'profile' }], steps: 1 });
+
+  // Spread the site's successes across several shapes, as real postings do.
+  for (const fp of ['a', 'b', 'c']) {
+    savePlan({ fingerprint: fp, host: 'many.test', plan: validPlan });
+    bumpPlanSuccess(fp);
+  }
+  assert.equal(hostPlanSuccess('many.test'), 3, 'the site has earned three successes');
+  assert.equal(getPlan('a').success_count, 1, 'no single shape reaches the threshold alone');
+
+  // A shape with one success of its own, on a site at the threshold: submits.
+  const known = await runAgent({}, { stage: 'stuck', reason: 't', submit: true }, {
+    observeFn: async () => ({ host: 'many.test', fingerprint: 'a' }), executeFn: execViaGate,
+  });
+  assert.equal(known.outcome, 'submitted');
+
+  // Same site, a shape that has never worked: held, despite the site's record.
+  savePlan({ fingerprint: 'unseen', host: 'many.test', plan: validPlan });
+  const unseen = await runAgent({}, { stage: 'stuck', reason: 't', submit: true }, {
+    observeFn: async () => ({ host: 'many.test', fingerprint: 'unseen' }), executeFn: execViaGate,
+  });
+  assert.equal(unseen.outcome, 'ready', "a site's record must not vouch for an unproven shape");
+
+  // A different site with no history: held.
+  savePlan({ fingerprint: 'other', host: 'fresh.test', plan: validPlan });
+  bumpPlanSuccess('other');
+  const otherSite = await runAgent({}, { stage: 'stuck', reason: 't', submit: true }, {
+    observeFn: async () => ({ host: 'fresh.test', fingerprint: 'other' }), executeFn: execViaGate,
+  });
+  assert.equal(otherSite.outcome, 'ready', 'a site with one success is not yet proven');
+});
+
+// A working plan used to be recorded as unproven, so the ramp started a visit
+// further back than it should.
+await test('a plan that works on first sight is credited immediately', async () => {
+  resetPlans();
+  setSetting('agent_enabled', '1');
+  const r = await runAgent({}, { stage: 'stuck', reason: 't', submit: false }, {
+    observeFn: async () => ({ host: 'new.test', fingerprint: 'fp-FIRST' }),
+    planFn: async () => validPlan,
+    executeFn: async () => ({ outcome: 'ready', filled: [{ tier: 'profile' }], steps: 1 }),
+  });
+  assert.equal(r.replayed, false);
+  assert.equal(getPlan('fp-FIRST').success_count, 1, 'the first success must be recorded');
+});
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
