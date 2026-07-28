@@ -158,6 +158,8 @@ t('unfillable page is terminal', isDeterministic('no fillable fields on this pag
 t('login wall is terminal',      isDeterministic('This posting requires an account'), true);
 t('a timeout is not terminal',   isDeterministic('Timeout 30000ms exceeded waiting for selector'), false);
 t('a lost popup is not terminal', isDeterministic('Target page, context or browser has been closed'), false);
+t('a missing selector is not terminal', isDeterministic('locator.click: Element not found'), false);
+t('a real 404 is terminal',      isDeterministic('page.goto: 404 Not Found'), true);
 t('no message is not terminal',  isDeterministic(''), false);
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);

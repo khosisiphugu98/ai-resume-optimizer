@@ -29,7 +29,9 @@ const DETERMINISTIC_FAILURE = [
   /no application form found/i,
   /no fillable fields/i,
   /posting (is |has )?(closed|expired|no longer)/i,
-  /404|not found/i,
+  // Deliberately narrow: a bare "not found" also matches Playwright's selector
+  // errors, which are usually a timing problem and worth another go.
+  /\b404\b|page not found/i,
   /requires? (an? )?(account|sign[- ]?in|login)/i,
 ];
 
