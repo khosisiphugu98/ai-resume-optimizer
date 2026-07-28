@@ -365,6 +365,23 @@ t('the field that revealed it was filled too',
   !!w2.filled.find(f => /sponsorship/i.test(f.question)), true);
 t('one step, not two', w2.steps, 1);
 
+// formScope took the FIRST root with any input at all, so a narrow wrapper
+// holding one control beat the real form further down the selector list. That is
+// why Greenhouse applications filled the CV attachment and nothing else across
+// eight attempts. It picks the richest root now.
+section('the form scope is the richest match, not the first');
+const SPLIT = at('https://careers.split.test/apply', `
+  <div id="upload-panel"><input type="file" id="cv"></div>
+  <form id="application-form">
+    <label for="s-em">Email</label><input id="s-em" type="text" required>
+    <label for="s-ph">Mobile phone number</label><input id="s-ph" type="text" required>
+    <label for="s-li">LinkedIn Profile</label><input id="s-li" type="text" required>
+    <button type="button" id="sub">Submit application</button>
+  </form>`);
+const w5 = await applyExternal(page, { ...job(9106), external_apply_url: SPLIT }, ctx, { submit: false });
+t('found the real form, not the upload wrapper', w5.filled.length >= 3, true);
+t('email landed', await page.locator('#s-em').inputValue(), 'k@example.com');
+
 // One unanswerable field used to discard the whole application before a single
 // character was typed, which is why LinkedIn Easy Apply recorded thirteen attempts
 // averaging 0.0 fields filled. The answerable fields are worth keeping: they are
@@ -425,7 +442,7 @@ t('a different form does not', sig(roles) === sig(shadow), false);
 t('signature ignores uids', /a11y-/.test(sig(roles)), false);
 
 await browser.close();
-for (let i = 9101; i <= 9105; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
+for (let i = 9101; i <= 9106; i++) fs.rmSync(path.join(dir, 'screenshots', String(i)), { recursive: true, force: true });
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

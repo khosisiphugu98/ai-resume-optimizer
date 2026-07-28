@@ -59,8 +59,16 @@ export const DEFERRED = [
   // myworkdaysite.com is Workday's other tenant domain (verified live: AB InBev's
   // careers site resolves there). Without it the posting fell through to the
   // generic adapter and failed as "no form found" instead of routing to manual.
-  { vendor: 'workday', match: url => /myworkdayjobs\.com|myworkdaysite\.com|workday\.com/i.test(url),
+  // Anchored on the tenant domains, not a bare `workday.com`: that also matched
+  // blog.workday.com and www.workday.com, so a marketing page linked from a
+  // posting was routed to manual as though it were an application wizard.
+  { vendor: 'workday', match: url => /myworkdayjobs\.com|myworkdaysite\.com|\.wd\d+\.myworkday|\bwd\d+\.workday\.com/i.test(url),
     why: 'Workday requires a per-tenant account and a multi-page wizard' },
+  // Oracle Recruiting was in neither list, so it fell through to generic and
+  // failed as "no fillable fields" — the same per-tenant account problem as
+  // Workday, but presenting as a broken page rather than an honest hand-off.
+  { vendor: 'oracle', match: url => /\.oraclecloud\.com|oracle\.com\/.*\/recruiting/i.test(url),
+    why: 'Oracle Recruiting requires a per-tenant candidate account' },
   { vendor: 'taleo', match: url => /taleo\.net|tbe\.taleo\.net/i.test(url),
     why: 'Taleo requires an account and uses legacy nested frames' },
   { vendor: 'icims', match: url => /\.icims\.com/i.test(url),
