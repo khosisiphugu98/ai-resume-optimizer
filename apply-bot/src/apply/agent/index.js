@@ -10,7 +10,7 @@
 // Off by default: the `agent_enabled` setting is the switch. Best-effort by
 // contract — any failure returns null and never changes the deterministic
 // outcome. See docs/APPLY_BOT_ADAPTIVE_AGENT_PHASE2.md and _PHASE3.md.
-import { getSetting, getPlan, savePlan, bumpPlanSuccess, bumpPlanFail } from '../../db.js';
+import { getSetting, getPlan, savePlan, bumpPlanSuccess, bumpPlanFail, hostPlanSuccess } from '../../db.js';
 import { emit } from '../../bus.js';
 import { observePage } from './observe.js';
 import { planPage } from './plan.js';
@@ -50,8 +50,14 @@ export async function runAgent(page, { job = null, ctx = {}, resumePath = null, 
     if (cached) {
       // A cached plan carries its proven success count — a plan the operator has
       // approved enough times can clear the gate; a fresh one (below) cannot.
+      // Two conditions, deliberately. The count comes from the whole site,
+      // because a per-fingerprint counter on a key that never repeats can only
+      // read zero — but it is only consulted once THIS shape has worked at least
+      // once. So a site's track record speeds up a form already known to work,
+      // and never vouches for a shape nobody has seen succeed.
+      const proven = cached.success_count > 0 ? hostPlanSuccess(observation.host) : 0;
       const result = await executeFn(page, cached.plan, {
-        job, ctx, resumePath, pins: cached.pins, submitGate: makeGate(submit, cached.success_count),
+        job, ctx, resumePath, pins: cached.pins, submitGate: makeGate(submit, proven),
       });
       if (worked(result.outcome)) {
         bumpPlanSuccess(fp);
@@ -72,16 +78,20 @@ export async function runAgent(page, { job = null, ctx = {}, resumePath = null, 
       return null;
     }
 
-    // A freshly-planned shape has 0 proven successes, so the gate can never let
-    // it auto-submit on first sight — it fills, reviews, and earns confidence.
+    // First sight of a shape never auto-submits, however well the site has done
+    // before. It fills, goes for review, and earns its first success there.
     const result = await executeFn(page, plan, { job, ctx, resumePath, submitGate: makeGate(submit, 0) });
     if (!worked(result.outcome)) {
       emit({ jobId: job?.id, stage: 'apply', level: 'warn', message: `Agent plan did not solve the page — ${result.reason || 'stuck'}` });
       return null;
     }
 
-    // It worked — remember it so the next visit to this shape needs no model.
+    // It worked — remember it so the next visit to this shape needs no model,
+    // and credit the success immediately. savePlan writes success_count = 0, so
+    // without this bump a plan that worked the first time was recorded as
+    // unproven and the ramp started one visit further back than it should.
     savePlan({ fingerprint: fp, host: observation.host, plan });
+    bumpPlanSuccess(fp);
     const how = result.outcome === 'parked' ? 'parked' : (result.outcome === 'submitted' ? 'submitted' : 'filled');
     emit({
       jobId: job?.id, stage: 'apply',

@@ -919,6 +919,10 @@ export function savePlan({ fingerprint, host = null, plan, source = 'llm' }) {
     INSERT INTO page_plans (fingerprint, host, plan_json, source, created_at, last_used_at)
     VALUES (@fingerprint, @host, @plan, @source, @now, @now)
     ON CONFLICT(fingerprint) DO UPDATE SET
+      -- A re-plan replaces the shape, so its own success history no longer
+      -- applies and resets. fail_count resets with it: carrying failures from a
+      -- plan that has just been rewritten would demote the new one for the old
+      -- one's mistakes.
       host = excluded.host, plan_json = excluded.plan_json, source = excluded.source,
       success_count = 0, fail_count = 0, last_used_at = excluded.last_used_at`)
     .run({ fingerprint, host, plan: JSON.stringify(plan), source, now: now() });
@@ -932,6 +936,27 @@ export function bumpPlanSuccess(fingerprint) {
 export function bumpPlanFail(fingerprint) {
   db.prepare('UPDATE page_plans SET fail_count = fail_count + 1, last_used_at = ? WHERE fingerprint = ?')
     .run(now(), fingerprint);
+}
+
+/**
+ * Proven successes for a whole careers site, not one exact page shape.
+ *
+ * The fingerprint is a hash of host plus every control's `role:name`, so one
+ * extra optional field — or a hydration-timing difference in how many controls
+ * were present when the page was read — makes a different shape. In production
+ * that produced 17 captures with 17 distinct fingerprints and every seen_count
+ * at 1: `accounts.google.com` alone generated three. A per-fingerprint counter
+ * on a key that never repeats can only ever read zero, which is what made the
+ * auto-submit ramp unreachable rather than merely slow.
+ *
+ * Confidence belongs to the vendor. Postings on one careers site share a form
+ * engine, so successes there are the evidence that its shapes are understood.
+ */
+export function hostPlanSuccess(host) {
+  if (!host) return 0;
+  const row = db.prepare(
+    'SELECT COALESCE(SUM(success_count), 0) n FROM page_plans WHERE host = ?').get(host);
+  return row?.n || 0;
 }
 
 /** Cached plans, newest-used first — the `npm run plans` view. */

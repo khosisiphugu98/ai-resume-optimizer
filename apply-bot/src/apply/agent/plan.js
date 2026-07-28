@@ -24,7 +24,18 @@ export const FIELD_TYPES = [
 
 // JSON Schema for Claude's structured output. Kept to types/enums that structured
 // outputs support (no minLength/pattern). additionalProperties:false throughout.
-export const PLAN_SCHEMA = {
+export /** A footer control, or null when the page genuinely has none. */
+const NULLABLE_CONTROL = {
+  anyOf: [
+    {
+      type: 'object', additionalProperties: false, required: ['by', 'value'],
+      properties: { by: { type: 'string', enum: ['role', 'text'] }, value: { type: 'string' } },
+    },
+    { type: 'null' },
+  ],
+};
+
+const PLAN_SCHEMA = {
   type: 'object',
   additionalProperties: false,
   required: ['kind', 'preSteps', 'fields', 'advance', 'submit'],
@@ -53,14 +64,12 @@ export const PLAN_SCHEMA = {
         },
       },
     },
-    advance: {
-      type: ['object', 'null'], additionalProperties: false, required: ['by', 'value'],
-      properties: { by: { type: 'string', enum: ['role', 'text'] }, value: { type: 'string' } },
-    },
-    submit: {
-      type: ['object', 'null'], additionalProperties: false, required: ['by', 'value'],
-      properties: { by: { type: 'string', enum: ['role', 'text'] }, value: { type: 'string' } },
-    },
+    // Nullable via anyOf, not a `type: ['object','null']` array. Structured
+    // outputs support anyOf; a type-array paired with a `required` list is also
+    // self-contradictory (required keys on a branch that may be null), which
+    // biases the model away from ever answering "this page has no Next button".
+    advance: NULLABLE_CONTROL,
+    submit: NULLABLE_CONTROL,
   },
 };
 
@@ -118,14 +127,33 @@ function userPrompt(observation) {
  */
 export async function planPage(observation, { callClaudeFn = callClaude, callOpenAIFn = callLLM } = {}) {
   const messages = [{ role: 'user', content: userPrompt(observation) }];
+  // Set when Claude returned a well-formed `unsupported`. If gpt-4o also has
+  // nothing, that agreement is the answer we report.
+  let claudeDeclined = false;
 
   // Primary: Claude, with the schema enforced server-side.
   if (hasAnthropicKey()) {
     try {
       const plan = await callClaudeFn(messages, { system: SYSTEM, schema: PLAN_SCHEMA });
       const check = validatePlan(plan);
-      if (check.ok) { emit({ stage: 'apply', message: `Agent plan from Claude (${plan.kind}, ${plan.fields?.length || 0} field(s))` }); return plan; }
-      emit({ stage: 'apply', level: 'warn', message: `Claude plan rejected — ${check.reason}; falling back to gpt-4o` });
+
+      // `unsupported` is a well-formed answer, so validatePlan calls it ok — but
+      // it is a decline, not a plan, and returning it here ended the attempt with
+      // the fallback untouched. It logged as `Agent plan from Claude
+      // (unsupported, 0 field(s))`, which reads like a success and is why the
+      // planner looked functional while producing nothing. One model declining a
+      // page is not the same as the page being unplannable: let the other look.
+      if (check.ok && plan.kind !== 'unsupported') {
+        emit({ stage: 'apply', message: `Agent plan from Claude (${plan.kind}, ${plan.fields?.length || 0} field(s))` });
+        return plan;
+      }
+      claudeDeclined = check.ok;   // it answered "unsupported" rather than failing
+      emit({
+        stage: 'apply', level: 'warn',
+        message: check.ok
+          ? 'Claude judged this page unplannable — asking gpt-4o before giving up'
+          : `Claude plan rejected — ${check.reason}; falling back to gpt-4o`,
+      });
     } catch (err) {
       emit({ stage: 'apply', level: 'warn', message: `Claude planner failed (${err.message.split('\n')[0]}) — falling back to gpt-4o` });
     }
@@ -139,8 +167,20 @@ export async function planPage(observation, { callClaudeFn = callClaude, callOpe
         { json: true, model: OPENAI_PLANNER_MODEL, maxTokens: 2000 },
       );
       const check = validatePlan(plan);
-      if (check.ok) { emit({ stage: 'apply', message: `Agent plan from gpt-4o (${plan.kind}, ${plan.fields?.length || 0} field(s))` }); return plan; }
-      emit({ stage: 'apply', level: 'warn', message: `gpt-4o plan rejected — ${check.reason}` });
+      if (check.ok && plan.kind !== 'unsupported') {
+        emit({ stage: 'apply', message: `Agent plan from gpt-4o (${plan.kind}, ${plan.fields?.length || 0} field(s))` });
+        return plan;
+      }
+      // Both providers looked and neither found a form. That agreement is worth
+      // stating plainly — it is the one case where "unsupported" is the answer.
+      if (check.ok && claudeDeclined) {
+        emit({ stage: 'apply', level: 'warn', message: 'Both planners judged this page unplannable' });
+        return plan;
+      }
+      emit({
+        stage: 'apply', level: 'warn',
+        message: check.ok ? 'gpt-4o judged this page unplannable' : `gpt-4o plan rejected — ${check.reason}`,
+      });
     } catch (err) {
       emit({ stage: 'apply', level: 'warn', message: `gpt-4o planner failed — ${err.message.split('\n')[0]}` });
     }
