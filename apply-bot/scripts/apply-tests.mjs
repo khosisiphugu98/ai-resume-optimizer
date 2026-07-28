@@ -10,6 +10,7 @@ import { canApply, withinHours, capRemaining, EXTERNAL_PAGEVIEW_SHARE } from '..
 import { HOURS } from '../src/config.js';
 import { db, bumpRate, setSetting, appliedUrlOwner, normaliseApplyUrl } from '../src/db.js';
 import { runWizard, stepSignature } from '../src/apply/wizard.js';
+import { contextLost, lostContextBreaker } from '../src/browser.js';
 import { CAPS } from '../src/config.js';
 
 let pass = 0, fail = 0;
@@ -196,6 +197,30 @@ section('the same posting, two tracking tokens (D13)');
   // Leaving an application row behind would fail that delete on the foreign key.
   db.prepare('DELETE FROM applications WHERE job_id = 9101').run();
   db.prepare('DELETE FROM jobs WHERE id = 9101').run();
+}
+
+// `npm run score` was started while `npm run tailor` was working, and score's
+// exit handler SIGKILLed the browser tailor was driving. Tailor did not notice:
+// it kept selecting jobs and marking each one failed, burning twelve in forty
+// seconds on an error that had nothing to do with any of them.
+section('a lost browser is not the posting\'s fault (D6)');
+{
+  const LOST = new Error('page.goto: Target page, context or browser has been closed');
+
+  t('a lost context is recognised', contextLost(LOST), true);
+  t('and so is the bare form', contextLost(new Error('Session closed. Most likely the page has been closed.')), true);
+  t('a real page failure is not', contextLost(new Error('No apply button after 10s')), false);
+  t('nor is a selector timeout', contextLost(new Error('locator.fill: Timeout 30000ms exceeded')), false);
+
+  const b = lostContextBreaker();
+  t('one is survivable', [b.record(LOST), b.tripped], [true, false]);
+  t('two is survivable', [b.record(LOST), b.tripped], [true, false]);
+  t('three stops the stage', [b.record(LOST), b.tripped], [true, true]);
+
+  const c = lostContextBreaker();
+  c.record(LOST); c.record(LOST);
+  t('an ordinary failure resets the streak', [c.record(new Error('nope')), c.streak], [false, 0]);
+  t('so an intermittent one never trips it', [c.record(LOST), c.tripped], [true, false]);
 }
 
 section('rate limiting — per-channel, not one shared budget');

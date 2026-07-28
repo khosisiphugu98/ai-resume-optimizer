@@ -139,6 +139,11 @@ addColumn('applications', 'outcome_note', 'TEXT');
 // Which learned plan shape (agent Phase 3) filled this application, so a review
 // correction (Phase 4) can pin the fix back onto that plan.
 addColumn('applications', 'plan_fingerprint', 'TEXT');
+// A hash of the exported CV's text layer. The untailored-CV guard compares a
+// document against ITSELF before and after optimisation, so it catches
+// "optimisation changed nothing" and can never catch "optimisation changed the
+// same things for four unrelated jobs" — which is 14% of one run's output.
+addColumn('jobs', 'resume_text_hash', 'TEXT');
 
 const now = () => new Date().toISOString();
 /**
@@ -623,6 +628,25 @@ export function appliedUrlOwner(applyUrl, exceptJobId = null) {
 
   const hit = rows.find(r => normaliseApplyUrl(r.external_apply_url) === key);
   return hit ? hit.id : null;
+}
+
+/**
+ * Another job whose tailored CV has exactly this text, or null.
+ *
+ * 28 of one run's exports were 25 distinct documents: one group of four —
+ * Canonical, HYRAX, Jellyfish and Meridial — was byte-identical in its text
+ * layer across four different job descriptions with four different computed
+ * match scores (38, 53, 67, 38). The optimiser measured different relevance and
+ * wrote the same document, and nothing could see it, because the only guard in
+ * place compares a document against its own earlier self.
+ */
+export function resumeHashOwner(hash, exceptJobId = null) {
+  if (!hash) return null;
+  const row = db.prepare(`
+    SELECT id, title, company FROM jobs
+    WHERE resume_text_hash = ? AND (? IS NULL OR id != ?)
+    ORDER BY id LIMIT 1`).get(hash, exceptJobId, exceptJobId);
+  return row || null;
 }
 
 export function outboxPending() {

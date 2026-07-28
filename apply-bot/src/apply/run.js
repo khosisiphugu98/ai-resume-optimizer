@@ -1,6 +1,6 @@
 import { db, updateJob, parkQuestions, bumpRate, appliedUrlOwner, SENT_OUTCOMES } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
-import { getContext, attachScreencast, stopRequested, ChallengeDetected } from '../browser.js';
+import { getContext, attachScreencast, stopRequested, ChallengeDetected, lostContextBreaker, LOST_CONTEXT_LIMIT } from '../browser.js';
 import { loadProfile } from '../profile.js';
 import { applyEasy } from './linkedin-easy.js';
 import { applyExternal, resolveExternalUrl } from './external.js';
@@ -144,6 +144,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
 
   const channelOf = j => (j.apply_type === 'easy_apply' ? 'linkedin_easy' : 'external_ats');
   const blocked = new Set();
+  const breaker = lostContextBreaker();
 
   for (const [i, job] of jobs.entries()) {
     if (stopRequested()) { emit({ stage: 'apply', level: 'warn', message: 'STOP file present — halting' }); break; }
@@ -323,6 +324,28 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
           message: `Re-routed to Easy Apply — the posting never left LinkedIn. It will be picked up on the next pass.`,
         });
         emitBoard();
+        continue;
+      }
+
+      // Losing the browser is not this posting's fault, and the next posting
+      // will fail exactly the same way. Refund the attempt — the job never got
+      // its turn — and stop the stage once it has happened three times running,
+      // rather than marking the whole backlog failed against an error that has
+      // nothing to do with any of it.
+      if (breaker.record(err)) {
+        updateJob(job.id, { status: job.status, apply_attempts: job.apply_attempts || 0 });
+        emit({
+          jobId: job.id, stage: 'apply', level: 'warn',
+          message: `Lost the browser (${breaker.streak}/${LOST_CONTEXT_LIMIT}) — this job is untouched and stays in the queue`,
+        });
+        if (breaker.tripped) {
+          emit({
+            stage: 'apply', level: 'critical',
+            message: 'Browser gone for three jobs running — stopping rather than failing the rest of the queue. '
+              + 'Something else is probably driving the profile: only run one stage at a time.',
+          });
+          break;
+        }
         continue;
       }
 

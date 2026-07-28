@@ -2,7 +2,8 @@
 // no-op optimisation exports the untailored seed CV under a job-specific filename,
 // and every downstream check passes it. 19 of 164 résumés on disk were duplicates
 // that way, including the only application ever emailed. No network.
-import { normaliseResumeText, outputName } from '../src/tailor/optimiser.js';
+import { normaliseResumeText, outputName, resumeTextHash } from '../src/tailor/optimiser.js';
+import { db, resumeHashOwner } from '../src/db.js';
 import { validateResumePdf, CORE_RESUME_SKILLS } from './extract-text.mjs';
 
 let pass = 0, fail = 0;
@@ -79,6 +80,36 @@ section('two postings never write to the same file');
   t('the same job re-tailors to the same file',
     outputName({ id: 1401, company: 'Standard Bank Group', title: long('Manager') }, who), a);
   t('still a name a recruiter can read', /^Khosi_Siphugu_CV_Standard_Bank_Group_/.test(a), true);
+}
+
+// The untailored-CV guard compares a document against its own earlier self, so
+// it catches "optimisation changed nothing" and is structurally blind to
+// "optimisation changed the same things for four unrelated jobs". Four of 28
+// exports were byte-identical across four job descriptions with four different
+// match scores — 14% of the run, every one a CV written for another posting.
+section('the same document for two different postings (D2)');
+{
+  const CV = 'Khosi Siphugu — Marketing Analyst. SQL, Python, Power BI. ETL pipelines.';
+
+  t('the same text hashes the same', resumeTextHash(CV), resumeTextHash(CV));
+  t('whitespace is not a difference',
+    resumeTextHash(CV), resumeTextHash(`  ${CV.replace(/ /g, '\n  ')}  `));
+  t('different text hashes differently',
+    resumeTextHash(CV) === resumeTextHash(`${CV} Tableau.`), false);
+
+  const hash = resumeTextHash(CV);
+  db.prepare(`INSERT INTO jobs (id, external_id, url, title, company, discovered_at, apply_type, status, resume_text_hash)
+              VALUES (7701, 'cv-a', 'x', 'PPC Manager', 'HYRAX', datetime('now'), 'external', 'tailored', ?)`).run(hash);
+
+  const twin = resumeHashOwner(hash, 7702);
+  t('a second job producing the same CV finds the first', twin?.id, 7701);
+  t('and can name it', `${twin?.title} @ ${twin?.company}`, 'PPC Manager @ HYRAX');
+  t('re-tailoring the same job is not a duplicate of itself',
+    resumeHashOwner(hash, 7701), null);
+  t('a genuinely different CV is fine',
+    resumeHashOwner(resumeTextHash(`${CV} Tableau.`), 7702), null);
+
+  db.prepare('DELETE FROM jobs WHERE id = 7701').run();
 }
 
 console.log(`\n${fail ? '✗' : '✓'} ${pass} passed, ${fail} failed\n`);

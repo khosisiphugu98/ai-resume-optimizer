@@ -26,6 +26,56 @@ let screencastAttached = new WeakSet();
 
 const SINGLETONS = ['SingletonLock', 'SingletonSocket', 'SingletonCookie'];
 
+/**
+ * Which process launched the browser now holding the profile.
+ *
+ * Reclaiming is safe when the browser is an orphan and catastrophic when it is
+ * not. On 28 July `npm run score` was started while `npm run tailor` was still
+ * working; score's exit handler ran reclaimProfile(), which SIGKILLed the Chrome
+ * that tailor was driving. Tailor did not abort — it kept selecting jobs and
+ * marking each one failed, burning twelve in forty seconds on
+ * "Target page, context or browser has been closed" until it was stopped by hand.
+ *
+ * A file naming the owning pid is enough to tell the two cases apart. A stale
+ * one is harmless: the pid is checked against the live process table, and a
+ * dead owner means the browser really is an orphan.
+ */
+const OWNER_FILE = () => path.join(PATHS.chromeProfile, '.apply-bot-owner');
+
+function readOwner() {
+  try {
+    const pid = Number(fs.readFileSync(OWNER_FILE(), 'utf8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch { return null; }
+}
+
+const writeOwner = () => { try { fs.writeFileSync(OWNER_FILE(), String(process.pid)); } catch {} };
+const clearOwner = () => { try { fs.rmSync(OWNER_FILE(), { force: true }); } catch {} };
+
+/**
+ * The pid of another live process that owns this profile, or null.
+ *
+ * Null covers every case where taking the profile is fine: nobody claimed it,
+ * the claimant is gone, or the claimant is us.
+ */
+export function profileOwner() {
+  const pid = readOwner();
+  if (!pid || pid === process.pid || !alive(pid)) return null;
+  return pid;
+}
+
+/** Raised rather than killing a browser another live stage is driving. */
+export class ProfileBusy extends Error {
+  constructor(pid) {
+    super(
+      `The browser profile is in use by process ${pid} — another apply-bot stage is running.\n` +
+      `  Only one stage may drive the browser at a time (§8.2: one LinkedIn session, ever).\n` +
+      `  Wait for it to finish, or stop it, then run this again.`);
+    this.name = 'ProfileBusy';
+    this.pid = pid;
+  }
+}
+
 /** Chrome processes whose --user-data-dir is our profile, main processes only. */
 export function chromeOnProfile(profileDir = PATHS.chromeProfile) {
   const want = path.resolve(profileDir);
@@ -62,7 +112,10 @@ const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0
  * run from bricking every run after it. The pid is logged so a genuine
  * double-run is visible rather than mysterious.
  */
-export function reclaimProfile({ quiet = false } = {}) {
+export function reclaimProfile({ quiet = false, force = false } = {}) {
+  const owner = profileOwner();
+  if (owner && !force) throw new ProfileBusy(owner);
+
   const stray = chromeOnProfile();
   for (const { pid } of stray) {
     if (!quiet) {
@@ -87,7 +140,60 @@ export function reclaimProfile({ quiet = false } = {}) {
     const p = path.join(PATHS.chromeProfile, name);
     try { if (fs.lstatSync(p)) fs.rmSync(p, { force: true }); } catch {}
   }
+  clearOwner();
   return stray.length;
+}
+
+/**
+ * Give up the profile on the way out — but only if it is ours to give up.
+ *
+ * This runs from an exit handler registered by every CLI command, which is how
+ * one stage came to kill another's browser: `npm run score` exiting called
+ * reclaimProfile() unconditionally while `npm run tailor` was mid-pass.
+ */
+export function releaseProfile() {
+  try {
+    if (profileOwner()) return 0;      // someone else is driving; leave it alone
+    return reclaimProfile({ quiet: true });
+  } catch { return 0; }
+}
+
+/**
+ * A failure that means the browser went away underneath us, rather than
+ * anything about the page.
+ *
+ * Worth telling apart because the response is different: a posting that failed
+ * is a posting to retry or give up on, while a lost context says nothing about
+ * the posting at all and will say the same thing about every job left in the
+ * queue.
+ */
+const LOST_CONTEXT =
+  /Target (page, context or browser|closed)|browser has been closed|Session closed|Execution context was destroyed|has been closed/i;
+
+export const contextLost = err => LOST_CONTEXT.test(String(err?.message ?? err ?? ''));
+
+/** Consecutive lost-context failures after which a stage stops rather than burning its backlog. */
+export const LOST_CONTEXT_LIMIT = 3;
+
+/**
+ * Counts consecutive lost-context failures and says when to stop.
+ *
+ * Without this, a stage whose browser is killed does not notice: it keeps
+ * selecting jobs and marking each one failed against an error that has nothing
+ * to do with them. That is how twelve jobs were burned in forty seconds.
+ */
+export function lostContextBreaker({ limit = LOST_CONTEXT_LIMIT } = {}) {
+  let streak = 0;
+  return {
+    /** @returns true when this failure was a lost context. */
+    record(err) {
+      if (contextLost(err)) { streak++; return true; }
+      streak = 0;
+      return false;
+    },
+    get tripped() { return streak >= limit; },
+    get streak() { return streak; },
+  };
 }
 
 /**
@@ -110,7 +216,9 @@ export async function getContext({ headless = process.env.HEADLESS === '1' } = {
   });
 
   // Clear a leftover before trying, so the common case never produces an error
-  // at all; retry once after a reclaim in case one appeared in between.
+  // at all; retry once after a reclaim in case one appeared in between. This
+  // throws ProfileBusy rather than reclaiming when another live process has
+  // claimed the profile — a browser somebody is driving is not a leftover.
   reclaimProfile();
   try {
     ctx = await launch();
@@ -120,7 +228,8 @@ export async function getContext({ headless = process.env.HEADLESS === '1' } = {
     ctx = await launch();
   }
 
-  ctx.on('close', () => { ctx = null; });
+  writeOwner();
+  ctx.on('close', () => { ctx = null; clearOwner(); });
   return ctx;
 }
 
@@ -136,7 +245,7 @@ let exitHooked = false;
 export function closeBrowserOnExit() {
   if (exitHooked) return;
   exitHooked = true;
-  const bye = () => { try { reclaimProfile({ quiet: true }); } catch {} };
+  const bye = () => { releaseProfile(); };
   process.once('exit', bye);
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
     process.once(sig, () => { bye(); process.exit(0); });

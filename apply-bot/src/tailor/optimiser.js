@@ -1,8 +1,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { PATHS, ROOT } from '../config.js';
-import { getContext, attachScreencast, stopRequested, humanDelay } from '../browser.js';
-import { db, updateJob } from '../db.js';
+import { getContext, attachScreencast, stopRequested, humanDelay, lostContextBreaker, LOST_CONTEXT_LIMIT } from '../browser.js';
+import { db, updateJob, resumeHashOwner } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { extractPdfText, validateResumePdf, CORE_RESUME_SKILLS } from '../../scripts/extract-text.mjs';
 import { loadProfile, confirmedSkillNames, confirmSkill } from '../profile.js';
@@ -362,13 +363,44 @@ export async function tailorForJob(page, job, profile) {
     );
   }
 
+  // The guard the untailored-CV check cannot be.
+  //
+  // That one compares a document against its own earlier self, so it catches
+  // "optimisation changed nothing" and is structurally blind to "optimisation
+  // changed the same things for four unrelated jobs". Four of 28 exports on
+  // 28 July were byte-identical across four different job descriptions with four
+  // different match scores — 14% of the run's output, and every one of them a CV
+  // written for somebody else's posting.
+  const hash = resumeTextHash(text);
+  const twin = resumeHashOwner(hash, job.id);
+  if (twin) {
+    fs.rmSync(outPath, { force: true });
+    throw new Error(
+      `The exported CV is identical to the one tailored for job #${twin.id} ` +
+      `(${twin.title} @ ${twin.company}) — the optimiser produced the same document ` +
+      `for two different postings. Not marking this tailored.`
+    );
+  }
+
   return {
     path: outPath,
     matchScore: matchScore ? parseInt(matchScore, 10) : null,
     chars: check.chars,
     skillsFound: check.skillsFound.length,
+    textHash: hash,
     unconfirmedSkills,
   };
+}
+
+/**
+ * The identity of a CV: its text layer, normalised.
+ *
+ * Text rather than bytes, because two renders of the same document differ in
+ * their PDF metadata (creation timestamp, object ordering) while saying exactly
+ * the same thing to a recruiter and to an ATS parser.
+ */
+export function resumeTextHash(text) {
+  return crypto.createHash('sha256').update(normaliseResumeText(text)).digest('hex');
 }
 
 /**
@@ -422,6 +454,7 @@ export async function runTailoring({ limit = 10 } = {}) {
      ORDER BY fit_score DESC, id LIMIT ?`
   ).all(limit);   // all channels tailor first — email attaches the same PDF
 
+  const breaker = lostContextBreaker();
   let done = 0, failed = 0;
 
   for (const job of jobs) {
@@ -433,7 +466,7 @@ export async function runTailoring({ limit = 10 } = {}) {
       // tailored_at exists as a column and was written by nothing, so every row
       // read NULL and there was no way to tell a CV built this morning from one
       // built three weeks ago against a posting that has since changed.
-      updateJob(job.id, { status: 'tailored', resume_path: r.path, tailored_at: new Date().toISOString() });
+      updateJob(job.id, { status: 'tailored', resume_path: r.path, tailored_at: new Date().toISOString(), resume_text_hash: r.textHash });
       done++;
 
       // Skills this job asked for that the candidate hasn't vouched for. They were
@@ -481,6 +514,28 @@ export async function runTailoring({ limit = 10 } = {}) {
         message: `Tailored → ${path.basename(r.path)} (${r.chars} chars of text${r.matchScore ? `, match ${r.matchScore}` : ''})`,
       });
     } catch (err) {
+      // The browser going away says nothing about this posting, and will say the
+      // same thing about every job left in the queue. On 28 July a concurrently
+      // started stage killed this one's browser and it did not notice: it kept
+      // selecting jobs and marking each one tailor_failed, burning twelve in
+      // forty seconds. The job goes back where it was and the stage stops.
+      if (breaker.record(err)) {
+        updateJob(job.id, { status: 'scored' });
+        emit({
+          jobId: job.id, stage: 'tailor', level: 'warn',
+          message: `Lost the browser mid-pass (${breaker.streak}/${LOST_CONTEXT_LIMIT}) — this job is untouched and back in the queue`,
+        });
+        if (breaker.tripped) {
+          emit({
+            stage: 'tailor', level: 'critical',
+            message: 'Browser gone for three jobs running — stopping rather than failing the rest of the queue. '
+              + 'Something else is probably driving the profile: only run one stage at a time.',
+          });
+          break;
+        }
+        continue;
+      }
+
       updateJob(job.id, { status: 'tailor_failed', reject_reason: err.message.slice(0, 200) });
       failed++;
       emit({ jobId: job.id, stage: 'tailor', level: 'error', message: `Tailoring failed: ${err.message}` });
