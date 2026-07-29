@@ -25,6 +25,21 @@ export const MAX_STEPS = 8;
 export const MAX_RECOLLECTS = 3;
 
 /**
+ * How long a step gets to produce a way forward before it is called stuck.
+ *
+ * Only ever spent on the path that was about to abandon the application, so it
+ * costs nothing on a form that is working.
+ */
+export const CONTROL_RENDER_TIMEOUT = 6000;
+
+/** The terminal control if there is one, otherwise the way onward. */
+async function wayForward(findTerminal, findAdvance) {
+  const terminal = await findTerminal();
+  if (terminal) return { terminal, next: null };
+  return { terminal: null, next: await findAdvance() };
+}
+
+/**
  * Drive one multi-step form.
  *
  * The caller supplies the vendor-specific parts:
@@ -211,8 +226,25 @@ export async function runWizard({
       return { outcome: 'parked', parked: parkedFields, filled, steps };
     }
 
-    // --- terminal? ---------------------------------------------------------
-    const terminal = await findTerminal();
+    // --- a way forward, once the step has finished rendering ----------------
+    //
+    // Both controls are looked for together, and the absence of both is checked
+    // rather than assumed. These forms mount their body before their footer: one
+    // live attempt screenshotted the Easy Apply modal 152ms after opening, still
+    // showing its loading spinner, and a single check concluded "step 1 has no
+    // next, review or submit control" on a form that rendered fine a moment
+    // later. That reason accounts for 18 failures on the board, and this is the
+    // one path where waiting is free — it only runs when the step was about to
+    // be abandoned anyway.
+    let { terminal, next } = await wayForward(findTerminal, findAdvance);
+    if (!terminal && !next) {
+      const deadline = Date.now() + CONTROL_RENDER_TIMEOUT;
+      while (Date.now() < deadline && !terminal && !next) {
+        await new Promise(r => setTimeout(r, 400));
+        ({ terminal, next } = await wayForward(findTerminal, findAdvance));
+      }
+    }
+
     if (terminal) {
       if (!submit) return { outcome: 'ready', filled, steps };
       const hold = mayFinish ? await mayFinish({ filled, steps }) : null;
@@ -220,12 +252,11 @@ export async function runWizard({
       return { outcome: 'submit', terminal, filled, steps };
     }
 
-    // --- advance -----------------------------------------------------------
-    const next = await findAdvance();
     if (!next) {
       return {
         outcome: 'stuck', filled, steps,
-        reason: `step ${steps} has no next, review or submit control`,
+        reason: `step ${steps} has no next, review or submit control`
+          + ` (still none after ${CONTROL_RENDER_TIMEOUT / 1000}s)`,
       };
     }
 

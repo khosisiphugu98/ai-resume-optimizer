@@ -219,6 +219,37 @@ section('one question, however many controls carry it (D12)');
   t('two option lists are two questions', asked.filter(u => u.startsWith('country')).length, 2);
 }
 
+// One live attempt screenshotted the Easy Apply modal 152ms after it opened,
+// still showing its loading spinner, and a single check concluded "step 1 has no
+// next, review or submit control" on a form that rendered fine a moment later.
+// That reason accounts for 18 failures on the board.
+section('a step still rendering is not a step with no way forward');
+{
+  const drive = async ({ appearsAfter }) => {
+    let looks = 0;
+    return runWizard({
+      submit: false,
+      collect: async () => [{ uid: 'a', role: 'input', question: 'Email', options: null }],
+      resolve: async items => ({
+        resolved: items.map(i => ({ status: 'ok', uid: i.uid, question: i.question, value: 'v', tier: 'profile' })),
+        parked: [],
+      }),
+      fill: async () => 'v',
+      // The footer arrives after the body, so the first N looks find nothing.
+      findTerminal: async () => (++looks > appearsAfter ? { click: async () => {} } : null),
+      findAdvance: async () => null,
+      signature: stepSignature,
+    });
+  };
+
+  const late = await drive({ appearsAfter: 3 });
+  t('a footer that arrives late is still found', late.outcome, 'ready');
+
+  const never = await drive({ appearsAfter: 10_000 });
+  t('a step that genuinely has none is still abandoned', never.outcome, 'stuck');
+  t('and says it waited', /still none after/.test(never.reason || ''), true);
+}
+
 // Easy Apply's later screens review the imported work history and the résumé:
 // read-only cards, not one fillable control between them. Every such screen
 // signs as "" and compares equal to the next, so job 453 advanced correctly from

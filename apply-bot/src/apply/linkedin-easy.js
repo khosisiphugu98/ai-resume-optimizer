@@ -58,6 +58,31 @@ async function waitForModal(page, timeout = 8000) {
 }
 
 /**
+ * Wait until the modal has finished rendering the step it is on.
+ *
+ * The <dialog> mounts, then its body arrives, then its footer — and between
+ * those it shows a spinner and nothing else. One live attempt collected job
+ * 280's step 1 while that spinner was up: no fields, no footer button, and the
+ * run was abandoned as "step 1 has no next, review or submit control" on a form
+ * that rendered perfectly a moment later.
+ *
+ * Cheap because it returns the instant the step is ready, which is almost
+ * always immediately.
+ */
+async function waitForStepRender(page, timeout = 8000) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const sel = await modalSelector(page);
+    if (!sel) return;                                    // no modal is the caller's problem
+    const busy = await page.locator(`${sel} [role="progressbar"], ${sel} .artdeco-loader`)
+      .first().isVisible().catch(() => false);
+    if (!busy) return;
+    if (Date.now() >= deadline) return;
+    await page.waitForTimeout(300);
+  }
+}
+
+/**
  * A short, stable description of what the modal is currently showing.
  *
  * Exists because the fields alone cannot identify an Easy Apply step. The later
@@ -230,6 +255,7 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
 
     const collect = async () => {
       await assertNoChallenge(page);
+      await waitForStepRender(page);
       const sel = await modalSelector(page);
       if (!sel) return [];
 
