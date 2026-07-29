@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { bumpRate, getSetting } from '../db.js';
-import { assertNoChallenge, ChallengeDetected } from '../browser.js';
+import { assertNoChallenge, ChallengeDetected, postingClosedReason } from '../browser.js';
 import { collectFieldsInPage, fillField, fromDomField, isSiteSearch } from './fields.js';
 import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
 import { runWizard, buttonByName, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
@@ -97,26 +97,44 @@ export async function a11yScope(page) {
 const fromA11y = n => ({ ...toFieldSpec(n), collector: 'a11y', role: n.role });
 
 /**
- * Collect the current step's fields.
+ * Collect the current step's fields, using whichever collector sees more of it.
  *
- * The DOM collector runs first: it is faster, deterministic, and right for the
- * native-control forms that make up most vendor boards. The a11y collector is the
- * fallback for everything else, and finding fewer than two fillable fields is the
- * signal that the form is not made of native controls at all.
+ * The rule used to be "DOM first, and two fillable fields is good enough" — the
+ * a11y tree was only consulted when the DOM extractor came up nearly empty. That
+ * is the right instinct for a form built from native controls and quietly wrong
+ * for a form built from half of them.
+ *
+ * LinkedIn's Easy Apply is exactly that. Job 280's third step offered three text
+ * inputs and three ARIA radio groups; the DOM extractor found the three inputs,
+ * cleared the "at least two" bar, and returned — so half the step, every one of
+ * its required questions, was never collected. The three text answers went in,
+ * Next was pressed, LinkedIn answered "This field is required" three times over
+ * and re-rendered, and the wizard reported "form did not advance". Nothing in
+ * the run said a control had been missed, because as far as it knew there was
+ * nothing there.
+ *
+ * So the collectors are compared rather than ordered. This is the same principle
+ * `formScope` above already applies to choosing a form root: take the richest
+ * view, not the first acceptable one. The DOM keeps ties — it is faster, more
+ * precise about option values, and on a native form the two agree anyway.
  */
 export async function collectFields(frame, rootSelector, vendor) {
-  if (!vendor.a11y) {
-    const dom = await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
-    const fillable = dom.filter(f => f.kind !== 'file' && f.question);
-    if (fillable.length >= 2) return { mode: 'dom', items: dom.map(fromDomField) };
-  }
-  const nodes = await frame.evaluate(collectA11yInPage, rootSelector).catch(() => []);
-  const items = nodes.filter(n => n.name || n.role === 'file').map(fromA11y);
-  if (items.length) return { mode: 'a11y', items };
+  const dom = vendor.a11y
+    ? []
+    : await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
+  const domFillable = dom.filter(f => f.kind !== 'file' && f.question).length;
 
-  // Nothing from either collector — report the DOM result so the caller's error
-  // describes an empty form rather than an a11y miss.
-  const dom = await frame.evaluate(collectFieldsInPage, rootSelector).catch(() => []);
+  const nodes = await frame.evaluate(collectA11yInPage, rootSelector).catch(() => []);
+  const a11yItems = nodes.filter(n => n.name || n.role === 'file');
+  const a11yFillable = a11yItems.filter(n => n.role !== 'file' && n.name).length;
+
+  if (domFillable >= 2 && domFillable >= a11yFillable) {
+    return { mode: 'dom', items: dom.map(fromDomField) };
+  }
+  if (a11yItems.length) return { mode: 'a11y', items: a11yItems.map(fromA11y) };
+
+  // Neither collector found anything. Report the DOM result so the caller's
+  // error describes an empty form rather than an a11y miss.
   return { mode: 'dom', items: dom.map(fromDomField) };
 }
 
@@ -149,6 +167,13 @@ export async function resolveExternalUrl(page, job) {
   // so a single check moments after navigation loses the race on an open posting.
   const applyBtn = await waitForFirstVisible(page, SELECTORS.detailApplyBtn, { timeout: 10_000 });
   if (!applyBtn) {
+    // 47 of the 55 "no apply button" failures on the board are external, and
+    // every one of them died here without ever reaching an ATS. Ask the page
+    // why first: a closed posting is a fact, not a broken selector, and it is
+    // terminal on the first attempt rather than after three.
+    const closed = await postingClosedReason(page);
+    if (closed) throw new Error(closed);
+
     const ctx = await captureFailureContext(page, shot, job.id, 'no-apply-button');
     throw new Error(
       `No apply button after 10s — posting may have closed, or the selector broke. ` +

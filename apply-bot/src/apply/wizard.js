@@ -66,8 +66,10 @@ export async function runWizard({
     steps++;
 
     // --- fill this step, re-reading until it stops changing ----------------
+    // `signature` may be async: an adapter can only tell two field-less steps
+    // apart by reading the page, and reading the page is asynchronous.
     let nodes = await collect();
-    let signatureNow = signature(nodes);
+    let signatureNow = await signature(nodes);
 
     for (let round = 0; round < MAX_RECOLLECTS; round++) {
       const unfilled = nodes.filter(n => n.uid && !handled.has(n.uid));
@@ -191,7 +193,7 @@ export async function runWizard({
       // Filling may have revealed more questions. If the shape did not change,
       // it did not.
       const after = await collect();
-      const afterSignature = signature(after);
+      const afterSignature = await signature(after);
       if (afterSignature === signatureNow) break;
       nodes = after;
       signatureNow = afterSignature;
@@ -230,7 +232,16 @@ export async function runWizard({
     // Two consecutive steps with an identical form means the button did nothing.
     // Detected here rather than after MAX_STEPS so the run does not burn eight
     // rounds of LLM calls on a form that is standing still.
-    if (lastSignature !== null && signatureNow === lastSignature) {
+    //
+    // An empty signature is not evidence of that. Easy Apply's later steps are
+    // review screens — the imported work history, the résumé preview — which
+    // carry no fillable control at all, so `stepSignature` returns "" for each
+    // of them and two different screens compare equal. Job 453 advanced from
+    // step 3 to step 4 correctly and was abandoned as "form did not advance past
+    // step 3" on that basis. When the adapter cannot describe the step, the loop
+    // falls back to MAX_STEPS to bound itself, which costs nothing here: a step
+    // with no fields resolves no fields and calls no model.
+    if (lastSignature !== null && signatureNow !== '' && signatureNow === lastSignature) {
       return {
         outcome: 'stuck', filled, steps,
         reason: `form did not advance past step ${steps - 1} — the same fields came back after clicking next`,

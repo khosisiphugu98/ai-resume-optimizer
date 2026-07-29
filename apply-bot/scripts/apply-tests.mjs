@@ -219,6 +219,47 @@ section('one question, however many controls carry it (D12)');
   t('two option lists are two questions', asked.filter(u => u.startsWith('country')).length, 2);
 }
 
+// Easy Apply's later screens review the imported work history and the résumé:
+// read-only cards, not one fillable control between them. Every such screen
+// signs as "" and compares equal to the next, so job 453 advanced correctly from
+// step 3 to step 4 and was abandoned as "form did not advance past step 3".
+section('a step with nothing to fill is not a step that did not move');
+{
+  const review = [];                                    // a review screen: no fields
+  const form = [{ uid: 'a', role: 'input', question: 'Email', options: null }];
+
+  const drive = async ({ signature, steps = 3 }) => {
+    let step = 0;
+    return runWizard({
+      submit: false,
+      collect: async () => (++step > 1 && step <= steps ? review : (step === 1 ? form : review)),
+      resolve: async items => ({
+        resolved: items.map(i => ({ status: 'ok', uid: i.uid, question: i.question, value: 'v', tier: 'profile' })),
+        parked: [],
+      }),
+      fill: async () => 'v',
+      findAdvance: async () => ({ click: async () => {}, page: () => ({ waitForTimeout: async () => {} }) }),
+      findTerminal: async () => null,
+      signature,
+    });
+  };
+
+  // The old behaviour: two field-less screens in a row read as a stuck form.
+  const bare = await drive({ signature: stepSignature });
+  t('an empty signature no longer means stuck', bare.outcome === 'stuck' && /did not advance/.test(bare.reason || ''), false);
+  t('it runs to the step ceiling instead, which costs nothing', /exceeded \d+ steps/.test(bare.reason || ''), true);
+
+  // An adapter that can describe the screen keeps the detector working: two
+  // renders of the same screen are still caught on the first repeat.
+  const same = await drive({ signature: async () => 'the same screen every time' });
+  t('a repeated described screen is still caught', /did not advance/.test(same.reason || ''), true);
+
+  // And a genuinely advancing form is never mistaken for a stuck one.
+  let n = 0;
+  const moving = await drive({ signature: async () => `screen ${n++}` });
+  t('a moving form is not', /did not advance/.test(moving.reason || ''), false);
+}
+
 // Two LinkedIn cards for the same Agoda posting differed only by a tracking
 // token, so the duplicate guard did not fire: one was submitted and the other
 // filled the same posting again, stopped only by an unrelated park.

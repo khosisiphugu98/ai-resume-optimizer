@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
-import { assertNoChallenge, ChallengeDetected } from '../browser.js';
+import { assertNoChallenge, ChallengeDetected, postingClosedReason } from '../browser.js';
 import { bumpRate } from '../db.js';
 import { isSiteSearch } from './fields.js';
 import { collectFields, fillCollected } from './external.js';
@@ -55,6 +55,27 @@ async function waitForModal(page, timeout = 8000) {
     if (Date.now() >= deadline) return null;
     await page.waitForTimeout(300);
   }
+}
+
+/**
+ * A short, stable description of what the modal is currently showing.
+ *
+ * Exists because the fields alone cannot identify an Easy Apply step. The later
+ * screens review the imported work history and the résumé: read-only cards with
+ * an edit pencil, and not one fillable control between them. Every such screen
+ * signs as the empty string, so the no-progress detector compared two different
+ * screens, found them equal, and abandoned job 453 as "form did not advance past
+ * step 3" — after it had advanced correctly to step 4.
+ *
+ * The leading text is enough to tell them apart and still identical when the
+ * same screen is re-rendered by a click that achieved nothing, which is the case
+ * the detector is for. Capped because this is compared, not read.
+ */
+async function modalDigest(page, limit = 400) {
+  const sel = await modalSelector(page);
+  if (!sel) return '';
+  const text = await page.locator(sel).first().innerText().catch(() => '');
+  return text.replace(/\s+/g, ' ').trim().slice(0, limit);
 }
 
 async function shot(page, jobId, label) {
@@ -139,6 +160,12 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
   // posting and reports it closed.
   const applyBtn = await waitForFirstVisible(page, BTN.apply, { timeout: 10_000 });
   if (!applyBtn) {
+    // Ask the page why before blaming the selector. A closed posting has no
+    // apply control and says so in red; reporting that as "the selector broke"
+    // spends three retries proving a vacancy is still closed.
+    const closed = await postingClosedReason(page);
+    if (closed) return { outcome: 'closed', reason: closed };
+
     const failure = await captureFailureContext(page, shot, job.id, 'no-apply-button');
     const why =
       `No apply button after 10s — posting may have closed, or the selector broke. ` +
@@ -247,10 +274,18 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       // match nothing. Find the footer controls by accessible name (text), the
       // way the external adapter does, and keep the old selectors as a fallback
       // for accounts still on the classic UI.
+      // A step this adapter can describe even when it has nothing to fill.
+      //
+      // The fields alone are not enough on this channel: Easy Apply's later
+      // screens review the imported work history and the résumé, and carry no
+      // fillable control, so every one of them signs as "" and compares equal to
+      // the next. Adding what the modal actually says distinguishes them, and
+      // still compares equal when the same screen is re-rendered after a click
+      // that did nothing — which is the case the check exists for.
+      signature: async nodes => `${stepSignature(nodes)}\n--\n${await modalDigest(page)}`,
       findTerminal: async () => (await buttonByName(page, TERMINAL_NAME)) || firstVisible(page, BTN.submit),
       findAdvance: async () => (await buttonByName(page, ADVANCE_NAME))
         || (await firstVisible(page, BTN.next)) || firstVisible(page, BTN.review),
-      signature: stepSignature,
       onStep: async ({ step }) => {
         // Don't silently start following companies.
         const follow = await firstVisible(page, BTN.followCompany);

@@ -147,7 +147,7 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   // it. Both reached an employer — that is what the terminal state means — but
   // one was acknowledged and the other was not, and an operator reading one line
   // needs to know how many applications are waiting on a human to check.
-  const stats = { attempted: 0, submitted: 0, sentUnconfirmed: 0, queued: 0, parked: 0, failed: 0, manual: 0 };
+  const stats = { attempted: 0, submitted: 0, sentUnconfirmed: 0, queued: 0, parked: 0, failed: 0, manual: 0, closed: 0 };
 
   const channelOf = j => (j.apply_type === 'easy_apply' ? 'linkedin_easy' : 'external_ats');
   const blocked = new Set();
@@ -243,7 +243,18 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
           { submit: shouldSubmit, resumePath: job.resume_path, approved: job.status === 'approved' });
       }
 
-      if (result.outcome === 'manual') {
+      if (result.outcome === 'closed') {
+        // The vacancy shut between being tailored and being applied to. That is
+        // not a failure of anything here, and it will never change, so it goes
+        // straight to the terminal state the discovery side already uses rather
+        // than spending two more retries re-reading the same red banner.
+        updateJob(job.id, { status: 'expired', reject_reason: result.reason });
+        stats.closed++;
+        emit({
+          jobId: job.id, stage: 'apply', level: 'warn',
+          message: `Closed — ${job.title} @ ${job.company}: ${result.reason}`,
+        });
+      } else if (result.outcome === 'manual') {
         recordAttempt(job, channel, result, 'unsupported', result.reason);
         updateJob(job.id, { status: 'manual_required', ats_vendor: result.vendor, reject_reason: result.reason });
         stats.manual++;
@@ -376,6 +387,17 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         continue;
       }
 
+      // The external path reports a closed posting by throwing, because it gives
+      // up before it has a result to return. Same fact, same terminal state as
+      // the Easy Apply branch above — not a failure to be counted or retried.
+      if (/the posting is closed/i.test(err.message)) {
+        updateJob(job.id, { status: 'expired', reject_reason: err.message.slice(0, 200) });
+        stats.closed++;
+        emit({ jobId: job.id, stage: 'apply', level: 'warn', message: `Closed — ${job.title} @ ${job.company}: ${err.message}` });
+        emitBoard();
+        continue;
+      }
+
       // A hard failure is still an attempt on this posting.
       //
       // Job 453 failed with "form did not advance past step 3" and left no row
@@ -421,7 +443,9 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     stage: 'apply',
     message: `Applications complete — ${sent} sent to employers`
       + (stats.sentUnconfirmed ? ` (${stats.submitted} confirmed, ${stats.sentUnconfirmed} unconfirmed — check these by hand)` : '')
-      + `, ${stats.queued} queued for review, ${stats.parked} parked, ${stats.manual} manual, ${stats.failed} failed`,
+      + `, ${stats.queued} queued for review, ${stats.parked} parked, ${stats.manual} manual`
+      + (stats.closed ? `, ${stats.closed} closed` : '')
+      + `, ${stats.failed} failed`,
   });
   return { ...stats, sent };
 }

@@ -309,6 +309,36 @@ export async function assertNoChallenge(page) {
   }
 }
 
+/**
+ * What LinkedIn says when a posting has stopped taking applications.
+ *
+ * The same wording jd-fetch.js already looks for on the guest page at enrich
+ * time — but a posting closes when it closes, which is routinely after it was
+ * enriched, scored and tailored. Job 2344 reached step 3 of its Easy Apply modal
+ * on 28 July and showed "No longer accepting applications" on 29 July.
+ */
+const CLOSED_POSTING = /no longer accepting applications|job is no longer available|this job is closed|applications are closed/i;
+
+/**
+ * Why this posting cannot be applied to, or null.
+ *
+ * Worth its own check because the alternative is a lie that costs real budget.
+ * A closed posting has no apply control, so it surfaced as "No apply button
+ * after 10s — posting may have closed, or the selector broke" — a message that
+ * cannot tell the two apart, on a page that says which one it is in red. It was
+ * then retried three times, and at 55 postings across the board that is roughly
+ * 165 signed-in pageviews spent re-reading vacancies that had already closed,
+ * against a daily budget of 250 that exists to keep the account unflagged.
+ */
+export async function postingClosedReason(page) {
+  for (const frame of page.frames()) {
+    const text = await frame.locator('body').innerText().catch(() => '');
+    const hit = text.match(CLOSED_POSTING);
+    if (hit) return `the posting is closed — LinkedIn says "${hit[0]}"`;
+  }
+  return null;
+}
+
 export function stopRequested() {
   return fs.existsSync(PATHS.stop);
 }

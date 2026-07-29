@@ -17,7 +17,7 @@ import { collectA11yInPage, toFieldSpec } from '../src/apply/a11y.js';
 import { collectFieldsInPage } from '../src/apply/fields.js';
 import { runWizard, stepSignature, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from '../src/apply/wizard.js';
 import { resolveFormBatch } from '../src/answer/resolver.js';
-import { applyExternal } from '../src/apply/external.js';
+import { applyExternal, collectFields } from '../src/apply/external.js';
 import { getSetting, setSetting } from '../src/db.js';
 
 let pass = 0, fail = 0;
@@ -370,6 +370,55 @@ t('one step, not two', w2.steps, 1);
 // holding one control beat the real form further down the selector list. That is
 // why Greenhouse applications filled the CV attachment and nothing else across
 // eight attempts. It picks the richest root now.
+// The live failure on LinkedIn job 280. Step three offered three text inputs and
+// three ARIA radio groups. The DOM extractor found the three inputs, cleared the
+// old "at least two fillable fields is good enough" bar, and returned — so every
+// required question on the step was never collected. The text answers went in,
+// Next was pressed, LinkedIn answered "This field is required" three times and
+// re-rendered, and the wizard reported "form did not advance".
+section('the collector is the one that sees more of the form, not the first');
+{
+  // Tested at the collector rather than through applyExternal, because the
+  // defect is about what is *seen*: a control that was never collected cannot
+  // be answered, parked, reported or reviewed, and nothing anywhere says it
+  // existed.
+  const collectFrom = async html => {
+    await page.setContent(`<form>${html}</form>`);
+    return collectFields(page.mainFrame(), 'form', { formRoot: ['form'], a11y: false });
+  };
+
+  const halfAria = await collectFrom(`
+    <label for="h-em">Email</label><input id="h-em" type="text" required>
+    <label for="h-ph">Mobile phone number</label><input id="h-ph" type="text" required>
+    <label for="h-li">LinkedIn Profile</label><input id="h-li" type="text" required>
+    <div id="q1">Do you have experience developing or working with Power BI semantic models?</div>
+    <div role="radiogroup" aria-labelledby="q1" aria-required="true">
+      <div role="radio" aria-checked="false">Yes</div>
+      <div role="radio" aria-checked="false">No</div>
+    </div>`);
+  const seen = halfAria.items.map(i => i.question);
+
+  t('three native inputs do not settle it when the tree sees four',
+    halfAria.mode, 'a11y');
+  t('the ARIA radio group is no longer invisible',
+    seen.some(q => /Power BI semantic models/.test(q)), true);
+  t('and the native inputs came along with it',
+    ['Email', 'Mobile phone number', 'LinkedIn Profile'].every(q => seen.includes(q)), true);
+
+  // The DOM keeps ties, so an ordinary native form is collected exactly as
+  // before — faster, and precise about the values behind option labels.
+  const allNative = await collectFrom(`
+    <label for="n-em">Email</label><input id="n-em" type="text" required>
+    <label for="n-ph">Mobile phone number</label><input id="n-ph" type="text" required>
+    <fieldset><legend>Are you legally authorised to work in South Africa?</legend>
+      <label for="n-y">Yes</label><input id="n-y" type="radio" name="auth" value="Yes">
+      <label for="n-n">No</label><input id="n-n" type="radio" name="auth" value="No">
+    </fieldset>`);
+  t('a native form still goes through the DOM collector', allNative.mode, 'dom');
+  t('with its radio group intact',
+    allNative.items.some(i => /legally authorised/.test(i.question)), true);
+}
+
 section('the form scope is the richest match, not the first');
 const SPLIT = at('https://careers.split.test/apply', `
   <div id="upload-panel"><input type="file" id="cv"></div>
