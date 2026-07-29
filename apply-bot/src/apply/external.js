@@ -51,6 +51,33 @@ async function shot(page, jobId, label) {
  * domain, so the form is not in the main frame. Pick whichever frame actually
  * contains form controls.
  */
+/**
+ * A widget that collects an email address to send you things, not to apply.
+ *
+ * ExecutivePlacements.com opens a modal over its posting pages headed "Create an
+ * email alert for <job title> jobs", with What / Where / Email boxes. It is the
+ * richest set of inputs on the page — the real apply controls are "New users:
+ * Upload your CV" and "Existing users: Login here" — so `formScope` picked it,
+ * and the run filled the candidate's job title, location and email address into
+ * a marketing signup. Nothing was sent, because "Create Email Alert" is not a
+ * name the terminal-control rule accepts and the CV check would have refused it
+ * anyway, but three real personal details were typed into it first.
+ *
+ * This is the CareerJunction search bar in a different costume: a labelled form
+ * that is not the form. Recognised by what it says about itself, because that is
+ * the part these widgets cannot hide — they have to tell you what you are
+ * signing up for.
+ */
+const NOT_AN_APPLICATION =
+  /create (an? )?(email|job)?\s*alert|job alerts?\b|alert for\b[^.]{0,80}\bjobs\b|we (will )?(not|never) spam|subscribe to\b[^.]{0,40}\b(alerts?|newsletter)|sign up for job|get jobs like this/i;
+
+/** Why this container is not an application form, or null. */
+export async function notAnApplicationForm(frame, rootSelector) {
+  const text = await frame.locator(rootSelector).first().innerText().catch(() => '');
+  const hit = String(text).match(NOT_AN_APPLICATION);
+  return hit ? `it is a job-alert signup, not an application form (it says "${hit[0]}")` : null;
+}
+
 export async function formScope(page, vendor) {
   // Pick the richest root, not the first one with any input at all.
   //
@@ -68,7 +95,11 @@ export async function formScope(page, vendor) {
       const n = await frame.locator(sel).count().catch(() => 0);
       if (!n) continue;
       const inputs = await frame.locator(`${sel} input, ${sel} select, ${sel} textarea`).count().catch(() => 0);
-      if (inputs > 0 && (!best || inputs > best.count)) best = { frame, rootSelector: sel, count: inputs };
+      if (!inputs) continue;
+      // Richest wins, but a job-alert widget is not in the running however many
+      // boxes it has — it is the richest thing on an ExecutivePlacements posting.
+      if (await notAnApplicationForm(frame, sel)) continue;
+      if (!best || inputs > best.count) best = { frame, rootSelector: sel, count: inputs };
     }
   }
   return best ? { frame: best.frame, rootSelector: best.rootSelector } : null;
@@ -92,6 +123,19 @@ export async function a11yScope(page) {
     }
   }
   return best;
+}
+
+/**
+ * A page whose only form is a job-alert signup.
+ *
+ * `formScope` skips those roots, so on such a page it finds nothing and the
+ * caller falls through to `a11yScope`, which scopes to `body` and picks the
+ * whole document — alert widget included. Checked once at the page level so the
+ * fallback cannot quietly undo the exclusion.
+ */
+async function onlyAlertWidget(page, scope) {
+  if (scope.rootSelector !== 'body') return null;
+  return notAnApplicationForm(scope.frame, 'body');
 }
 
 const fromA11y = n => ({ ...toFieldSpec(n), collector: 'a11y', role: n.role });
@@ -248,6 +292,16 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     await captureUnsolvedPage(page, { job, vendor: vendor.vendor, stage: 'no-form',
       reason: `No application form found on ${vendor.vendor} page` });
     throw new Error(`No application form found on ${vendor.vendor} page`);
+  }
+
+  // Nothing on this page is an application. Say so and hand it over, rather than
+  // typing the candidate's details into whatever else was on offer.
+  const alertOnly = await onlyAlertWidget(page, scope);
+  if (alertOnly) {
+    return {
+      outcome: 'manual', vendor: vendor.vendor, url, filled: [], screenshots,
+      reason: `${alertOnly} — the real apply route needs an account on this board, so it has to be done by hand`,
+    };
   }
 
   const { frame, rootSelector } = scope;

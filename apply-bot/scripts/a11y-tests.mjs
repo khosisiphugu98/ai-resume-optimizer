@@ -452,6 +452,38 @@ const PARTIAL = at('https://careers.partial.test/apply', `
 // submitted application was recorded. Nothing reached an employer. An
 // unrecognised page has to prove it is an application form — by taking a CV —
 // before it may be sent.
+// ExecutivePlacements.com opens a modal over its postings headed "Create an
+// email alert for <title> jobs", with What / Where / Email boxes. It is the
+// richest set of inputs on the page — the real apply route is "Upload your CV" /
+// "Login here" — so formScope picked it and the run typed the candidate's job
+// title, location and email address into a marketing signup. Nothing was sent,
+// because "Create Email Alert" is not a name the terminal rule accepts, but
+// three real personal details went in first. Same defect as the CareerJunction
+// search bar, in a different costume.
+section('a job-alert signup is not an application form');
+const ALERT_ONLY = at('https://board.alerts.test/job/123', `
+  <h1>Business Intelligence Analyst</h1>
+  <p>Purpose of the job: converting data into useful business insights.</p>
+  <a href="/upload">New users - Upload your CV</a>
+  <a href="/login">Existing users - Login here</a>
+  <div id="alert-modal">
+    <h2>Create an email alert for Business Intelligence Analyst jobs</h2>
+    <label for="al-what">What</label><input id="al-what" type="text">
+    <label for="al-where">Where</label><input id="al-where" type="text">
+    <label for="al-em">Email</label><input id="al-em" type="text">
+    <button type="button">Create Email Alert</button>
+    <p>You can cancel at any time. We will not spam you.</p>
+  </div>`);
+{
+  const w = await applyExternal(page, { ...job(9111), external_apply_url: ALERT_ONLY }, ctx,
+    { submit: true, approved: true });
+  t('handed over rather than filled', w.outcome, 'manual');
+  t('and says what it actually was', /job-alert signup/.test(w.reason || ''), true);
+  t('nothing was typed into it', w.filled.length, 0);
+  t('  → the email box is untouched', await page.locator('#al-em').inputValue(), '');
+  t('  → and so is the job-title box', await page.locator('#al-what').inputValue(), '');
+}
+
 section('an unknown page without a CV upload is filled and held, never sent');
 const priorAuto = getSetting('allow_generic_autosubmit');
 setSetting('allow_generic_autosubmit', '1');
