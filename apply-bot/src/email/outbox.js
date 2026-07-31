@@ -53,6 +53,23 @@ function gmailReady(stage) {
 }
 
 /**
+ * True when the token can actually read mail.
+ *
+ * `isConfigured()` only asks whether both files exist, so it cannot tell a whole
+ * connection from a send-only one. Without this check, reply tracking 403s
+ * "Request had insufficient authentication scopes" on every cycle — the same
+ * forever-repeating failure as an expired grant, wearing a different error code.
+ * Read the scope the token carries, never the scope the code asked for.
+ *
+ * A send-only token is the normal state here, not a fault: reading a thread needs
+ * a scope that grants the whole mailbox, and the operator declined it for a
+ * personal address. So this is quiet. Nothing to fix means nothing to report.
+ */
+function gmailCanRead() {
+  return gmail.isConfigured() && gmail.canReadMail();
+}
+
+/**
  * Draft an email application and put it in the outbox.
  *
  * Nothing here sends. Sending happens on flush, after the hold, which is the one
@@ -193,6 +210,11 @@ export async function flushOutbox({ force = false } = {}) {
       }
 
       const res = await gmail.sendEmail({
+        // The profile records an address per channel deliberately — Easy Apply
+        // uses the iCloud one, email and external use this. Asking Google for the
+        // account address instead would need a read scope this install does not
+        // have, and would answer the same thing anyway.
+        from: profile.identity.email,
         to: row.to_addr,
         cc: row.cc_addr ? row.cc_addr.split(',').map(s => s.trim()).filter(Boolean) : [],
         subject: row.subject,
@@ -283,7 +305,8 @@ export async function runEmailApplications({ limit = 10 } = {}) {
 
 /** Poll sent threads for replies — the only automatic outcome signal we get. */
 export async function checkReplies() {
-  if (!gmailReady('replies')) return { checked: 0, replies: 0, disconnected: true };
+  // Off by choice, so it returns empty-handed and silently. See gmailCanRead.
+  if (!gmailCanRead()) return { checked: 0, replies: 0, readAccess: false };
 
   const rows = db.prepare(
     `SELECT * FROM outbox WHERE status = 'sent' AND gmail_thread_id IS NOT NULL AND reply_state IS NULL`).all();

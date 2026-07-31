@@ -9,12 +9,28 @@ const CREDS = path.join(ROOT, 'profile/google-credentials.json');
 const TOKEN = path.join(ROOT, 'profile/google-token.json');
 const REDIRECT = 'http://localhost:5179/oauth2callback';
 
-// gmail.send to send, gmail.readonly to watch for replies. Deliberately not
-// gmail.modify — nothing here should ever alter or delete mail.
-const SCOPES = [
-  'https://www.googleapis.com/auth/gmail.send',
-  'https://www.googleapis.com/auth/gmail.readonly',
-];
+/** How long the consent listener stays up. See the note at the setTimeout below. */
+const CONSENT_TIMEOUT_MS = Number(process.env.GMAIL_CONSENT_TIMEOUT_MS) || 15 * 60_000;
+
+/**
+ * Send only. Nothing here reads the operator's mail.
+ *
+ * `gmail.readonly` was requested for one feature — noticing that an employer had
+ * replied to a thread the bot itself started. Google has no scope that narrow:
+ * the smallest one that can read a thread grants every message and every setting
+ * in the mailbox, and this is the operator's personal address, not a throwaway.
+ * That is a poor trade for automatic outcome tracking, and it was the operator's
+ * call to decline it.
+ *
+ * So reply tracking is off by design, not by fault. `checkReplies` returns
+ * empty-handed and says nothing, and READ_SCOPE below stays unrequested. If the
+ * decision is ever revisited, adding it back here is the only change needed —
+ * everything downstream already asks `canReadMail()` rather than assuming.
+ */
+const SCOPES = ['https://www.googleapis.com/auth/gmail.send'];
+
+/** The scope reply tracking would need. Deliberately not in SCOPES — see above. */
+export const READ_SCOPE = 'https://www.googleapis.com/auth/gmail.readonly';
 
 export function isConfigured() {
   return fs.existsSync(CREDS) && fs.existsSync(TOKEN);
@@ -97,7 +113,23 @@ export function beginAuthorisation() {
     });
     server.on('error', reject);
     server.listen(5179);
-    setTimeout(() => { server.close(); reject(new Error('Timed out waiting for consent')); }, 300_000);
+    // Long enough for a person, not just for a happy path.
+    //
+    // Five minutes assumed you were already signed in and knew which account to
+    // pick. A real grant is: account chooser, password, 2FA, the "Google hasn't
+    // verified this app" interstitial with its Advanced link, then the scope
+    // screen. Overrun it and the listener is gone by the time Google redirects
+    // back, so the browser shows "localhost refused to connect" and the operator
+    // is told nothing about why — the failure looks like a firewall problem and
+    // is really a stopwatch. Fifteen minutes costs nothing; the server is closed
+    // the moment consent lands either way.
+    setTimeout(() => {
+      server.close();
+      reject(new Error(
+        'Timed out waiting for consent — the browser tab was not completed in time. '
+        + 'Run it again and grant access; nothing was changed.'
+      ));
+    }, CONSENT_TIMEOUT_MS);
   }).then(async code => {
     const { tokens } = await client.getToken(code);
     fs.mkdirSync(path.dirname(TOKEN), { recursive: true });
@@ -114,7 +146,18 @@ export function beginAuthorisation() {
         + 'to Production in Google Cloud, then reconnect, or this will break again today.'
       : null;
 
-    return { ok: true, expiring };
+    // Consent is per-scope, and a half-grant looks exactly like a whole one.
+    //
+    // Google's consent screen shows a checkbox per permission and silently drops
+    // the ones left unticked — the callback still says "Connected", the token
+    // still works, and `isConfigured()` is still true because both files exist.
+    // Granting send but not readonly produced precisely that: mail would go out,
+    // and `replies` — the only automatic outcome signal there is — would have
+    // failed 403 on every cycle forever. Check what actually came back.
+    const granted = new Set(String(tokens.scope || '').split(/\s+/).filter(Boolean));
+    const missing = SCOPES.filter(s => !granted.has(s));
+
+    return { ok: true, expiring, missing, granted: [...granted] };
   });
 
   return { url, completed };
@@ -123,8 +166,44 @@ export function beginAuthorisation() {
 /** One-time browser consent, terminal flavour. */
 export async function authorise() {
   const { url, completed } = beginAuthorisation();
-  console.log('\n  Open this URL and grant access:\n\n  ' + url + '\n');
-  return completed;
+  console.log('\n  Open this URL and grant access.');
+  console.log('  Tick EVERY permission box — an unticked one is silently dropped.\n');
+  console.log('  ' + url + '\n');
+
+  const r = await completed;
+  if (r.expiring) console.log(`\n  ⚠ ${r.expiring}\n`);
+  if (r.missing?.length) {
+    console.log(
+      `\n  ⚠ Only part of the access was granted. Missing: ${r.missing.join(', ')}\n`
+      + '    Run this again and tick every box on the consent screen.\n'
+    );
+  }
+  return r;
+}
+
+/**
+ * Which of the scopes we asked for the saved token actually carries.
+ *
+ * Read from the token rather than assumed from SCOPES, because the two differ
+ * whenever a consent checkbox was left unticked — and that difference is invisible
+ * until an API call 403s.
+ */
+export function grantedScopes() {
+  if (!fs.existsSync(TOKEN)) return [];
+  try {
+    return String(JSON.parse(fs.readFileSync(TOKEN, 'utf8')).scope || '').split(/\s+/).filter(Boolean);
+  } catch { return []; }
+}
+
+/** Scopes we need and do not have. Empty when the connection is whole. */
+export function missingScopes() {
+  const granted = new Set(grantedScopes());
+  return SCOPES.filter(s => !granted.has(s));
+}
+
+/** True when the token can read mail — i.e. reply tracking can work at all. */
+export function canReadMail() {
+  return grantedScopes().includes(READ_SCOPE);
 }
 
 /**
@@ -195,13 +274,32 @@ async function gmail(pathname, { method = 'GET', body = null, query = {} } = {})
   return res.json();
 }
 
+/**
+ * The sending address, asked of Google.
+ *
+ * `users.getProfile` needs a read scope, which is exactly what this install does
+ * not have — so with a send-only token this 403s. It stays because the dashboard
+ * uses it to display the connected account when the scope allows, but nothing on
+ * the sending path may depend on it. Callers must handle the throw.
+ */
 export async function profileAddress() {
   const p = await gmail('profile');
   return p.emailAddress;
 }
 
-export async function sendEmail({ to, cc = [], subject, body, attachments = [] }) {
-  const from = await profileAddress();
+/**
+ * Send.
+ *
+ * `from` is passed in rather than fetched. It used to come from
+ * `profileAddress()`, which meant every send began with a read call — so a
+ * send-only token could not send at all, failing on the one permission it had.
+ * Gmail authorises the message by the token, not by this header, and rewrites a
+ * From that is not the authenticated account or a verified alias; the header is
+ * for the recipient's benefit, and the profile already records the right address
+ * for this channel.
+ */
+export async function sendEmail({ from, to, cc = [], subject, body, attachments = [] }) {
+  if (!from) throw new Error('sendEmail needs a from address — the profile records one per channel');
   const raw = toBase64Url(buildMimeMessage({ from, to, cc, subject, body, attachments }));
   const sent = await gmail('messages/send', { method: 'POST', body: { raw } });
   return { messageId: sent.id, threadId: sent.threadId };

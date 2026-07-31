@@ -111,9 +111,44 @@ test('beginAuthorisation hands back a Google consent URL with the right scopes',
   assert.equal(u.searchParams.get('access_type'), 'offline');
   const scope = u.searchParams.get('scope');
   assert.match(scope, /gmail\.send/);
-  assert.match(scope, /gmail\.readonly/);
+  // Send, and nothing else.
+  //
+  // gmail.readonly was asked for so the bot could notice an employer replying to
+  // a thread it started. Google has no scope that narrow — the smallest one that
+  // can read a thread grants every message and every setting in the mailbox — and
+  // this runs against the operator's personal address. They declined it, and
+  // reply tracking is off as a result. Widening this again is a decision about
+  // someone's private mail, so it should fail here first and be made on purpose.
+  assert.doesNotMatch(scope, /gmail\.readonly/);
   // gmail.modify would let this delete or alter mail. It must never be asked for.
   assert.doesNotMatch(scope, /gmail\.modify/);
+});
+
+// A send-only token is the expected state, so nothing on the sending path may
+// depend on a read call. sendEmail used to open with users.getProfile to find its
+// own From address — one read to enable one send, which 403s on a token that can
+// only send. It takes the address as an argument now.
+test('sending needs no read access — the From address is passed in', async () => {
+  await assert.rejects(
+    () => gmail.sendEmail({ to: 'a@b.c', subject: 's', body: 'b' }),
+    /needs a from address/,
+  );
+});
+
+test('the scopes a saved token actually carries are readable, and read access is off', () => {
+  fs.writeFileSync(TOKEN, JSON.stringify({
+    refresh_token: 'x', scope: 'https://www.googleapis.com/auth/gmail.send',
+  }));
+  assert.deepEqual(gmail.grantedScopes(), ['https://www.googleapis.com/auth/gmail.send']);
+  assert.equal(gmail.canReadMail(), false);
+  assert.deepEqual(gmail.missingScopes(), []);   // nothing missing: send is all we ask for
+
+  // And a half-grant against a wider ask is still detected, which is what makes
+  // a silently-unticked consent box visible at grant time instead of at 403 time.
+  fs.writeFileSync(TOKEN, JSON.stringify({ refresh_token: 'x', scope: gmail.READ_SCOPE }));
+  assert.equal(gmail.canReadMail(), true);
+  assert.deepEqual(gmail.missingScopes(), ['https://www.googleapis.com/auth/gmail.send']);
+  fs.rmSync(TOKEN, { force: true });
 });
 
 test('disconnect drops the token but keeps credentials', () => {

@@ -208,7 +208,13 @@ const commands = {
     const gmail = await import('./email/gmail.js');
     if (!gmail.hasCredentials()) { console.log(gmail.SETUP_HELP); process.exit(1); }
     await gmail.authorise();
-    console.log(`\n  Connected as ${await gmail.profileAddress()}\n`);
+    // Naming the account needs a read scope, and this install is send-only by
+    // design — so ask, and say so plainly when the answer is "not allowed to
+    // look" rather than crashing a flow that in fact succeeded.
+    const who = await gmail.profileAddress().catch(() => null);
+    console.log(who
+      ? `\n  Connected as ${who}\n`
+      : '\n  Connected. Send-only access, so the account name is not readable from here.\n');
   },
 
   // What actually went to employers. Reads the append-only submission log.
