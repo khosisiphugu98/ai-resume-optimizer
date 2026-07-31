@@ -3,7 +3,7 @@ import path from 'node:path';
 import { PATHS } from '../config.js';
 import {
   db, updateJob, queueEmail, outboxDue, markEmailSent, markEmailFailed, parkQuestions,
-  recordEmailApplication, setOutcome,
+  recordEmailApplication, setOutcome, getSetting, setSetting,
 } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { loadProfile } from '../profile.js';
@@ -20,6 +20,37 @@ export const HOLD_MINUTES = Number(process.env.OUTBOX_HOLD_MINUTES ?? 15);
 
 /** Reply classification → the ordinal outcome scale in db.js. */
 const REPLY_TO_OUTCOME = { rejected: 'rejected', interview: 'interview', replied: 'screen' };
+
+/**
+ * A disconnected Gmail is a standing condition, not an event.
+ *
+ * Between 29 and 31 July the refresh token was dead and the pipeline logged
+ * `replies failed: invalid_grant` 144 times — once per cycle, identically, for
+ * three days. That is not a log, it is noise that buries every other error in the
+ * same window. Report it once a day, say what to do about it, and let the stage
+ * return quietly the rest of the time.
+ *
+ * Returns true when the caller should stop.
+ */
+function noteGmailDisconnected(stage, err) {
+  const today = new Date().toISOString().slice(0, 10);
+  if (getSetting('gmail_disconnected_alerted') !== today) {
+    setSetting('gmail_disconnected_alerted', today);
+    emit({
+      stage, level: 'error',
+      message: `Gmail is disconnected — ${err.message}. The email channel and reply `
+        + 'tracking are both stopped until it is reconnected.',
+    });
+  }
+  return true;
+}
+
+/** True when Gmail is usable at all. Also the seam the disconnect alert hangs off. */
+function gmailReady(stage) {
+  if (gmail.isConfigured()) return true;
+  noteGmailDisconnected(stage, new Error('no saved connection — run: npm run gmail:auth'));
+  return false;
+}
 
 /**
  * Draft an email application and put it in the outbox.
@@ -123,7 +154,7 @@ export async function flushOutbox({ force = false } = {}) {
       stage: 'email', level: 'warn',
       message: `${due.length} email(s) ready but Gmail is not connected — drafts are in artifacts/emails/. Run: npm run gmail:auth`,
     });
-    return { sent: 0, failed: 0, skipped: due.length };
+    return { sent: 0, failed: 0, skipped: due.length, disconnected: true };
   }
 
   let sent = 0, failed = 0, skipped = 0;
@@ -180,6 +211,15 @@ export async function flushOutbox({ force = false } = {}) {
       sent++;
       emit({ jobId: row.job_id, stage: 'email', message: `Sent to ${row.to_addr} — "${row.subject}"` });
     } catch (err) {
+      // A dead grant says nothing about this message. Burning the draft and
+      // flipping the job to apply_failed — which is what happened to two rows on
+      // 29 July — throws away work over a credential problem. Leave it held and
+      // stop the flush; it will send itself once Gmail is reconnected.
+      if (err?.code === 'gmail_disconnected') {
+        noteGmailDisconnected('email', err);
+        skipped += due.length - sent - failed;
+        break;
+      }
       markEmailFailed(row.id, err.message);
       updateJob(row.job_id, { status: 'apply_failed', reject_reason: `email send failed: ${err.message}`.slice(0, 200) });
       failed++;
@@ -241,13 +281,25 @@ export async function runEmailApplications({ limit = 10 } = {}) {
 
 /** Poll sent threads for replies — the only automatic outcome signal we get. */
 export async function checkReplies() {
-  if (!gmail.isConfigured()) return { checked: 0, replies: 0 };
+  if (!gmailReady('replies')) return { checked: 0, replies: 0, disconnected: true };
 
   const rows = db.prepare(
     `SELECT * FROM outbox WHERE status = 'sent' AND gmail_thread_id IS NOT NULL AND reply_state IS NULL`).all();
   if (!rows.length) return { checked: 0, replies: 0 };
 
-  const me = await gmail.profileAddress();
+  // The first call is what discovers a dead token, and it must not propagate: an
+  // expired grant is a standing condition the operator has to clear, not a stage
+  // crash to re-raise every fifteen minutes.
+  let me;
+  try {
+    me = await gmail.profileAddress();
+  } catch (err) {
+    if (err?.code === 'gmail_disconnected') {
+      noteGmailDisconnected('replies', err);
+      return { checked: 0, replies: 0, disconnected: true };
+    }
+    throw err;
+  }
   let replies = 0;
 
   for (const row of rows) {

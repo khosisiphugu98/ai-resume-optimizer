@@ -8,6 +8,10 @@ node_modules/
 # Wrangler secrets / local env — never commit
 cf-worker/.dev.vars
 .env
+# Google OAuth client JSON downloads. The live copy belongs in apply-bot/profile/
+# (already ignored); this catches the one that lands wherever the browser put it.
+client_secret_*.json
+*.apps.googleusercontent.com.json
 apply-bot/node_modules/
 apply-bot/artifacts/
 apply-bot/data/

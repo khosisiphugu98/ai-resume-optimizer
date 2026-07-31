@@ -203,6 +203,21 @@ async function modelObjections({ filled, profile, job, subject = null, body = nu
 }
 
 /**
+ * Is this reviewer failure a standing condition rather than a passing one?
+ *
+ * Quota, billing, authentication and rate-limit failures all mean the reviewer
+ * will still be missing on the next attempt, often for hours. A socket reset or a
+ * 500 means it might not be. The two deserve opposite responses, so they are told
+ * apart here rather than lumped together as "could not run".
+ */
+export function reviewerUnavailable(err) {
+  const m = String(err?.message || '');
+  const status = err?.status ?? err?.response?.status;
+  if (status === 401 || status === 403 || status === 429) return true;
+  return /usage limit|quota|credit balance|billing|rate.?limit|insufficient_quota|authentication_error|permission_error|invalid[_ ]api[_ ]key/i.test(m);
+}
+
+/**
  * Check a payload before it is sent.
  *
  * @returns {{ ok, blocked, notes, reason }} — `reason` is a sentence for the
@@ -222,11 +237,35 @@ export async function preflight({
     try {
       found.push(...await modelObjections({ filled, profile, job, subject, body }, callFn));
     } catch (err) {
-      // The reviewer being unreachable is not evidence that the application is
-      // wrong. Say so out loud and go on with what the deterministic half found.
+      const line = String(err.message || '').split('\n')[0];
+
+      // A spend limit is not a blip, and must not be treated as one.
+      //
+      // On 31 July the reviewer returned "You have reached your specified API
+      // usage limits. You will regain access on 2026-08-01 at 00:00 UTC" and this
+      // block shrugged and sent the application on deterministic checks alone —
+      // four times, and it would have done so for the rest of the day. A condition
+      // with a stated end time will still be there on the next attempt: the honest
+      // response is to hold the application until a reviewer exists, not to
+      // redefine "reviewed" as "the half of the review that still works".
+      if (reviewerUnavailable(err)) {
+        emit({
+          jobId: job?.id, stage: 'apply', level: 'warn',
+          message: `Held — the pre-send reviewer is unavailable (${line}). `
+            + 'Not sending anything it has not read; this will retry once it is back.',
+        });
+        return {
+          ok: false, blocked: [], notes: [],
+          reason: `the pre-send reviewer is unavailable (${line}) — held rather than sent unreviewed`,
+        };
+      }
+
+      // Anything else is a blip. The reviewer being briefly unreachable is not
+      // evidence that the application is wrong. Say so out loud and go on with
+      // what the deterministic half found.
       emit({
         jobId: job?.id, stage: 'apply', level: 'warn',
-        message: `Pre-send review could not run (${err.message.split('\n')[0]}) — deterministic checks only`,
+        message: `Pre-send review could not run (${line}) — deterministic checks only`,
       });
     }
   }

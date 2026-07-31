@@ -35,6 +35,35 @@ export const CAPS = {
   linkedin_pageviews: 250,    // kept — the core anti-ban budget for LinkedIn browsing
 };
 
+/**
+ * How much of the pageview budget each consumer must leave behind it.
+ *
+ * The budget was first-come-first-served, and discovery always came first: it
+ * re-ran every saved search on every fifteen-minute cycle and exhausted all 250
+ * pageviews by mid-morning three days running. Apply then found nothing left —
+ * `linkedin_easy` ran at 2–4 of 15 and `external_ats` at 0–4 of 1000, while 79
+ * tailored jobs aged on disk. Finding work is worthless if there is no budget
+ * left to send it with.
+ *
+ * So the order is inverted. Each consumer stops when the remaining budget reaches
+ * its floor, which reserves everything below that floor for the consumers that
+ * matter more:
+ *
+ *   · discover/enrich stop with 80 left — enough for a full 15 Easy Applies plus
+ *     ~65 external resolutions, which is more than the tailored backlog produces
+ *     in a day.
+ *   · external_ats stops with 20 left, so it can never starve the Easy Apply
+ *     channel the budget exists to protect.
+ *   · linkedin_easy may spend the last pageview. It is the most valuable and the
+ *     most tightly capped (15/day), so it goes last in line for the floor and
+ *     first in line for the budget.
+ */
+export const PAGEVIEW_FLOORS = {
+  browse: 80,          // discovery + the enrich browser fallback
+  external_ats: 20,
+  linkedin_easy: 0,
+};
+
 // Operating window, SAST. Opened to 24/7 at the operator's request: applications
 // run round the clock, every day. The LinkedIn ban-risk guards above (daily cap +
 // pageview budget) and the channel-aware pacing in rate.js remain in force — those,

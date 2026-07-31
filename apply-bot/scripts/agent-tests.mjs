@@ -48,6 +48,41 @@ await test('a hashed-class locator is rejected — plans must use stable handles
   assert.match(r.reason, /hashed|selector/i);
 });
 
+// The selector guard has to separate a CSS selector from a label, and for three
+// days it did neither. It asked whether the value *contained* a dot followed by
+// two word characters, which threw out the upload and email controls on every
+// generic form — both planners rejected the same page in sequence and it went to
+// capture unsolved — while passing "div > input" straight through. Both directions
+// are pinned here; either one regressing costs applications.
+await test('placeholder text that merely contains a dot is a label, not a selector', () => {
+  const labels = [
+    'Click to upload or drag & drop (.pdf)',
+    'you@email.com',
+    'Upload your CV (max 5MB, .doc or .docx)',
+    'LinkedIn URL (linkedin.com/in/...)',
+    'e.g. Jane Smith',
+    'What is your notice period? (e.g. 30 days)',
+    'Website / portfolio (e.g. github.com/you)',
+    'First name',
+  ];
+  for (const value of labels) {
+    const r = validatePlan({ ...validPlan, fields: [{ label: 'X', type: 'text', required: true, locator: { by: 'label', value } }] });
+    assert.equal(r.ok, true, `rejected a real label: ${value} (${r.reason})`);
+  }
+});
+
+await test('anything that is actually a CSS selector is still rejected', () => {
+  const selectors = [
+    '._7e3b9f11', 'div > input', 'li + a', 'input[name="email"]', '#apply-form',
+    '[data-testid="cv"]', 'button.primary', 'button.primary.large', ':nth-child(2)',
+    'form#apply', 'field_a1b2c3d4',
+  ];
+  for (const value of selectors) {
+    const r = validatePlan({ ...validPlan, fields: [{ label: 'X', type: 'text', required: true, locator: { by: 'label', value } }] });
+    assert.equal(r.ok, false, `accepted a selector: ${value}`);
+  }
+});
+
 await test('an unknown field type is rejected', () => {
   const p = { ...validPlan, fields: [{ label: 'X', type: 'signature', required: true, locator: { by: 'label', value: 'X' } }] };
   assert.equal(validatePlan(p).ok, false);

@@ -7,11 +7,12 @@ import {
   getContext, attachScreencast, assertNoChallenge, stopRequested,
   humanDelay, textOf, ChallengeDetected,
 } from '../browser.js';
-import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked, getSetting } from '../db.js';
+import { upsertJob, updateJob, bumpRate, todayRates, db, activeSearches, isCompanyBlocked, getSetting, setSetting } from '../db.js';
 import { emit, emitBoard } from '../bus.js';
 import { looksLikeEmailApplication } from '../email/extract.js';
 import { extractInstructions, hasInstructions, applyAddressIn, isClosed } from './jd-instructions.js';
 import { fetchGuestPosting, seniorityReject } from './jd-fetch.js';
+import { pageviewBudget } from '../apply/rate.js';
 
 /** The date-posted window in force, resolved from the setting with a safe fallback. */
 export function activeDatePostedWindow() {
@@ -113,11 +114,28 @@ async function scrollResults(page, rounds = 6) {
   }
 }
 
+/**
+ * Start each run where the last one stopped.
+ *
+ * `activeSearches()` returns a fixed `ORDER BY tier, id`, and the loop below
+ * breaks as soon as the pageview budget runs out. Together those meant the same
+ * leading searches ran on every one of the ~50 daily cycles and the tail never ran
+ * at all — the budget was spent re-reading one end of the list. Rotating the start
+ * point spends the same pageviews across the whole set instead.
+ */
+function rotate(searches) {
+  if (searches.length < 2) return searches;
+  const start = Number(getSetting('discover_rotation_offset', 0)) % searches.length || 0;
+  setSetting('discover_rotation_offset', String((start + 1) % searches.length));
+  return [...searches.slice(start), ...searches.slice(0, start)];
+}
+
 export async function runDiscovery({ searches = activeSearches(), maxPerSearch = 25 } = {}) {
   if (!searches.length) {
     emit({ stage: 'discover', level: 'warn', message: 'No search terms enabled — add one in the Search terms panel' });
     return { found: 0, kept: 0, rejected: 0 };
   }
+  searches = rotate(searches);
 
   const ctx = await getContext();
   const page = ctx.pages()[0] || await ctx.newPage();
@@ -133,8 +151,9 @@ export async function runDiscovery({ searches = activeSearches(), maxPerSearch =
   try {
     for (const search of searches) {
       if (stopRequested()) { emit({ stage: 'discover', level: 'warn', message: 'STOP file present — halting discovery' }); break; }
-      if (todayRates().linkedin_pageviews >= CAPS.linkedin_pageviews) {
-        emit({ stage: 'discover', level: 'warn', message: `LinkedIn pageview cap (${CAPS.linkedin_pageviews}) reached — stopping for today` });
+      const budget = pageviewBudget('browse');
+      if (!budget.ok) {
+        emit({ stage: 'discover', level: 'warn', message: `${budget.reason} — stopping discovery for today` });
         break;
       }
 
@@ -380,8 +399,9 @@ async function enrichViaBrowser(pending) {
 
   for (const { job } of pending) {
     if (stopRequested()) break;
-    if (todayRates().linkedin_pageviews >= CAPS.linkedin_pageviews) {
-      emit({ stage: 'enrich', level: 'warn', message: 'LinkedIn pageview cap reached — stopping' });
+    const budget = pageviewBudget('browse');
+    if (!budget.ok) {
+      emit({ stage: 'enrich', level: 'warn', message: `${budget.reason} — stopping the enrich browser fallback` });
       break;
     }
 

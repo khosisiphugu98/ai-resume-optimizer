@@ -103,7 +103,18 @@ export function beginAuthorisation() {
     fs.mkdirSync(path.dirname(TOKEN), { recursive: true });
     fs.writeFileSync(TOKEN, JSON.stringify(tokens, null, 2));
     fs.chmodSync(TOKEN, 0o600);
-    return { ok: true };
+
+    // Say so now, not in three days' worth of invalid_grant. A bounded refresh
+    // token means the consent screen is still in Testing; publishing it to
+    // Production is what makes the connection survive.
+    const ttl = Number(tokens.refresh_token_expires_in);
+    const expiring = Number.isFinite(ttl)
+      ? `Google issued a refresh token good for only ${(ttl / 3600).toFixed(1)} hours. `
+        + 'That happens while the OAuth consent screen is in "Testing" — publish the app '
+        + 'to Production in Google Cloud, then reconnect, or this will break again today.'
+      : null;
+
+    return { ok: true, expiring };
   });
 
   return { url, completed };
@@ -116,10 +127,55 @@ export async function authorise() {
   return completed;
 }
 
+/**
+ * A refresh token that Google will not honour again. Distinct from every other
+ * Gmail failure because it is the only one a retry cannot fix: the fix is a human
+ * granting consent once more. Callers key off `.code` rather than string-matching
+ * the message.
+ */
+export class GmailAuthError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = 'GmailAuthError';
+    this.code = 'gmail_disconnected';
+  }
+}
+
+/**
+ * Refresh tokens Google issues while the OAuth consent screen is still in
+ * "Testing" carry a `refresh_token_expires_in` — the one on 29 July was good for
+ * 4.1 hours. When it lapses, every call returns `invalid_grant` forever, and the
+ * pipeline logged that same failure 146 times over three days without ever saying
+ * what to do about it. Surfacing the lifetime at grant time is the cheap warning;
+ * `GmailAuthError` is the one that arrives too late to help.
+ */
+export function refreshTokenLifetimeSeconds() {
+  if (!fs.existsSync(TOKEN)) return null;
+  try {
+    const t = JSON.parse(fs.readFileSync(TOKEN, 'utf8'));
+    return Number.isFinite(t.refresh_token_expires_in) ? t.refresh_token_expires_in : null;
+  } catch { return null; }
+}
+
 async function accessToken() {
   const client = loadClient();
   client.setCredentials(JSON.parse(fs.readFileSync(TOKEN, 'utf8')));
-  const { token } = await client.getAccessToken();
+
+  let token;
+  try {
+    ({ token } = await client.getAccessToken());
+  } catch (err) {
+    // google-auth-library reports the OAuth error code on the response body, and
+    // in the message for transport-level failures. Check both.
+    const code = err?.response?.data?.error || '';
+    if (code === 'invalid_grant' || /invalid_grant/.test(err.message || '')) {
+      throw new GmailAuthError(
+        'the Gmail refresh token is no longer valid (invalid_grant) — reconnect with: npm run gmail:auth'
+      );
+    }
+    throw err;
+  }
+
   // Refresh tokens rotate; persist whatever we now hold.
   fs.writeFileSync(TOKEN, JSON.stringify(client.credentials, null, 2));
   return token;

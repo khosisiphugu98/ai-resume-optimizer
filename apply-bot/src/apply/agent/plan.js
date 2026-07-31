@@ -73,10 +73,35 @@ const PLAN_SCHEMA = {
   },
 };
 
-// A value that looks like a CSS selector or a hashed token is not a stable
-// accessible name — reject it so the plan can never depend on a hashed class.
-const looksLikeSelector = v =>
-  /^[.#\[]/.test(v) || /_[0-9a-f]{6,}\b/i.test(v) || /[.#>]{1}[\w-]{2,}/.test(v);
+/**
+ * A value that looks like a CSS selector or a hashed token is not a stable
+ * accessible name — reject it so the plan can never depend on a hashed class.
+ *
+ * The test is on the *whole* string, deliberately. The previous version asked
+ * whether the value merely contained a dot followed by two word characters, which
+ * is true of most real labels an application form has: it threw out
+ * "Click to upload or drag & drop (.pdf)", "you@email.com" and
+ * "Upload your CV (max 5MB, .doc or .docx)" — file inputs and email fields, the
+ * two controls that matter most — while letting the genuine selector "div > input"
+ * straight through, because that has a space after the combinator. It was wrong in
+ * both directions at once.
+ *
+ * A locator value is a selector when the entire string parses as one. Anything
+ * with a space and a lowercase word is prose, and prose is what an accessible name
+ * is made of.
+ */
+const SELECTOR_SHAPED = [
+  /^[.#[]/,                                   // .class, #id, [attr=…]
+  /_[0-9a-f]{6,}\b/i,                         // a hashed token anywhere: _7e3b9f11
+  /^[a-z][\w-]*\s*[>+~]\s*[\w[.#-]/i,         // a combinator: div > input, li + a
+  // tag.class, tag#id — anchored end to end, because a selector has no spaces in
+  // it. Unanchored, this reads "e.g. Jane Smith" as the tag `e` with class `g`.
+  /^[a-z][\w-]*(?:[.#][\w-]{2,})+$/i,
+  /^[\w-]+\[[^\]]+\]/,                        // input[name="email"]
+  /^:{1,2}[a-z-]+/i,                          // :nth-child(2), ::before
+];
+
+const looksLikeSelector = v => SELECTOR_SHAPED.some(re => re.test(String(v).trim()));
 
 /** Structural sanity check beyond the schema. Returns { ok, reason }. */
 export function validatePlan(plan) {

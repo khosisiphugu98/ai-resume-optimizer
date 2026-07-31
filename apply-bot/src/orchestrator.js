@@ -30,6 +30,33 @@ export const PIPELINE = ['discover', 'enrich', 'score', 'tailor', 'apply', 'emai
 export const DEFAULT_INTERVAL_MS = 15 * 60_000;
 const MIN_INTERVAL_MS = 60_000;
 
+/**
+ * Minimum gap between runs of an individual stage, where that differs from the
+ * loop's own interval.
+ *
+ * Every stage used to run on every pass, which suits the cheap ones and ruins the
+ * expensive one. `discover` costs a LinkedIn pageview per saved search — roughly
+ * 26 of a 250/day budget — and at a fifteen-minute cycle it burned the lot before
+ * midday, three days running, leaving `apply` nothing to spend. It also bought
+ * very little: a typical pass logged "362 cards seen, 39 new kept", because the
+ * board barely turns over inside an hour.
+ *
+ * Three hours is roughly eight passes a day — comfortably inside the budget floor
+ * in config.js, and still faster than postings actually appear. Everything else
+ * keeps running every cycle, which is the point: apply, email and replies are
+ * cheap and time-sensitive, and they should not be paced by the one stage that
+ * is neither.
+ */
+export const STAGE_MIN_INTERVAL_MS = {
+  discover: 3 * 60 * 60_000,
+};
+
+/** Per-stage minimum interval, overridable from the dashboard like the loop's own. */
+export function stageMinIntervalMs(stage) {
+  const v = Number(getSetting(`stage_interval_ms_${stage}`, STAGE_MIN_INTERVAL_MS[stage] ?? 0));
+  return Number.isFinite(v) && v >= 0 ? v : (STAGE_MIN_INTERVAL_MS[stage] ?? 0);
+}
+
 // One granularity for every wait: how often the loop re-checks the kill switch
 // while paused, how long it backs off when a manual stage holds the lock, and the
 // step it sleeps the between-cycle interval in so a stop is felt within a tick
@@ -59,11 +86,22 @@ export function createOrchestrator({
   isStopped = stopRequested,
   log = emit,
   sleep = realSleep,
+  stageInterval = stageMinIntervalMs,
+  now = () => Date.now(),
 } = {}) {
   const intervalMs = typeof interval === 'function' ? interval : () => interval;
 
   let looping = false;    // the loop is live
   let cancelled = false;  // stop() was called; unwind at the next check
+  const lastRunAt = new Map();  // stage → ms, for the per-stage minimum intervals
+
+  /** True when `stage` ran recently enough that this pass should skip it. */
+  function tooSoon(stage) {
+    const min = stageInterval(stage);
+    if (!min) return false;
+    const last = lastRunAt.get(stage);
+    return last != null && now() - last < min;
+  }
 
   /** Idle here while the kill switch is on, so clearing it resumes the same loop. */
   async function pause() {
@@ -78,7 +116,9 @@ export function createOrchestrator({
       if (cancelled) return;
       if (isStopped()) { await pause(); if (cancelled) return; }
       const res = await runStage(stage);
-      if (!res || res.ran !== false) return;   // ran (or errored inside) — done with this stage
+      // Only a real run resets the clock. A stage skipped because the lock was
+      // held has not run, and must not push its next slot out by three hours.
+      if (!res || res.ran !== false) { lastRunAt.set(stage, now()); return; }
       await sleep(TICK_MS);                     // lock was busy — back off and retry
     }
   }
@@ -86,6 +126,7 @@ export function createOrchestrator({
   async function cycle() {
     for (const stage of pipeline) {
       if (cancelled) return;
+      if (tooSoon(stage)) continue;
       await runOne(stage);
     }
   }

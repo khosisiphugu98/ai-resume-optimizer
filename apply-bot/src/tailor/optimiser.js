@@ -41,6 +41,17 @@ const MAX_PAGE_RATIO = 1.8;
 const MAX_AUTO_CONFIRMS_PER_JOB = 5;
 
 /**
+ * Passes a job gets at tailoring before it is left alone.
+ *
+ * Two, not more. The commonest failure is "optimisation changed nothing", and a
+ * second pass can legitimately differ — the optimiser samples, and the skill
+ * allowlist grows between runs as the evidence gate confirms things. A third pass
+ * on the same job and the same JD is a browser session spent to reach the same
+ * conclusion twice.
+ */
+export const TAILOR_MAX_ATTEMPTS = 2;
+
+/**
  * The rendered résumé's text, normalised, straight from the page.
  *
  * Deliberately NOT the seed PDF's text layer: the optimiser re-renders the seed
@@ -258,9 +269,21 @@ export async function tailorForJob(page, job, profile) {
   // application ever emailed. Comparing the rendered document before and after is
   // the one check that catches every route to that outcome.
   if ((await resumeTextInPage(page)) === beforeText) {
+    // Say which no-op this is. "Changed nothing" has two quite different causes
+    // and the message named neither: either the optimiser proposed no diffs at all
+    // (diffCount 0 — the JD asked for nothing the CV lacks), or it proposed some
+    // and the fabrication guard excluded every one of them from "Accept All"
+    // (diffCount > 0, nothing applied — the JD asked for things the profile cannot
+    // support). The first is a scoring problem, the second a profile-evidence
+    // problem, and they need opposite fixes.
+    const diffs = Number(done.diffCount) || 0;
     throw new Error(
       `Optimisation changed nothing for "${job.title}" — the export would be the ` +
-      `untailored base CV. Not marking this tailored.`
+      `untailored base CV. Not marking this tailored. ` +
+      (diffs === 0
+        ? '(The optimiser proposed no changes: the posting asked for nothing this CV lacks.)'
+        : `(The optimiser proposed ${diffs} change(s) and the fabrication guard excluded all of them: `
+          + 'the posting asked for things the profile does not evidence.)')
     );
   }
 
@@ -450,9 +473,18 @@ export async function runTailoring({ limit = 10 } = {}) {
     // dead-ended, because run.js selects easy_apply/external and outbox.js selects
     // email, and nothing selects unknown. Four of them, averaging fit 76, have a
     // finished PDF on disk and no code path that will ever send it.
-    `SELECT * FROM jobs WHERE status = 'scored' AND apply_type IN ('easy_apply', 'external', 'email')
-     ORDER BY fit_score DESC, id LIMIT ?`
-  ).all(limit);   // all channels tailor first — email attaches the same PDF
+    //
+    // `tailor_failed` rides along on a bounded counter, the way `apply_failed`
+    // already does in run.js. Without it the state was terminal: 76 jobs sat in it
+    // with exactly one attempt each, none of them ever selected again, most having
+    // failed on "optimisation changed nothing" — which is a guard reporting an
+    // outcome, not a verdict on the posting. Fresh work still outranks a retry.
+    `SELECT * FROM jobs
+      WHERE apply_type IN ('easy_apply', 'external', 'email')
+        AND (status = 'scored' OR (status = 'tailor_failed' AND tailor_attempts < ?))
+      ORDER BY CASE status WHEN 'scored' THEN 0 ELSE 1 END, fit_score DESC, id
+      LIMIT ?`
+  ).all(TAILOR_MAX_ATTEMPTS, limit);   // all channels tailor first — email attaches the same PDF
 
   const breaker = lostContextBreaker();
   let done = 0, failed = 0;
@@ -536,9 +568,19 @@ export async function runTailoring({ limit = 10 } = {}) {
         continue;
       }
 
-      updateJob(job.id, { status: 'tailor_failed', reject_reason: err.message.slice(0, 200) });
+      const attempts = (job.tailor_attempts || 0) + 1;
+      updateJob(job.id, {
+        status: 'tailor_failed',
+        tailor_attempts: attempts,
+        reject_reason: err.message.slice(0, 200),
+      });
       failed++;
-      emit({ jobId: job.id, stage: 'tailor', level: 'error', message: `Tailoring failed: ${err.message}` });
+      const left = TAILOR_MAX_ATTEMPTS - attempts;
+      emit({
+        jobId: job.id, stage: 'tailor', level: 'error',
+        message: `Tailoring failed: ${err.message} `
+          + (left > 0 ? `(attempt ${attempts}/${TAILOR_MAX_ATTEMPTS} — will retry)` : `(attempt ${attempts}/${TAILOR_MAX_ATTEMPTS} — giving up)`),
+      });
     }
 
     emitBoard();

@@ -6,12 +6,12 @@ import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { collectFieldsInPage, fillField, isSiteSearch } from '../src/apply/fields.js';
-import { canApply, withinHours, capRemaining, EXTERNAL_PAGEVIEW_SHARE } from '../src/apply/rate.js';
+import { canApply, withinHours, capRemaining, pageviewBudget, pageviewsRemaining } from '../src/apply/rate.js';
 import { HOURS } from '../src/config.js';
 import { db, bumpRate, setSetting, appliedUrlOwner, normaliseApplyUrl } from '../src/db.js';
 import { runWizard, stepSignature } from '../src/apply/wizard.js';
 import { contextLost, lostContextBreaker } from '../src/browser.js';
-import { CAPS } from '../src/config.js';
+import { CAPS, PAGEVIEW_FLOORS } from '../src/config.js';
 
 let pass = 0, fail = 0;
 const t = (name, got, want) => {
@@ -372,15 +372,38 @@ t('external keeps going', canApply('external_ats', { ignoreHours: true }).ok, tr
 t('email keeps going', canApply('email', { ignoreHours: true }).ok, true);
 db.exec('DELETE FROM rate_ledger');
 
-// Resolving an external apply URL opens the signed-in LinkedIn posting, so
-// external browsing is LinkedIn browsing — but only the linkedin channels were
-// gated on the budget. External spent 247 of 250 in one day while easy apply
-// used none, starving the channel the budget exists to protect.
-section('external may spend only its share of the LinkedIn pageview budget');
-for (let i = 0; i < Math.ceil(EXTERNAL_PAGEVIEW_SHARE * CAPS.linkedin_pageviews); i++) bumpRate('linkedin_pageviews');
-t('external stopped at its share', canApply('external_ats', { ignoreHours: true }).ok, false);
-t('  → reason explains the reserve', /reserved for Easy Apply/.test(canApply('external_ats', { ignoreHours: true }).reason), true);
-t('easy apply still has budget left', canApply('linkedin_easy', { ignoreHours: true }).ok, true);
+// One budget, three consumers, three floors. Discovery gives way to apply, and
+// within apply external gives way to Easy Apply. Before the floors existed the
+// budget was first-come-first-served and discovery always came first: it spent
+// all 250 by mid-morning for three days running while apply got nothing.
+section('the pageview budget is spent in priority order');
+const spendTo = left => {
+  db.exec('DELETE FROM rate_ledger');
+  for (let i = 0; i < CAPS.linkedin_pageviews - left; i++) bumpRate('linkedin_pageviews');
+};
+
+spendTo(PAGEVIEW_FLOORS.browse + 1);
+t('browsing runs while above its floor', pageviewBudget('browse').ok, true);
+spendTo(PAGEVIEW_FLOORS.browse);
+t('browsing stops at its floor', pageviewBudget('browse').ok, false);
+t('  → reason names the reserve', /reserved for higher-priority work/.test(pageviewBudget('browse').reason), true);
+t('external still has budget', canApply('external_ats', { ignoreHours: true }).ok, true);
+t('easy apply still has budget', canApply('linkedin_easy', { ignoreHours: true }).ok, true);
+
+spendTo(PAGEVIEW_FLOORS.external_ats);
+t('external stops at its floor', canApply('external_ats', { ignoreHours: true }).ok, false);
+t('  → easy apply keeps what external left', canApply('linkedin_easy', { ignoreHours: true }).ok, true);
+
+spendTo(0);
+t('easy apply may spend the last one, then stops', canApply('linkedin_easy', { ignoreHours: true }).ok, false);
+t('  → reason names the budget', /pageview budget exhausted/.test(canApply('linkedin_easy', { ignoreHours: true }).reason), true);
+
+// The floors must actually order the consumers, or they reserve nothing.
+t('floors are strictly ordered browse > external > easy',
+  PAGEVIEW_FLOORS.browse > PAGEVIEW_FLOORS.external_ats
+    && PAGEVIEW_FLOORS.external_ats > PAGEVIEW_FLOORS.linkedin_easy, true);
+// A floor below the Easy Apply cap would let discovery starve it again.
+t('the reserve covers a full day of Easy Apply', PAGEVIEW_FLOORS.browse >= CAPS.linkedin_easy, true);
 db.exec('DELETE FROM rate_ledger');
 
 // HOURS is deliberately 24/7 (config.js:42) — the operator opened external and

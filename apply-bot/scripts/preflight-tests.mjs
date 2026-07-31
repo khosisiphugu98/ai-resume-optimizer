@@ -105,6 +105,39 @@ section('what the reviewer is allowed to do with what it finds');
       filled: [{ question: 'Portfolio', value: 'unanswerable' }], profile: P,
     }, { callFn: broken, enabled: on, hasKeyFn: on })).ok, false);
 
+  // A spend limit is the opposite case, and used to be treated as the same one.
+  // "You will regain access on 2026-08-01 at 00:00 UTC" says in the error itself
+  // that the next attempt will fail too — so shrugging and sending on the
+  // deterministic half means sending unreviewed for the rest of the day. It did,
+  // four times, on 31 July. Hold instead: the application keeps, the reviewer
+  // comes back, and nothing reaches an employer that no one read.
+  const overLimit = async () => {
+    throw new Error('Claude 400: {"error":{"message":"You have reached your specified API usage limits. You will regain access on 2026-08-01 at 00:00 UTC."}}');
+  };
+  const held = await preflight({ filled, profile: P }, { callFn: overLimit, enabled: on, hasKeyFn: on });
+  t('a spend limit holds rather than sending unreviewed', held.ok, false);
+  t('  → and says which, so it is not mistaken for a bad answer',
+    /reviewer is unavailable/.test(held.reason || ''), true);
+
+  for (const [label, msg] of [
+    ['a 429', 'Claude 429: rate_limit_error'],
+    ['a bad key', 'Claude 401: authentication_error'],
+    ['no credit', 'Your credit balance is too low'],
+  ]) {
+    t(`${label} holds too`,
+      (await preflight({ filled, profile: P }, { callFn: async () => { throw new Error(msg); }, enabled: on, hasKeyFn: on })).ok, false);
+  }
+
+  // The split has to stay a split. A 500 or a dropped socket is still a blip.
+  for (const [label, msg] of [
+    ['a 503', 'Claude 503'],
+    ['an overload', 'Claude 500: overloaded_error'],
+    ['a dead socket', 'fetch failed'],
+  ]) {
+    t(`${label} still degrades rather than holding`,
+      (await preflight({ filled, profile: P }, { callFn: async () => { throw new Error(msg); }, enabled: on, hasKeyFn: on })).ok, true);
+  }
+
   t('turned off, it allows everything',
     (await preflight({
       filled: [{ question: 'Portfolio', value: 'unanswerable' }], profile: P,

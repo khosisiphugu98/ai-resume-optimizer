@@ -1,18 +1,32 @@
-import { CAPS, HOURS, PATHS } from '../config.js';
+import { CAPS, HOURS, PATHS, PAGEVIEW_FLOORS } from '../config.js';
 import { todayRates, bumpRate, getSetting } from '../db.js';
 import fs from 'node:fs';
 
 export const CHANNELS = ['linkedin_easy', 'external_ats', 'email'];
 
+/** LinkedIn pageviews still unspent today, across every consumer. */
+export function pageviewsRemaining() {
+  return Math.max(0, CAPS.linkedin_pageviews - (todayRates().linkedin_pageviews ?? 0));
+}
+
 /**
- * The most of the LinkedIn pageview budget the external channel may consume.
+ * Whether `consumer` may spend a LinkedIn pageview right now.
  *
- * Resolving an external apply URL opens the signed-in LinkedIn posting, so
- * external browsing is LinkedIn browsing and counts against the same anti-ban
- * budget — it was simply never gated on it. 60% leaves a working reserve for Easy
- * Apply, which is the channel the budget was written for.
+ * Every consumer shares one budget but stops at a different floor (see
+ * PAGEVIEW_FLOORS), so the ones that matter least give way first. `browse` is
+ * discovery and the enrich browser fallback; the rest are apply channels.
  */
-export const EXTERNAL_PAGEVIEW_SHARE = 0.6;
+export function pageviewBudget(consumer) {
+  const floor = PAGEVIEW_FLOORS[consumer] ?? 0;
+  const remaining = pageviewsRemaining();
+  if (remaining > floor) return { ok: true, remaining, floor };
+  return {
+    ok: false, remaining, floor,
+    reason: floor > 0
+      ? `LinkedIn pageview budget down to ${remaining}/${CAPS.linkedin_pageviews} — the last ${floor} are reserved for higher-priority work`
+      : `LinkedIn pageview budget exhausted (${CAPS.linkedin_pageviews}/day)`,
+  };
+}
 
 /**
  * Only linkedin_easy carries LinkedIn ban risk, so the caps are per-channel
@@ -59,23 +73,15 @@ export function canApply(channel, { ignoreHours = false } = {}) {
   const left = capRemaining(channel);
   if (left <= 0) return { ok: false, reason: `daily cap reached for ${channel} (${CAPS[channel]})` };
 
-  if (channel.startsWith('linkedin') && rates.linkedin_pageviews >= CAPS.linkedin_pageviews) {
-    return { ok: false, reason: 'LinkedIn pageview budget exhausted' };
-  }
-
-  // External applications spend the LinkedIn budget too — resolving an apply URL
-  // means opening the signed-in posting — but only the linkedin channels were ever
-  // gated on it. With external capped at 1000 that is 1000 LinkedIn pageviews a day
-  // against a 250 budget, and it showed: external burned 247 of 250 while
-  // linkedin_easy used none, starving the channel the budget exists to protect.
-  // External may spend up to a share of it and no more; the remainder is held for
-  // the channel that actually carries the ban risk.
-  if (channel === 'external_ats' && rates.linkedin_pageviews >= EXTERNAL_PAGEVIEW_SHARE * CAPS.linkedin_pageviews) {
-    return {
-      ok: false,
-      reason: `external has used its share of the LinkedIn pageview budget `
-        + `(${rates.linkedin_pageviews}/${CAPS.linkedin_pageviews}) — the rest is reserved for Easy Apply`,
-    };
+  // Both apply channels spend LinkedIn pageviews: Easy Apply opens the posting,
+  // and external resolves its apply URL through the signed-in posting. They draw
+  // on the same budget as discovery, but from above its floor — see
+  // PAGEVIEW_FLOORS. external_ats stops with 20 left so that it can never starve
+  // linkedin_easy, which is capped at 15 and carries the ban risk the budget
+  // exists to manage.
+  if (channel === 'linkedin_easy' || channel === 'external_ats') {
+    const budget = pageviewBudget(channel);
+    if (!budget.ok) return { ok: false, reason: budget.reason };
   }
 
   return { ok: true, remaining: left };

@@ -149,6 +149,12 @@ addColumn('jobs', 'resume_text_hash', 'TEXT');
 // was always passed to the model so it could reason from it, and nothing ever
 // extracted an instruction and acted on one. See discover/jd-instructions.js.
 addColumn('jobs', 'jd_instructions', 'TEXT');
+// Tailoring had no retry counter, so `tailor_failed` was terminal: nothing
+// selected the row again, ever. 76 jobs died there — every one with exactly one
+// attempt, the newest three days old — mostly on "optimisation changed nothing",
+// which is a guard doing its job on an outcome that a second pass can differ on.
+// This is the bounded counter that lets it have one.
+addColumn('jobs', 'tailor_attempts', 'INTEGER NOT NULL DEFAULT 0');
 
 const now = () => new Date().toISOString();
 /**

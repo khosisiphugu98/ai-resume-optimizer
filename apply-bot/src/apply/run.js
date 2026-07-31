@@ -111,9 +111,10 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
   // Easy Apply after all, which is handled below.
   const applyableType = { linkedin_easy: 'easy_apply', external_ats: 'external' };
   const ridesWith = { external_ats: ['external', 'unknown'] };
-  const activeTypes = Object.entries(applyableType)
-    .filter(([ch]) => canApply(ch, { ignoreHours }).ok)
-    .flatMap(([ch, t]) => ridesWith[ch] || [t]);
+  const gates = Object.keys(applyableType).map(ch => [ch, canApply(ch, { ignoreHours })]);
+  const activeTypes = gates
+    .filter(([, gate]) => gate.ok)
+    .flatMap(([ch]) => ridesWith[ch] || [applyableType[ch]]);
   const typeList = activeTypes.map(() => '?').join(',') || 'NULL';
 
   // Approved-for-submit first, then freshly tailored, then a bounded retry of
@@ -139,6 +140,25 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
     LIMIT ?`).all(...activeTypes, APPLY_MAX_ATTEMPTS, limit);
 
   if (!jobs.length) {
+    // Say which of the two very different things happened.
+    //
+    // With every channel gated, `activeTypes` is empty, `typeList` collapses to
+    // NULL, and the query can only match `approved` rows — so it returns nothing
+    // whatever the backlog looks like. For three days this reported "tailor some
+    // first" on 44 of 54 runs while 79 tailored jobs sat waiting: it named the one
+    // thing that was not the problem, and hid the one that was.
+    if (!activeTypes.length) {
+      const waiting = db.prepare(`
+        SELECT COUNT(*) n FROM jobs
+        WHERE status = 'tailored' AND apply_type IN ('easy_apply', 'external', 'unknown')`).get().n;
+      emit({
+        stage: 'apply', level: 'warn',
+        message: `Every channel is gated, so nothing was attempted — `
+          + gates.map(([ch, g]) => `${ch}: ${g.reason}`).join('; ')
+          + (waiting ? `. ${waiting} tailored job(s) are waiting on this.` : '.'),
+      });
+      return { attempted: 0, submitted: 0, queued: 0, parked: 0, failed: 0, manual: 0, gated: true };
+    }
     emit({ stage: 'apply', message: 'No jobs ready to apply to — tailor some first' });
     return { attempted: 0, submitted: 0, queued: 0, parked: 0, failed: 0, manual: 0 };
   }

@@ -28,8 +28,10 @@ async function waitIdle(ctl, max = 100_000) {
 // A fast, quiet harness. interval short so a between-cycle wait is a single tick;
 // sleep yields to the macrotask queue (rather than resolving as a microtask) so a
 // loop that parks on STOP still lets this test's own stop() land; log is swallowed.
+// stageInterval is flattened to zero so the sequencing tests below see every stage
+// on every pass — the per-stage pacing has its own scenarios at the end.
 const yieldTick = () => new Promise(r => setImmediate(r));
-const base = { interval: 5_000, sleep: yieldTick, log: () => {} };
+const base = { interval: 5_000, sleep: yieldTick, log: () => {}, stageInterval: () => 0 };
 
 console.log('\norchestrator');
 
@@ -137,6 +139,71 @@ await test('stop() unwinds a loop that is parked on STOP', async () => {
   assert.equal(ctl.active, true, 'still parked');
   ctl.stop();
   await waitIdle(ctl);
+});
+
+// A stage that costs a LinkedIn pageview per saved search cannot run on the same
+// fifteen-minute beat as one that costs nothing. `discover` burned the whole 250
+// budget before midday for three days while `apply` — cheap, and the only stage
+// that produces anything — was left with none. These pin the pacing that fixes it.
+await test('an expensive stage sits out passes that come too soon', async () => {
+  const calls = [];
+  let clock = 0, cycles = 0, ctl;
+  ctl = createOrchestrator({
+    ...base,
+    stageInterval: stage => (stage === 'discover' ? 10_000 : 0),
+    now: () => clock,
+    isStopped: () => false,
+    runStage: async stage => {
+      calls.push(stage);
+      if (stage === 'replies') { clock += 1_000; if (++cycles === 4) ctl.stop(); }
+      return { ran: true };
+    },
+  });
+  ctl.start();
+  await waitIdle(ctl);
+  assert.equal(calls.filter(s => s === 'discover').length, 1, 'discover ran once in four passes');
+  assert.equal(calls.filter(s => s === 'apply').length, 4, 'apply ran every pass');
+});
+
+await test('it runs again once its own interval has elapsed', async () => {
+  const calls = [];
+  let clock = 0, cycles = 0, ctl;
+  ctl = createOrchestrator({
+    ...base,
+    stageInterval: stage => (stage === 'discover' ? 10_000 : 0),
+    now: () => clock,
+    isStopped: () => false,
+    runStage: async stage => {
+      calls.push(stage);
+      if (stage === 'replies') { clock += 20_000; if (++cycles === 3) ctl.stop(); }
+      return { ran: true };
+    },
+  });
+  ctl.start();
+  await waitIdle(ctl);
+  assert.equal(calls.filter(s => s === 'discover').length, 3, 'the clock moved, so it ran each pass');
+});
+
+// A stage that never ran must not have its next slot pushed out by the interval
+// it never used — otherwise a busy lock silently costs three hours of discovery.
+await test('a stage skipped for a held lock does not reset its clock', async () => {
+  const calls = [];
+  let clock = 0, cycles = 0, held = true, ctl;
+  ctl = createOrchestrator({
+    ...base,
+    stageInterval: stage => (stage === 'discover' ? 10_000 : 0),
+    now: () => clock,
+    isStopped: () => false,
+    runStage: async stage => {
+      if (stage === 'discover' && held) { held = false; return { ran: false }; }
+      calls.push(stage);
+      if (stage === 'replies' && ++cycles === 1) ctl.stop();
+      return { ran: true };
+    },
+  });
+  ctl.start();
+  await waitIdle(ctl);
+  assert.equal(calls.filter(s => s === 'discover').length, 1, 'retried in the same pass, not deferred');
 });
 
 console.log(fail ? `\n${fail} failed\n` : `\n${pass} passed\n`);
