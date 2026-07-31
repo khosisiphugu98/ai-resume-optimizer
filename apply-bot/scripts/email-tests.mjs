@@ -2,6 +2,7 @@
 // application posted to a stranger — so extraction is pinned to addresses that
 // literally appear in the posting. MIME correctness matters too: a malformed
 // message is unrecoverable once sent.
+import './_sandbox.mjs';   // refuses to run against the real database
 import fs from 'node:fs';
 import path from 'node:path';
 import {

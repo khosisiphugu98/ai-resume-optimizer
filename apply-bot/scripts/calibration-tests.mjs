@@ -6,6 +6,7 @@
 // of those reads as a finding and none of them is one. So most of what is
 // asserted here is about *refusing* to report: suppression, the minimum sample,
 // and the censoring warning.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { db, upsertJob, setOutcome, bumpRate } from '../src/db.js';
 import {
   wilson, calibrationReport, thresholdSweep, labelledApplications, buildFewShot,

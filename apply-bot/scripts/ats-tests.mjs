@@ -6,6 +6,7 @@
 // This cannot prove the live selectors still match. It proves the routing,
 // frame resolution, prefill handling, parking and never-auto-submit-a-generic-
 // form rules hold.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';

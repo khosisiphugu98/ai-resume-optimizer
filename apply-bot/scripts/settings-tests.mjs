@@ -5,6 +5,7 @@
  * snapshots what was there and puts it back. Getting that wrong would delete a
  * working key, which is exactly the kind of thing a test must never do.
  */
+import './_sandbox.mjs';   // refuses to run against the real database
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';

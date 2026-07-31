@@ -1,6 +1,7 @@
 // The last look before anything reaches an employer, and the rule it enforces:
 // Claude reads and objects, deterministic code decides, and the model never gets
 // to choose a value. No network — the reviewer is injected.
+import './_sandbox.mjs';   // refuses to run against the real database
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

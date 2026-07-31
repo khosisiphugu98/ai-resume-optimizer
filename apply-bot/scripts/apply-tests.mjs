@@ -2,13 +2,14 @@
 // field extractor is exercised against a local fixture that reproduces the shapes
 // LinkedIn actually uses (labelled inputs, radio fieldsets, selects, file inputs).
 // Rate limiting and mode gating are tested directly.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';
 import { collectFieldsInPage, fillField, isSiteSearch } from '../src/apply/fields.js';
 import { canApply, withinHours, capRemaining, pageviewBudget, pageviewsRemaining } from '../src/apply/rate.js';
 import { HOURS } from '../src/config.js';
-import { db, bumpRate, setSetting, appliedUrlOwner, normaliseApplyUrl } from '../src/db.js';
+import { db, bumpRate, setSetting, getSetting, appliedUrlOwner, normaliseApplyUrl } from '../src/db.js';
 import { runWizard, stepSignature } from '../src/apply/wizard.js';
 import { contextLost, lostContextBreaker } from '../src/browser.js';
 import { CAPS, PAGEVIEW_FLOORS } from '../src/config.js';
@@ -416,11 +417,18 @@ t('Tuesday 03:00 SAST is too', withinHours(new Date('2026-07-21T01:00:00Z')).ok,
 t('Saturday is too', withinHours(new Date('2026-07-25T10:00:00Z')).ok, true);
 t('the window is genuinely open', [HOURS.start, HOURS.end, HOURS.weekdaysOnly], [0, 24, false]);
 
+// This suite runs against the live database (see the header), so a setting it
+// writes is a setting the operator is left with. Flipping mode to observe and
+// walking away silently halted every application until someone noticed the
+// dashboard was idle — a test that stops the system it is testing. Put it back.
 section('observe mode applies to nothing');
+const modeBefore = getSetting('mode', 'observe');
 setSetting('mode', 'observe');
 const { runApplications, isDeterministic } = await import('../src/apply/run.js');
 const r = await runApplications({ mode: 'observe' });
 t('no attempts made', r.attempted, 0);
+setSetting('mode', modeBefore);
+t('the operator\'s run mode survived the suite', getSetting('mode', null), modeBefore);
 db.exec("DELETE FROM events");
 
 // The retry budget is for transient trouble. Spending it on a posting whose

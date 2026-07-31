@@ -2,6 +2,7 @@
 // no-op optimisation exports the untailored seed CV under a job-specific filename,
 // and every downstream check passes it. 19 of 164 résumés on disk were duplicates
 // that way, including the only application ever emailed. No network.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { normaliseResumeText, outputName, resumeTextHash } from '../src/tailor/optimiser.js';
 import { db, resumeHashOwner } from '../src/db.js';
 import { validateResumePdf, CORE_RESUME_SKILLS } from './extract-text.mjs';

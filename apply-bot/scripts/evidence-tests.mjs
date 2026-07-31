@@ -2,6 +2,7 @@
 // that nothing reaches an employer that the candidate's own CV cannot support —
 // so a failure here is a fabrication risk, not a broken build. No network: the
 // model tiers run through injected fakes.
+import './_sandbox.mjs';   // refuses to run against the real database
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

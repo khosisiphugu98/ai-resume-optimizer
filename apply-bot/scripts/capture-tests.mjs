@@ -6,6 +6,7 @@
  * groups shapes stably, the upsert dedupes rather than appends, and capture is
  * best-effort (it can never throw or change the apply outcome).
  */
+import './_sandbox.mjs';   // refuses to run against the real database
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import { fingerprintOf, captureUnsolvedPage } from '../src/apply/agent/capture.js';

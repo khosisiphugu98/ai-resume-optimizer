@@ -1,6 +1,7 @@
 // Phase 2 tests. The important ones are the anti-fabrication guarantees: these
 // answers go on real employment applications, so a wrong one has consequences
 // beyond a failing build. No network.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { resolveField, guardAnswer, unreadableQuestion, isNonAnswer } from '../src/answer/resolver.js';
 import { NON_ANSWER_VALUE } from '../src/apply/wizard.js';
 import { resumeText } from '../src/answer/resume-context.js';

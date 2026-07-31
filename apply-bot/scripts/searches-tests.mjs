@@ -7,6 +7,7 @@
  * job could still leak out of — including a draft already sitting in the outbox
  * with a timer on it, which is the only way an application can send itself.
  */
+import './_sandbox.mjs';   // refuses to run against the real database
 import assert from 'node:assert/strict';
 
 import {

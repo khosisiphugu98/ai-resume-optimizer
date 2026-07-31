@@ -7,6 +7,7 @@
  * the bug it exists to prevent — a stale profile lock — only ever shows up
  * there.
  */
+import './_sandbox.mjs';   // refuses to run against the real database
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';

@@ -149,11 +149,13 @@ export async function flushOutbox({ force = false } = {}) {
   const profile = loadProfile();
   const jobFor = id => db.prepare('SELECT id, title, company FROM jobs WHERE id = ?').get(id) || null;
 
+  // Once a day, not once a flush. This runs on a timer, so on a disconnected
+  // Gmail it repeated every ninety seconds — the same noise as the 144 replies
+  // failures, from the other end of the same channel.
   if (!gmail.isConfigured()) {
-    emit({
-      stage: 'email', level: 'warn',
-      message: `${due.length} email(s) ready but Gmail is not connected — drafts are in artifacts/emails/. Run: npm run gmail:auth`,
-    });
+    noteGmailDisconnected('email', new Error(
+      `${due.length} email(s) are ready to send but there is no saved connection — `
+      + 'drafts are in artifacts/emails/. Run: npm run gmail:auth'));
     return { sent: 0, failed: 0, skipped: due.length, disconnected: true };
   }
 

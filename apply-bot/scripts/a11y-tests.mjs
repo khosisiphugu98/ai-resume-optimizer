@@ -10,6 +10,7 @@
 // resolution ladder, and the whole point is that it is *not* a way around the
 // controls — so each of those cases is an assertion that a model answer still
 // has to get past guardAnswer(), the offered options, and the profile.
+import './_sandbox.mjs';   // refuses to run against the real database
 import { chromium } from 'playwright';
 import fs from 'node:fs';
 import path from 'node:path';

@@ -4,6 +4,7 @@
 // recorded honestly, the calibration report is confidently wrong rather than
 // merely empty. The cases that matter are the ones about what is *excluded* —
 // an unlabelled application must never be silently dropped from a rate.
+import './_sandbox.mjs';   // refuses to run against the real database
 import {
   db, upsertJob, setOutcome, pendingOutcomes, autoTimeoutOutcomes, outcomeSummary,
   recordEmailApplication, OUTCOME_STATES, RESPONSE_STATES, OUTCOME_TIMEOUT_DAYS,

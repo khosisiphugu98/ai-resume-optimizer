@@ -6,6 +6,7 @@
  * the executor fills a plan but NEVER submits. All network-free — the model
  * callers are injected, and the executor runs against a fake page.
  */
+import './_sandbox.mjs';   // refuses to run against the real database
 import assert from 'node:assert/strict';
 
 import { validatePlan, planPage } from '../src/apply/agent/plan.js';
