@@ -295,6 +295,83 @@
   }
   #settingsDot[hidden] { display: none; }
 
+  /* ---------------------------------------------------------------------
+     Log viewer. Wider than the other drawers on purpose: a log line is one
+     long string and wrapping it every forty characters is what made the
+     260px pane at the bottom of the board unreadable enough to be ignored.
+     --------------------------------------------------------------------- */
+  #logs {
+    position: fixed; inset: 0; background: var(--bg);
+    padding: 0; overflow: hidden; z-index: 40;
+    transform: translateY(100%); transition: transform .2s ease;
+    display: flex; flex-direction: column;
+  }
+  #logs.open { transform: none; }
+  #logsClose {
+    position: absolute; top: 12px; right: 18px; background: none; border: 0;
+    color: var(--dim); font-size: 22px; cursor: pointer; z-index: 2;
+  }
+  #logsBody { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
+  .lg-head { padding: 14px 18px 0; }
+  .lg-head h2 { font-size: 15px; margin: 0 0 12px; }
+  .lg-controls {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 0 18px 12px; border-bottom: 1px solid var(--line);
+  }
+  .lg-controls select, .lg-controls input {
+    background: #0d1117; border: 1px solid var(--line); border-radius: 5px;
+    color: var(--ink); padding: 5px 8px; font: inherit; font-size: 12px;
+  }
+  .lg-controls input.q { min-width: 220px; flex: 1; }
+  .lg-controls button {
+    background: var(--panel-2); color: var(--ink); border: 1px solid var(--line);
+    border-radius: 5px; padding: 5px 12px; cursor: pointer; font: inherit; font-size: 12px;
+  }
+  .lg-controls button:hover { border-color: var(--accent); }
+  .lg-controls button.dl { border-color: #23472b; color: var(--ok); }
+  .lg-controls .sep { width: 1px; height: 20px; background: var(--line); margin: 0 2px; }
+  .lg-controls .lbl { color: var(--faint); font-size: 11px; }
+
+  .lg-summary { padding: 12px 18px; border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .lg-summary table { border-collapse: collapse; font-size: 11px; width: 100%; }
+  .lg-summary th { text-align: left; color: var(--faint); font-weight: 500; padding: 3px 12px 5px 0; white-space: nowrap; }
+  .lg-summary td { padding: 3px 12px 3px 0; color: var(--dim); white-space: nowrap; }
+  .lg-summary td.n { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .lg-summary td.warn { color: var(--warn); } .lg-summary td.err { color: var(--err); }
+  .lg-summary td.zero { color: var(--faint); }
+  .lg-summary .stagelink { color: var(--accent); cursor: pointer; }
+  .lg-summary h4 { margin: 14px 0 6px; font-size: 11px; color: var(--dim); font-weight: 500; }
+
+  .lg-rows {
+    flex: 1; overflow-y: auto; padding: 6px 18px 24px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11.5px;
+  }
+  .lg-row { display: flex; gap: 10px; padding: 3px 0; border-bottom: 1px solid #1a1f27; align-items: baseline; }
+  .lg-row time { color: var(--faint); flex: 0 0 130px; }
+  .lg-row .lv { flex: 0 0 54px; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; color: var(--faint); }
+  .lg-row .cmp { flex: 0 0 130px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lg-row .jid { flex: 0 0 52px; color: var(--faint); cursor: pointer; }
+  .lg-row .jid:hover { color: var(--accent); }
+  .lg-row .msg { flex: 1; white-space: pre-wrap; word-break: break-word; }
+  .lg-row.warn .lv, .lg-row.warn .msg { color: var(--warn); }
+  .lg-row.error .lv, .lg-row.error .msg { color: var(--err); }
+  .lg-row.critical { background: #2d1214; } .lg-row.critical .msg { color: var(--crit); font-weight: 600; }
+  .lg-row.debug .msg { color: var(--faint); }
+  .lg-row .dur { color: var(--faint); }
+  .lg-row .data {
+    margin: 3px 0 6px 130px; padding: 7px 10px; background: #0d1117;
+    border: 1px solid var(--line); border-radius: 5px; color: var(--dim);
+    white-space: pre-wrap; word-break: break-word; max-height: 320px; overflow-y: auto;
+  }
+  .lg-row .expand { cursor: pointer; color: var(--faint); flex: 0 0 14px; }
+  .lg-row .expand:hover { color: var(--accent); }
+  .lg-empty { color: var(--faint); padding: 24px 0; }
+  .linkbtn {
+    background: none; border: 0; color: var(--accent); cursor: pointer;
+    font: inherit; font-size: 11px; padding: 0; margin-left: 8px;
+  }
+  .linkbtn:hover { text-decoration: underline; }
+
   #settings {
     position: fixed; inset: 0 0 0 auto; width: 480px; background: var(--panel);
     border-left: 1px solid var(--line); padding: 18px; overflow-y: auto;
@@ -502,7 +579,8 @@
       <div id="calibration"></div>
     </div>
     <div class="panel">
-      <h3>Event log</h3>
+      <h3>Event log <span id="logCount" class="dim"></span>
+        <button id="logOpen" class="linkbtn">open log &amp; download →</button></h3>
       <div id="log"></div>
     </div>
   </div>
@@ -511,6 +589,7 @@
 <div id="drawer"><button id="close">×</button><div id="drawerBody"></div></div>
 <div id="settings"><button id="settingsClose">×</button><div id="settingsBody"></div></div>
 <div id="criteria"><button id="criteriaClose">×</button><div id="criteriaBody"></div></div>
+<div id="logs"><button id="logsClose">×</button><div id="logsBody"></div></div>
 <div id="lightbox"><img alt=""></div>
 <script src="app.js"></script>
 </body>

@@ -4,7 +4,7 @@ import { PATHS, SELECTORS } from '../config.js';
 import { assertNoChallenge, ChallengeDetected, postingClosedReason } from '../browser.js';
 import { bumpRate } from '../db.js';
 import { isSiteSearch } from './fields.js';
-import { collectFields, fillCollected } from './external.js';
+import { collectFields, fillCollected, readCollected } from './external.js';
 import { runWizard, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, buttonByName, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
@@ -37,6 +37,20 @@ const BTN = {
   discard: ['button[data-test-dialog-secondary-btn]', 'button[data-control-name="discard_application_confirm_btn"]'],
   followCompany: ['#follow-company-checkbox'],
 };
+
+/**
+ * LinkedIn's "follow this company" opt-in, which is not part of the application.
+ *
+ * Matched on the label as well as the id, because the id is the only selector we
+ * have for unticking it and the label is the only thing the collector sees. Both
+ * are needed: the id can change, and a control the id misses would come straight
+ * back through the field list wearing the same words.
+ */
+const FOLLOW_COMPANY_LABEL = /\bfollow\b.{0,60}\b(to stay up to date|company('s)? page|their page)\b/i;
+
+export const isFollowCompany = item =>
+  String(item?.uid || '').includes('follow-company')
+  || FOLLOW_COMPANY_LABEL.test(String(item?.question || ''));
 
 async function modalSelector(page) {
   for (const sel of MODAL) {
@@ -275,13 +289,34 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
         } catch { /* LinkedIn often pre-selects a stored resume; upload is optional */ }
       }
 
+      // Don't silently start following companies — and don't record having done
+      // so either.
+      //
+      // This used to happen in `onStep`, which the wizard runs *after* the step
+      // has been collected, resolved and filled. LinkedIn ships the box already
+      // ticked, so the collector read it as an answered question ("Follow Acme to
+      // stay up to date with their page" = "Yes"), the resolver let a prefilled
+      // value stand, and the box was then unticked on the page a moment later.
+      // The page was right and the record was wrong — and the record is what the
+      // pre-send check reads. It saw a subscription being granted on the
+      // candidate's behalf, blocked correctly on the evidence in front of it, and
+      // held the application for a human. Fourteen applications on this board are
+      // sitting in Review because of a checkbox that was already unticked.
+      //
+      // So it is unticked here, before anything reads the step, and dropped from
+      // the field list entirely: it is LinkedIn's own chrome, like the search box
+      // below it, and never was one of the employer's questions.
+      const follow = await firstVisible(page, BTN.followCompany);
+      if (follow) await follow.uncheck({ force: true }).catch(() => {});
+
       // LinkedIn's own header is not a screening question. When the modal closes
       // under the collector this is the second line of defence — the first is
       // collectFieldsInPage refusing to widen to the document when its root has
       // gone. Job 453 captured a "Search" textbox and a "Select language"
       // combobox as the application form; nothing was typed into them only
       // because the run was already stuck.
-      return items.filter(i => i.role !== 'file' && i.question && !isSiteSearch(i.question));
+      return items.filter(i =>
+        i.role !== 'file' && i.question && !isSiteSearch(i.question) && !isFollowCompany(i));
     };
 
     const result = await runWizard({
@@ -289,6 +324,7 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       collect,
       resolve: items => resolveFormBatch(items, ctx),
       fill: (item, value) => fillCollected(page, item, value),
+      verify: item => readCollected(page, item),
       // Read the whole application back before pressing submit. Easy Apply had
       // no such check: whatever the ladder produced went to the employer.
       mayFinish: preflightGate({
@@ -312,10 +348,9 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       findTerminal: async () => (await buttonByName(page, TERMINAL_NAME)) || firstVisible(page, BTN.submit),
       findAdvance: async () => (await buttonByName(page, ADVANCE_NAME))
         || (await firstVisible(page, BTN.next)) || firstVisible(page, BTN.review),
+      // The follow-company uncheck used to live here. It has moved into collect(),
+      // which is the only place it can run before the box is read as an answer.
       onStep: async ({ step }) => {
-        // Don't silently start following companies.
-        const follow = await firstVisible(page, BTN.followCompany);
-        if (follow) await follow.uncheck({ force: true }).catch(() => {});
         screenshots.push(await shot(page, job.id, `step-${step}`));
       },
     });
@@ -334,7 +369,7 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
           reason: p.reason,
           tier: p.tier,
         })),
-        filled, screenshots, steps: result.steps,
+        filled, ledger: result.ledger, screenshots, steps: result.steps,
       };
     }
 
@@ -371,7 +406,7 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
 
     if (result.outcome === 'ready') {
       await abandon(page);
-      return { outcome: 'ready', filled, screenshots, steps: result.steps, heldForReview: result.reason || null };
+      return { outcome: 'ready', filled, ledger: result.ledger, screenshots, steps: result.steps, heldForReview: result.reason || null };
     }
 
     await result.terminal.click();
@@ -384,7 +419,7 @@ export async function applyEasy(page, job, ctx, { submit = false, resumePath = n
       .first().isVisible().catch(() => false);
     if (!confirmed) throw new Error('Clicked submit but saw no confirmation');
 
-    return { outcome: 'submitted', filled, screenshots, steps: result.steps, evidence };
+    return { outcome: 'submitted', filled, ledger: result.ledger, screenshots, steps: result.steps, evidence };
   } catch (err) {
     if (err instanceof ChallengeDetected) throw err;
     await abandon(page).catch(() => {});

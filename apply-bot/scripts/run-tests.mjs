@@ -33,6 +33,7 @@ const SUITES = [
   'capture-tests.mjs',
   'agent-tests.mjs',
   'orchestrator-tests.mjs',
+  'logging-tests.mjs',
 ];
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'apply-bot-test-'));

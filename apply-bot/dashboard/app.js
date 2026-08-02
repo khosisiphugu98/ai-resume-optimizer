@@ -98,6 +98,206 @@ function addEvent(e) {
   if (atBottom) log.scrollTop = log.scrollHeight;
 }
 
+// ---------------------------------------------------------------------------
+// The log viewer.
+//
+// The pane at the bottom of the board is a tail: the last four hundred lines,
+// no filters, no history, gone on reload. That is the right thing for watching
+// a run happen and useless for the question this exists to answer — "what has
+// this pipeline been doing for the last two days, and which part of it is not
+// working". So the tail stays exactly as it was, and this is the other tool:
+// a window over the whole stored log, filtered, and downloadable as the file
+// you were just looking at.
+// ---------------------------------------------------------------------------
+
+const logState = {
+  days: 2, stage: '', component: '', minLevel: 'info', job: '', run: '', q: '',
+  limit: 500, offset: 0, order: 'desc',
+};
+
+/** The filter set as a query string. One builder for the view and the download. */
+function logParams(extra = {}) {
+  const p = new URLSearchParams();
+  const merged = { ...logState, ...extra };
+  for (const [k, v] of Object.entries(merged)) {
+    if (v !== '' && v != null) p.set(k, v);
+  }
+  return p;
+}
+
+async function refreshLogs() {
+  const body = $('#logsBody');
+  const rowsEl = body.querySelector('.lg-rows');
+  if (rowsEl) rowsEl.innerHTML = '<div class="lg-empty">Loading…</div>';
+
+  const [data, summary] = await Promise.all([
+    fetch(`/api/logs?${logParams()}`).then(r => r.json()),
+    fetch(`/api/logs/summary?days=${logState.days}`).then(r => r.json()),
+  ]);
+
+  body.querySelector('.lg-summary').innerHTML = renderLogSummary(summary);
+  body.querySelector('.lg-count').textContent =
+    `${data.rows.length} of ${data.total} line(s)`;
+  renderLogRows(data.rows);
+}
+
+/**
+ * The window at a glance: one row per stage, and the failures that repeat.
+ *
+ * A stage with zero lines in the window is the most important thing this table
+ * can show — it means that part of the pipeline did not run at all — so it is
+ * rendered from the stage list rather than from the rows, which would simply
+ * omit it.
+ */
+function renderLogSummary(s) {
+  const rows = s.byStage.map(r => `<tr>
+    <td class="stagelink" data-stage="${esc(r.stage || '')}">${esc(r.stage || '—')}</td>
+    <td class="n">${r.events}</td>
+    <td class="n ${r.warn ? 'warn' : 'zero'}">${r.warn || '·'}</td>
+    <td class="n ${r.errors ? 'err' : 'zero'}">${r.errors || '·'}</td>
+    <td class="n ${r.critical ? 'err' : 'zero'}">${r.critical || '·'}</td>
+    <td>${r.last_at ? new Date(r.last_at).toLocaleString('en-ZA', { hour12: false }) : '—'}</td>
+  </tr>`).join('');
+
+  const problems = s.topProblems.slice(0, 12).map(p => `<tr>
+    <td class="n ${p.level === 'warn' ? 'warn' : 'err'}">${p.n}×</td>
+    <td class="stagelink" data-stage="${esc(p.stage || '')}">${esc(p.stage || '—')}</td>
+    <td style="white-space:normal">${esc(p.pattern)}…</td>
+    <td>${new Date(p.last_at).toLocaleString('en-ZA', { hour12: false })}</td>
+  </tr>`).join('');
+
+  return `
+    <table>
+      <tr><th>Stage</th><th>Lines</th><th>Warn</th><th>Error</th><th>Critical</th><th>Last seen</th></tr>
+      ${rows || '<tr><td colspan="6">Nothing logged in this window.</td></tr>'}
+    </table>
+    <h4>What keeps going wrong (grouped, most frequent first)</h4>
+    <table>${problems || '<tr><td>No warnings or errors in this window.</td></tr>'}</table>`;
+}
+
+function renderLogRows(rows) {
+  const el = $('#logsBody').querySelector('.lg-rows');
+  if (!rows.length) {
+    el.innerHTML = '<div class="lg-empty">No log lines match these filters.</div>';
+    return;
+  }
+  el.innerHTML = rows.map((r, i) => {
+    const when = new Date(r.ts).toLocaleString('en-ZA', { hour12: false });
+    const dur = r.durationMs != null ? ` <span class="dur">${(r.durationMs / 1000).toFixed(1)}s</span>` : '';
+    return `<div class="lg-row ${r.level || 'info'}">
+      <span class="expand" data-i="${i}">${r.data ? '▸' : ' '}</span>
+      <time>${esc(when)}</time>
+      <span class="lv">${esc(r.level || '')}</span>
+      <span class="cmp">${esc(r.component || r.stage || '')}</span>
+      <span class="jid" data-job="${r.jobId ?? ''}">${r.jobId ? `#${r.jobId}` : ''}</span>
+      <span class="msg">${esc(r.message || '')}${dur}</span>
+    </div>${r.data ? `<div class="data" data-for="${i}" hidden>${esc(JSON.stringify(r.data, null, 2))}</div>` : ''}`;
+  }).join('');
+  el._rows = rows;
+}
+
+function openLogs() {
+  const body = $('#logsBody');
+  if (!body.dataset.built) {
+    body.innerHTML = `
+      <div class="lg-head"><h2>Pipeline log</h2></div>
+      <div class="lg-controls">
+        <span class="lbl">Window</span>
+        <select class="f" data-k="days">
+          <option value="1">last 24h</option>
+          <option value="2" selected>last 2 days</option>
+          <option value="7">last 7 days</option>
+          <option value="30">last 30 days</option>
+          <option value="3650">everything</option>
+        </select>
+        <select class="f" data-k="stage"><option value="">all stages</option></select>
+        <select class="f" data-k="minLevel">
+          <option value="debug">debug and up</option>
+          <option value="info" selected>info and up</option>
+          <option value="warn">warnings and up</option>
+          <option value="error">errors only</option>
+        </select>
+        <select class="f" data-k="order">
+          <option value="desc" selected>newest first</option>
+          <option value="asc">oldest first</option>
+        </select>
+        <input class="f q" data-k="q" placeholder="search message, component or payload…">
+        <input class="f" data-k="job" style="width:88px" placeholder="job #">
+        <span class="sep"></span>
+        <span class="lbl lg-count"></span>
+        <button class="lg-refresh">Refresh</button>
+        <span class="sep"></span>
+        <button class="dl" data-format="ndjson">Download .ndjson</button>
+        <button class="dl" data-format="csv">Download .csv</button>
+      </div>
+      <div class="lg-summary"></div>
+      <div class="lg-rows"></div>`;
+    body.dataset.built = '1';
+
+    // Populate the stage menu from what is actually in the log, so a stage that
+    // has never run is absent rather than offered as an empty filter.
+    fetch('/api/logs/facets?days=30').then(r => r.json()).then(f => {
+      const sel = body.querySelector('[data-k="stage"]');
+      sel.innerHTML = '<option value="">all stages</option>'
+        + f.stages.map(s => `<option value="${esc(s)}">${esc(s)}</option>`).join('');
+    });
+
+    body.addEventListener('change', e => {
+      const f = e.target.closest('.f');
+      if (!f) return;
+      logState[f.dataset.k] = f.value;
+      logState.offset = 0;
+      refreshLogs();
+    });
+
+    // Typing in the search box re-queries, but not on every keystroke — the
+    // table is large enough that one query per character is felt.
+    let typing = null;
+    body.addEventListener('input', e => {
+      const f = e.target.closest('input.f');
+      if (!f) return;
+      clearTimeout(typing);
+      typing = setTimeout(() => {
+        logState[f.dataset.k] = f.value.trim();
+        logState.offset = 0;
+        refreshLogs();
+      }, 350);
+    });
+
+    body.addEventListener('click', e => {
+      const dl = e.target.closest('button.dl');
+      if (dl) {
+        // The download is the same query as the screen, with the row cap lifted:
+        // the point of a file is to hold more than a screen does.
+        window.location = `/api/logs?${logParams({ format: dl.dataset.format, limit: 200000, offset: 0 })}`;
+        return;
+      }
+      if (e.target.closest('.lg-refresh')) return refreshLogs();
+
+      const stage = e.target.closest('.stagelink');
+      if (stage) {
+        logState.stage = stage.dataset.stage;
+        body.querySelector('[data-k="stage"]').value = logState.stage;
+        return refreshLogs();
+      }
+
+      const expand = e.target.closest('.expand');
+      if (expand) {
+        const pane = body.querySelector(`.data[data-for="${expand.dataset.i}"]`);
+        if (pane) { pane.hidden = !pane.hidden; expand.textContent = pane.hidden ? '▸' : '▾'; }
+        return;
+      }
+
+      const jid = e.target.closest('.jid');
+      if (jid?.dataset.job) { closeLogs(); openDrawer(Number(jid.dataset.job)); }
+    });
+  }
+  $('#logs').classList.add('open');
+  refreshLogs();
+}
+
+function closeLogs() { $('#logs').classList.remove('open'); }
+
 // Statuses a block can still save you from. Past these the application is gone
 // and the button would be a lie, so it is not offered.
 const BLOCKABLE = ['new', 'discovered', 'enriched', 'scored', 'tailored', 'approved',
@@ -385,7 +585,10 @@ document.addEventListener('click', async e => {
 // Parked questions. Answering one here releases every application waiting on it,
 // and every future application that hits the same question.
 async function refreshParked() {
-  const { queue, profileFields, skillSuggestions = [], inferredYears = [] } = await (await fetch('/api/parked')).json();
+  const {
+    queue, profileFields, skillSuggestions = [], inferredYears = [],
+    watchedSkills = [], skillThreshold = 1,
+  } = await (await fetch('/api/parked')).json();
   const el = $('#parked');
   $('#pqCount').textContent = queue.length || '';
   $('#pfCount').textContent = profileFields.length || '';
@@ -419,6 +622,23 @@ async function refreshParked() {
         </form>
       </div>`).join('')
     : '<div class="empty">No unconfirmed skills to review.</div>';
+
+  // What the floor is holding back.
+  //
+  // A queue that silently drops things looks exactly like a queue that has
+  // stopped working, so the skills being counted-but-not-asked are shown with
+  // their progress towards the threshold. Deliberately not actionable: the whole
+  // point is that these are not yet worth a decision.
+  $('#skillSuggestions').insertAdjacentHTML('beforeend', watchedSkills.length
+    ? `<div class="pq" style="opacity:.62;margin-top:10px">
+        <div class="why">${watchedSkills.length} more skill${watchedSkills.length === 1 ? '' : 's'} seen in
+          job descriptions but not yet asked about — a skill needs
+          ${skillThreshold} posting${skillThreshold === 1 ? '' : 's'} before it appears here.</div>
+        <div class="why" style="margin-top:4px">${watchedSkills
+          .map(s => `${esc(s.display)} <span style="opacity:.6">${s.job_count}/${skillThreshold}</span>`)
+          .join(' · ')}</div>
+      </div>`
+    : '');
 
   // Unconfirmed profile fields, editable in place. A confirmed value stops the
   // resolver parking on it.
@@ -1032,6 +1252,13 @@ document.addEventListener('click', async e => {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ mode: mode.dataset.mode }),
   }).then(refreshBoard);
+});
+
+$('#logOpen').addEventListener('click', openLogs);
+$('#logsClose').addEventListener('click', closeLogs);
+// Escape closes the log the same way it closes every other overlay here.
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && $('#logs').classList.contains('open')) closeLogs();
 });
 
 fetch('/api/events').then(r => r.json()).then(evs => evs.forEach(addEvent));

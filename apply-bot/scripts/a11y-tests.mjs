@@ -496,8 +496,11 @@ const SEARCHPAGE = at('https://www.jobboard.test/a-job-1234.aspx', `
   </form>`);
 const w6 = await applyExternal(page, { ...job(9107), external_apply_url: SEARCHPAGE }, ctx,
   { submit: true, resumePath: null });
-t('not submitted', w6.outcome, 'ready');
-t('and it says why', /not an application form/i.test(w6.heldForReview || ''), true);
+// Terminal, not held: see the note in ats-tests.mjs. A page with nowhere to
+// attach a CV is handed over the same way the job-alert signup above it is —
+// which is what makes these two cases consistent rather than one of each.
+t('not submitted', w6.outcome, 'manual');
+t('and it says why', /not an application form/i.test(w6.reason || ''), true);
 t("the site's own search bar was never answered",
   await page.locator('#q').inputValue(), '');
 setSetting('allow_generic_autosubmit', priorAuto ?? '');

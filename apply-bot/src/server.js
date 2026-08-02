@@ -4,15 +4,17 @@ import path from 'node:path';
 import { WebSocketServer } from 'ws';
 import { ROOT, SERVER, CAPS, PATHS, DATE_POSTED_WINDOWS, DEFAULT_DATE_POSTED } from './config.js';
 import {
-  boardSnapshot, recentEvents, db, getSetting, setSetting, setDatePostedWindow, parkedQueue, releaseAnswered,
+  boardSnapshot, recentEvents, queryEvents, logSummary, logFacets,
+  db, getSetting, setSetting, setDatePostedWindow, parkedQueue, releaseAnswered,
   pinPlanField, deletePlan, bumpPlanSuccess,
   allSearches, addSearch, setSearchEnabled, deleteSearch,
   blockJob, unblockJob, unrejectJob, blockCompany, unblockCompany, blockedCompanies,
   pendingOutcomes, setOutcome, autoTimeoutOutcomes, outcomeSummary,
   OUTCOME_STATES, OUTCOME_TIMEOUT_DAYS,
   listSkillSuggestions, dismissSkillSuggestion, removeSkillSuggestion,
+  watchedSkills, skillSuggestionThreshold,
 } from './db.js';
-import { bus, emit, emitBoard } from './bus.js';
+import { bus, emit, emitBoard, withRun } from './bus.js';
 import { saveAnswer, allAnswers, learnFromApproved, normaliseQuestion } from './answer/bank.js';
 import { loadProfile, unconfirmed, profileExists, editableGaps, setProfileValue, confirmSkill, confirmedSkillNames, inferredYearsSkills } from './profile.js';
 import { listDocuments, addDocument, removeDocument, corpus } from './evidence/store.js';
@@ -25,6 +27,9 @@ import { calibrationReport, buildFewShot } from './score/calibrate.js';
 import { currentThreshold, setThreshold, THRESHOLD, AUDIT } from './score/index.js';
 import { criteriaForUi, addCriterion, removeCriterion, resetGroup } from './reject-criteria.js';
 import { createOrchestrator } from './orchestrator.js';
+// Safe to import eagerly — review.js has no imports of its own, so unlike every
+// other apply/* module it does not drag Playwright in at server start.
+import { holdKind, HOLD_KINDS, ledgerSummary } from './apply/review.js';
 
 applySecretsToEnv();
 
@@ -34,6 +39,62 @@ const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css
 function json(res, data, code = 200) {
   res.writeHead(code, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(data));
+}
+
+// ---------------------------------------------------------------------------
+// Log query, export and rendering.
+// ---------------------------------------------------------------------------
+
+/** Hard ceiling on one export. Generous, but not "the whole table into a string". */
+const MAX_EXPORT_ROWS = 200_000;
+
+/** Read the filter set out of a query string. Shared by the viewer and the download. */
+function logQuery(url) {
+  const p = url.searchParams;
+  const num = (k, d = null) => (p.get(k) != null && p.get(k) !== '' ? Number(p.get(k)) : d);
+  return {
+    days: num('days', 2),
+    stage: p.get('stage') || null,
+    component: p.get('component') || null,
+    minLevel: p.get('minLevel') || null,
+    jobId: num('job'),
+    runId: p.get('run') || null,
+    search: p.get('q') || null,
+    limit: Math.min(num('limit', 500) ?? 500, MAX_EXPORT_ROWS),
+    offset: num('offset', 0) ?? 0,
+    order: p.get('order') === 'desc' ? 'desc' : 'asc',
+  };
+}
+
+/**
+ * One stored row as the API shape.
+ *
+ * `data_json` is parsed rather than passed through as a string: it is structured
+ * on the way in and it should be structured on the way out, so an exported line
+ * is a JSON object and not a JSON object with a string of JSON stuck to it.
+ */
+function logRow(r) {
+  let data = null;
+  if (r.data_json) {
+    try { data = JSON.parse(r.data_json); } catch { data = r.data_json; }
+  }
+  return {
+    id: r.id, ts: r.ts, level: r.level, stage: r.stage, component: r.component,
+    jobId: r.job_id, runId: r.run_id, durationMs: r.duration_ms,
+    message: r.message, screenshot: r.screenshot_path, data,
+  };
+}
+
+const CSV_COLUMNS = ['ts', 'level', 'stage', 'component', 'jobId', 'runId', 'durationMs', 'message', 'data'];
+
+/** RFC 4180 escaping, plus the spreadsheet-injection guard. */
+function csvCell(v) {
+  if (v == null) return '';
+  const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  // A cell opening with =, +, - or @ is a formula to Excel and Sheets, and these
+  // messages are full of employer-controlled text. Prefix it so it stays text.
+  const safe = /^[=+\-@\t\r]/.test(s) ? `'${s}` : s;
+  return `"${safe.replace(/"/g, '""')}"`;
 }
 
 /** Everything the last attempt filled in, for the answer bank to learn from. */
@@ -66,6 +127,53 @@ const routes = {
 
   '/api/events': (req, res) => json(res, recentEvents(200)),
 
+  // ---------------------------------------------------------------------------
+  // The log.
+  //
+  // Three views over one query so they cannot drift apart: `/api/logs` is what
+  // the viewer paginates and what the download writes, `/api/logs/summary` is
+  // the shape of a window (what an operator reads as a report), and
+  // `/api/logs/facets` is what the filter menus are built from.
+  // ---------------------------------------------------------------------------
+  '/api/logs': (req, res, url) => {
+    const q = logQuery(url);
+    const format = url.searchParams.get('format') || 'json';
+    const { rows, total } = queryEvents(q);
+
+    if (format === 'json') {
+      return json(res, { rows: rows.map(logRow), total, limit: q.limit, offset: q.offset, query: q });
+    }
+
+    // A download, not a page. The filename carries the filters so a folder of
+    // these is still readable a week later — "logs.csv" three times over is not.
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const bits = [q.stage, q.minLevel, q.jobId && `job${q.jobId}`, q.runId].filter(Boolean).join('-');
+    const name = `apply-bot-logs-${bits ? `${bits}-` : ''}${q.days ?? 'all'}d-${stamp}.${format === 'csv' ? 'csv' : 'ndjson'}`;
+
+    res.writeHead(200, {
+      'Content-Type': format === 'csv' ? 'text/csv; charset=utf-8' : 'application/x-ndjson',
+      'Content-Disposition': `attachment; filename="${name}"`,
+    });
+
+    if (format === 'csv') {
+      // Excel and Numbers both guess the encoding from the first bytes and both
+      // guess wrong on a file whose first non-ASCII character is an em dash —
+      // which, in this log, is every other line. The BOM settles it.
+      res.write('﻿');
+      res.write(`${CSV_COLUMNS.join(',')}\n`);
+      for (const r of rows) res.write(`${CSV_COLUMNS.map(c => csvCell(logRow(r)[c])).join(',')}\n`);
+    } else {
+      // One JSON object per line: greppable, streamable, and `jq`-able without
+      // holding the whole export in memory at either end.
+      for (const r of rows) res.write(`${JSON.stringify(logRow(r))}\n`);
+    }
+    res.end();
+  },
+
+  '/api/logs/summary': (req, res, url) => json(res, logSummary({ days: Number(url.searchParams.get('days')) || 2 })),
+
+  '/api/logs/facets': (req, res, url) => json(res, logFacets({ days: Number(url.searchParams.get('days')) || 7 })),
+
   '/api/parked': (req, res) => json(res, {
     queue: parkedQueue().map(q => ({ ...q, options: q.options_json ? JSON.parse(q.options_json) : null })),
     profileGaps: profileExists() ? unconfirmed(loadProfile({ fresh: true })) : ['no profile — copy profile.example.json to profile/master-profile.json'],
@@ -73,6 +181,11 @@ const routes = {
     // Skills jobs asked for that aren't confirmed yet. Hide any that have since been
     // confirmed in the profile so a stale suggestion never lingers after the fact.
     skillSuggestions: listSkillSuggestions(profileExists() ? confirmedSkillNames(loadProfile({ fresh: true })) : []),
+    // Skills being counted but not yet asked about, and the floor they have to
+    // clear. Shown so the filter is visible: a queue that silently drops things
+    // is indistinguishable from one that is not working.
+    watchedSkills: watchedSkills(20),
+    skillThreshold: skillSuggestionThreshold(),
     // Years derived from the CV timeline that nobody has looked at yet. Each one
     // fills forms already but blocks unattended submission until accepted here.
     inferredYears: profileExists() ? inferredYearsSkills(loadProfile({ fresh: true })) : [],
@@ -111,12 +224,21 @@ const routes = {
       // adapter_used like "agent:form" marks an application the adaptive agent
       // filled — surfaced so the card can badge it and name the plan shape.
       const adapter = app?.adapter_used || '';
+      const ledger = app?.field_ledger_json ? JSON.parse(app.field_ledger_json) : [];
       return {
         job,
         filled: app?.filled_json ? JSON.parse(app.filled_json) : [],
         screenshots: app?.screenshots_json ? JSON.parse(app.screenshots_json) : [],
         steps: app?.step_count ?? 0,
         agent: adapter.startsWith('agent:') ? adapter.slice('agent:'.length) : null,
+        // Why this is in the queue at all. Without it the column is fifty cards
+        // that all look like "the mode is review" and one of them actually is.
+        heldReason: app?.outcome_note || null,
+        holdKind: holdKind(app?.outcome_note || ''),
+        // What the attempt missed, so a card can show "11 controls, 7 answered,
+        // 2 required left empty" rather than only the seven that worked.
+        ledger,
+        ledgerSummary: ledger.length ? ledgerSummary(ledger) : null,
       };
     }));
   },
@@ -248,20 +370,22 @@ const STAGES = {
  * logged; the caller still sees `ran: true`, because it did run, it just failed,
  * and one failed stage must not take the whole loop down with it.
  */
-async function runStage(stage) {
+async function runStage(stage, trigger = 'auto') {
   if (running) return { ran: false, running };
   running = stage;
-  emit({ stage, message: `Started: ${stage}` });
   emitBoard();
   try {
-    await STAGES[stage]();
+    // withRun owns the start/finish/failure lines now, and stamps a run id on
+    // everything the stage logs underneath it — so a run can be read back as one
+    // unit instead of as prose interleaved with whatever else was talking.
+    await withRun(stage, () => STAGES[stage](), { trigger });
     return { ran: true };
   } catch (err) {
-    emit({ stage, level: 'error', message: `${stage} failed: ${err.message}` });
+    // Already logged, with its stack, by withRun. Swallowed here for the same
+    // reason as before: one failed stage must not take the whole loop down.
     return { ran: true, error: err.message };
   } finally {
     running = null;
-    emit({ stage, message: `Finished: ${stage}` });
     emitBoard();
   }
 }
@@ -308,7 +432,14 @@ const server = http.createServer(async (req, res) => {
       const rows = db.prepare('SELECT * FROM events WHERE id > ? ORDER BY id').all(lastId);
       for (const r of rows) {
         lastId = r.id;
-        push({ type: 'event', id: r.id, jobId: r.job_id, ts: r.ts, stage: r.stage, level: r.level, message: r.message });
+        // The same shape the in-process bus pushes, including the structured
+        // columns — otherwise the dashboard's filters would work when the
+        // pipeline shares the server's process and silently not when it doesn't.
+        push({
+          type: 'event', id: r.id, jobId: r.job_id, ts: r.ts, stage: r.stage,
+          level: r.level, message: r.message, runId: r.run_id, component: r.component,
+          durationMs: r.duration_ms,
+        });
       }
       if (rows.length) push({ type: 'board' });
     }, 1000);
@@ -331,7 +462,7 @@ const server = http.createServer(async (req, res) => {
 
     // Fire and forget — the dashboard follows progress on the event stream. The
     // lock, the start/finish events and the error handling all live in runStage.
-    runStage(stage);
+    runStage(stage, 'manual');
     return json(res, { started: stage });
   }
 
@@ -887,7 +1018,19 @@ export function startServer({ auto = false } = {}) {
 
       // Start the autonomous loop when asked explicitly (`npm run auto`) or when a
       // previous session left it on — "until stopped" means a restart resumes it.
-      if (auto || getSetting('auto') === '1') setAuto(true);
+      //
+      // APPLY_BOT_NO_AUTO opts out, and exists because "a restart resumes it"
+      // holds for a copy of the database as well as the real one. Starting a
+      // second dashboard against a snapshot to look at a change in the dashboard
+      // reads `auto = 1` out of that snapshot and begins tailoring CVs and
+      // applying for jobs — the loop is doing exactly what it was told, by a
+      // setting that was meant for a different machine. A verification instance
+      // needs to be able to say "serve the pages, run nothing".
+      if (process.env.APPLY_BOT_NO_AUTO === '1') {
+        console.log('  APPLY_BOT_NO_AUTO=1 — serving the dashboard only, the autonomous loop is off.\n');
+      } else if (auto || getSetting('auto') === '1') {
+        setAuto(true);
+      }
 
       resolve(server);
     });

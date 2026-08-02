@@ -4,7 +4,7 @@ import { PATHS } from './config.js';
 import { getContext, closeContext, isLoggedIn, attachScreencast, closeBrowserOnExit } from './browser.js';
 import { runDiscovery, runEnrich } from './discover/linkedin.js';
 import { startServer } from './server.js';
-import { emit } from './bus.js';
+import { emit, withRun } from './bus.js';
 import { getSetting, setSetting, todayRates, allSearches, blockedCompanies, listPageCaptures, listPagePlans } from './db.js';
 import { applySecretsToEnv } from './secrets.js';
 
@@ -367,4 +367,18 @@ if (!commands[cmd]) {
   process.exit(1);
 }
 
-await commands[cmd]();
+// Stage commands are wrapped in a run scope so a CLI-driven stage groups its log
+// lines exactly like a dashboard-driven or orchestrator-driven one. Without this
+// the export would show the same work with a run id when it came from the loop
+// and without one when it came from a terminal — the split-process case the
+// operator actually debugs in.
+const STAGE_COMMANDS = new Set(['discover', 'enrich', 'score', 'tailor', 'apply', 'email', 'replies', 'outbox']);
+
+if (STAGE_COMMANDS.has(cmd)) {
+  await withRun(cmd, () => commands[cmd](), { trigger: 'cli' }).catch(err => {
+    console.error(err.message);
+    process.exitCode = 1;
+  });
+} else {
+  await commands[cmd]();
+}

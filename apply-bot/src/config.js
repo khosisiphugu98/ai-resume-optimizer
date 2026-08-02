@@ -9,7 +9,13 @@ export const PATHS = {
   // clear the rate ledger, and that ledger is the daily cap that keeps LinkedIn
   // from flagging the account — running the suite must not reset it.
   db: process.env.APPLY_BOT_DB || path.join(ROOT, 'data/pipeline.sqlite'),
-  chromeProfile: path.join(ROOT, 'data/chrome-profile'),
+  // Overridable for the same reason as `db` and `stop` above, and it is the one
+  // that was missing: starting a second dashboard to check a change made to the
+  // dashboard means reclaiming the browser profile from the live run, and the
+  // contention guard rightly refuses. Pointing a verification instance at a
+  // throwaway profile directory is the whole difference between being able to
+  // test the UI and having to restart the operator's running pipeline to see it.
+  chromeProfile: process.env.APPLY_BOT_CHROME_PROFILE || path.join(ROOT, 'data/chrome-profile'),
   artifacts: path.join(ROOT, 'artifacts'),
   // Overridable for the same reason as the db: with the real kill switch on,
   // every canApply test fails for a reason that has nothing to do with the code.

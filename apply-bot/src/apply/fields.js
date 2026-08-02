@@ -221,6 +221,56 @@ export const fromDomField = f => ({
 });
 
 /**
+ * Read a control back out of the page.
+ *
+ * `fillField` returns what it *meant* to put in, not what is there afterwards,
+ * and on a controlled React input those are routinely different: Playwright's
+ * `fill()` sets the value and dispatches an input event, the component's state
+ * has not changed, and the next render puts the old value back. Nothing threw,
+ * the field is empty, and the application went out with a blank where the
+ * candidate's phone number should have been. That is exactly what an operator
+ * sees when they watch the browser and say "some fields don't get filled in" —
+ * and until now nothing in the system disagreed with the claim that they had.
+ *
+ * Returns the control's current value in the same vocabulary `fillField`
+ * returns, or null when it cannot be read — which is not the same as empty and
+ * is never treated as a failure.
+ */
+export async function readFieldValue(scope, field) {
+  const one = scope.locator(field.selector).first();
+  switch (field.kind) {
+    case 'radio': {
+      const radios = scope.locator(field.selector);
+      const n = await radios.count().catch(() => 0);
+      // A re-render between filling and reading can change the group's size, and
+      // an index into a list that is no longer the same list is worse than no
+      // reading at all.
+      if (!n || n !== (field.options || []).length) return null;
+      for (let i = 0; i < n; i++) {
+        if (await radios.nth(i).isChecked().catch(() => false)) return field.options[i] ?? null;
+      }
+      return null;
+    }
+    case 'select':
+      // The selected option's text, not its index. `options` is filtered of the
+      // "Select an option" placeholder and `values` is not, so the two lists do
+      // not align and an index would read the wrong label off a form that filled
+      // perfectly well.
+      return one.evaluate(el => el.selectedOptions?.[0]?.text?.trim() || el.value || null).catch(() => null);
+    case 'checkbox': {
+      const on = await one.isChecked().catch(() => null);
+      return on == null ? null : (on ? 'Yes' : 'No');
+    }
+    case 'file': {
+      const n = await one.evaluate(el => el.files?.length ?? 0).catch(() => null);
+      return n == null ? null : (n > 0 ? `${n} file(s)` : '');
+    }
+    default:
+      return one.inputValue().catch(() => null);
+  }
+}
+
+/**
  * Apply one resolved value. Returns what actually landed in the DOM.
  *
  * Option matching here is the safe half of the ladder only — restatements of the

@@ -1,5 +1,6 @@
 import { db, updateJob, parkQuestions, bumpRate, appliedUrlOwner, SENT_OUTCOMES } from '../db.js';
-import { emit, emitBoard } from '../bus.js';
+import { emit, emitBoard, currentRun } from '../bus.js';
+import { holdKind, ledgerSummary } from './review.js';
 import { getContext, attachScreencast, stopRequested, ChallengeDetected, lostContextBreaker, LOST_CONTEXT_LIMIT } from '../browser.js';
 import { loadProfile } from '../profile.js';
 import { applyEasy } from './linkedin-easy.js';
@@ -40,13 +41,35 @@ export const isDeterministic = msg => DETERMINISTIC_FAILURE.some(re => re.test(m
 
 /** Persist an attempt so the dashboard can show exactly what was filled. */
 function recordAttempt(job, channel, result, outcome, note = null) {
+  const ledger = result.ledger || [];
+  const summary = ledgerSummary(ledger);
+
+  // The per-field record, as a log line as well as a database row. This is the
+  // answer to "some fields don't get filled in": before it, the only record of an
+  // attempt was the list of fields that worked, so the claim was unfalsifiable in
+  // both directions.
+  if (ledger.length) {
+    emit({
+      jobId: job.id, stage: 'apply', component: 'apply/fields',
+      level: summary.requiredMissed || summary.reverted ? 'warn' : 'debug',
+      message: `Fields — ${summary.controls} control(s) seen, ${summary.answered} answered, `
+        + `${summary.verified} verified in the page`
+        + (summary.reverted ? `, ${summary.reverted} REVERTED after filling` : '')
+        + (summary.requiredMissed ? `, ${summary.requiredMissed} REQUIRED left empty` : ''),
+      data: { channel, outcome, ...summary, ledger },
+    });
+  }
+
   const info = db.prepare(`
     INSERT INTO applications (job_id, channel, resume_path, ats_vendor, adapter_used,
                               submitted_at, confirmation_evidence, outcome,
                               filled_json, screenshots_json, step_count, outcome_note,
-                              plan_fingerprint)
+                              plan_fingerprint, field_ledger_json, run_id)
     VALUES (@job_id, @channel, @resume_path, @ats_vendor, @adapter, @submitted_at,
-            @evidence, @outcome, @filled, @shots, @steps, @note, @fingerprint)`).run({
+            @evidence, @outcome, @filled, @shots, @steps, @note, @fingerprint,
+            @ledger, @run_id)`).run({
+    ledger: JSON.stringify(ledger),
+    run_id: currentRun()?.id || null,
     job_id: job.id,
     channel,
     resume_path: job.resume_path || null,
@@ -346,13 +369,26 @@ export async function runApplications({ limit = 5, mode = currentMode(), ignoreH
         });
       } else {
         // Filled and captured, not sent.
-        recordAttempt(job, channel, result, 'held_for_review', result.heldForReview || 'mode is review — awaiting approval');
+        //
+        // In auto mode this branch is not policy, it is an exception: something
+        // refused to send an application the operator asked to be sent, and the
+        // reason is the only useful part of the line. Saying "Ready for review"
+        // first made the whole Review column read as though the mode were being
+        // ignored — which is exactly how it was reported.
+        const why = result.heldForReview || 'mode is review — awaiting approval';
+        recordAttempt(job, channel, result, 'held_for_review', why);
         updateJob(job.id, { status: 'awaiting_review' });
         stats.queued++;
         emit({
-          jobId: job.id, stage: 'apply',
-          message: `Ready for review — ${result.filled.length} fields filled across ${result.steps} step(s)`
-            + (result.heldForReview ? ` — ${result.heldForReview}` : ''),
+          jobId: job.id, stage: 'apply', component: 'apply/hold',
+          level: mode === 'auto' ? 'warn' : 'info',
+          message: mode === 'auto'
+            ? `Held in auto mode — ${why} (${result.filled.length} field(s) across ${result.steps} step(s))`
+            : `Ready for review — ${result.filled.length} fields filled across ${result.steps} step(s) — ${why}`,
+          data: {
+            channel, mode, why, holdKind: holdKind(why),
+            filled: result.filled.length, steps: result.steps,
+          },
         });
       }
     } catch (err) {

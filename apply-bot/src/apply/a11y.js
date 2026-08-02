@@ -342,6 +342,56 @@ const loc = (scope, node) => scope.locator(`[data-bot-a11y="${node.uid}"]`).firs
 const matchIndex = (options, value) => matchOptionIndex(value, options);
 
 /**
+ * Read a custom control back out of the page. The a11y twin of `readFieldValue`.
+ *
+ * Custom controls are where a silent non-fill is most likely: a div[role=textbox]
+ * typed into with keystrokes, or a combobox whose popup closed without committing,
+ * both report success from `fillA11yField` and leave nothing behind. Returns null
+ * when the control has no readable value — a combobox that renders its selection
+ * as sibling text has none, and guessing would be worse than saying so.
+ */
+export async function readA11yValue(scope, node) {
+  const target = loc(scope, node);
+  switch (node.role) {
+    case 'radiogroup': {
+      const uids = node.optionUids || [];
+      if (uids.length !== (node.options || []).length) return null;
+      for (let i = 0; i < uids.length; i++) {
+        const option = scope.locator(`[data-bot-a11y="${uids[i]}"]`).first();
+        const checked = node.native === 'radio'
+          ? await option.isChecked().catch(() => false)
+          : (await option.getAttribute('aria-checked').catch(() => null)) === 'true';
+        if (checked) return node.options[i] ?? null;
+      }
+      return null;
+    }
+    case 'checkbox': {
+      const on = node.native === 'checkbox'
+        ? await target.isChecked().catch(() => null)
+        : (await target.getAttribute('aria-checked').catch(() => null)) === 'true';
+      return on == null ? null : (on ? 'Yes' : 'No');
+    }
+    // Nothing readable: a file input's own value is a fake path, and a custom
+    // combobox commonly shows its selection in a sibling node we have no handle on.
+    case 'file':
+      return null;
+    case 'combobox':
+    case 'listbox':
+      if (node.native === 'select') {
+        return target.evaluate(el => el.selectedOptions?.[0]?.text?.trim() || el.value || null).catch(() => null);
+      }
+      return target.inputValue().catch(() => null);
+    default:
+      if (node.native || node.contentEditable) {
+        const v = await target.inputValue().catch(() => null);
+        if (v != null) return v;
+        return (await target.textContent().catch(() => null))?.trim() ?? null;
+      }
+      return (await target.textContent().catch(() => null))?.trim() ?? null;
+  }
+}
+
+/**
  * Apply one resolved value to a custom control. Returns what actually landed.
  *
  * Every path throws rather than half-succeeding: a silently-ignored

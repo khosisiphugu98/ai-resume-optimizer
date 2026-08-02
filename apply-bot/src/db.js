@@ -123,6 +123,15 @@ addColumn('jobs', 'apply_attempts', 'INTEGER NOT NULL DEFAULT 0');
 addColumn('applications', 'filled_json', 'TEXT');
 addColumn('applications', 'screenshots_json', 'TEXT');
 addColumn('applications', 'step_count', 'INTEGER');
+// Every control the attempt saw, not just the ones it answered — see the ledger
+// note in apply/wizard.js. `filled_json` records successes and is silent about
+// everything else, so a form half-filled and a form fully filled left identical
+// records. This is what makes "which fields did it miss?" a question the system
+// can answer about an application that has already happened.
+addColumn('applications', 'field_ledger_json', 'TEXT');
+// Which stage-run produced this attempt, so an application in the board links
+// back to the log lines that made it.
+addColumn('applications', 'run_id', 'TEXT');
 // Guest-endpoint fetches are unauthenticated, so they carry no account risk and
 // are counted apart from signed-in pageviews rather than against that cap.
 addColumn('rate_ledger', 'guest_fetches', 'INTEGER NOT NULL DEFAULT 0');
@@ -218,12 +227,61 @@ export function updateJob(id, fields) {
     .run({ id, ...fields });
 }
 
-export function logEvent({ jobId = null, stage = null, level = 'info', message, screenshot = null }) {
-  const info = db.prepare(
-    `INSERT INTO events (job_id, ts, stage, level, message, screenshot_path)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(jobId, now(), stage, level, message, screenshot);
-  return { id: info.lastInsertRowid, jobId, ts: now(), stage, level, message, screenshot };
+// ---------------------------------------------------------------------------
+// Structured logging.
+//
+// The events table was one line of prose per thing that happened, and that is
+// all it was. It could tell you an application was held; it could not tell you
+// which run held it, how long the stage took, which component decided, or what
+// the values actually were — so every question about the pipeline as a whole
+// ("is enrichment working?", "which fields does Easy Apply keep missing?") meant
+// reading English with a human eye and counting.
+//
+// Four columns fix that without changing a single existing call site:
+//
+//   run_id       groups every line one stage-run produced, so a run reads as a
+//                unit instead of as interleaved prose from three stages.
+//   component    finer than `stage` — 'apply/preflight' vs 'apply/wizard' — so
+//                a failure is attributable to the part that owns it.
+//   data_json    the structured facts behind the sentence. The message stays
+//                human; this is what a query or an export reads.
+//   duration_ms  how long, for the things that take time.
+//
+// All four are nullable and every one is optional, so old rows and untouched
+// emit() calls keep working exactly as before.
+// ---------------------------------------------------------------------------
+for (const col of ['run_id TEXT', 'component TEXT', 'data_json TEXT', 'duration_ms INTEGER']) {
+  try { db.exec(`ALTER TABLE events ADD COLUMN ${col}`); } catch { /* already added */ }
+}
+// Log export filters on time and stage, and the run view filters on run_id.
+// Without these the export scans the whole table, which is now large enough
+// (nearly 2,000 rows a day) for that to be felt in the dashboard.
+db.exec(`CREATE INDEX IF NOT EXISTS idx_events_run ON events(run_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_events_stage_ts ON events(stage, ts)`);
+
+const insertEvent = db.prepare(
+  `INSERT INTO events (job_id, ts, stage, level, message, screenshot_path,
+                       run_id, component, data_json, duration_ms)
+   VALUES (@jobId, @ts, @stage, @level, @message, @screenshot,
+           @runId, @component, @data, @durationMs)`);
+
+export function logEvent({
+  jobId = null, stage = null, level = 'info', message, screenshot = null,
+  runId = null, component = null, data = null, durationMs = null,
+}) {
+  const ts = now();
+  // One timestamp for the row and the returned copy. These were two separate
+  // now() calls, so the line the dashboard rendered live could carry a
+  // millisecond the stored row did not — enough to make a streamed line and its
+  // exported twin disagree.
+  const row = {
+    jobId, ts, stage, level, message, screenshot,
+    runId, component,
+    data: data == null ? null : JSON.stringify(data),
+    durationMs,
+  };
+  const info = insertEvent.run(row);
+  return { id: info.lastInsertRowid, ...row, data };
 }
 
 export function bumpRate(column, by = 1) {
@@ -265,6 +323,129 @@ export function boardSnapshot() {
 
 export function recentEvents(limit = 200) {
   return db.prepare('SELECT * FROM events ORDER BY id DESC LIMIT ?').all(limit).reverse();
+}
+
+/** Every level the log uses, quietest first. Filtering is "this level and worse". */
+export const LOG_LEVELS = ['debug', 'info', 'warn', 'error', 'critical'];
+
+/**
+ * Query the log.
+ *
+ * One function behind the viewer, the export and the summary, so the file an
+ * operator downloads is exactly the rows they were looking at — a download that
+ * silently applies different filters from the screen above it is worse than no
+ * download at all.
+ *
+ * `minLevel` is a floor rather than an equality test: asking for warnings and
+ * being shown warnings but not errors is never what anyone means.
+ */
+export function queryEvents({
+  days = null, since = null, until = null, stage = null, component = null,
+  minLevel = null, level = null, jobId = null, runId = null, search = null,
+  limit = 5000, offset = 0, order = 'asc',
+} = {}) {
+  const where = [];
+  const params = {};
+
+  if (since) { where.push('ts >= @since'); params.since = since; }
+  else if (days != null) { where.push(`ts >= datetime('now', @window)`); params.window = `-${Number(days)} days`; }
+  if (until) { where.push('ts <= @until'); params.until = until; }
+  if (stage) { where.push('stage = @stage'); params.stage = stage; }
+  if (component) { where.push('component = @component'); params.component = component; }
+  if (jobId != null) { where.push('job_id = @jobId'); params.jobId = Number(jobId); }
+  if (runId) { where.push('run_id = @runId'); params.runId = runId; }
+  if (level) { where.push('level = @level'); params.level = level; }
+  else if (minLevel) {
+    const keep = LOG_LEVELS.slice(Math.max(0, LOG_LEVELS.indexOf(minLevel)));
+    // An unrecognised level name would produce an empty IN list and silently
+    // return nothing, which reads as "the pipeline was quiet" rather than as the
+    // typo it is. Fall through to no level filter instead.
+    if (keep.length) {
+      where.push(`level IN (${keep.map((_, i) => `@lv${i}`).join(',')})`);
+      keep.forEach((l, i) => { params[`lv${i}`] = l; });
+    }
+  }
+  // Deliberately searches the structured payload as well as the sentence. The
+  // question is usually "where does this company / job title / field name
+  // appear", and half of those now live in data_json rather than in the message.
+  if (search) {
+    where.push('(message LIKE @q OR data_json LIKE @q OR component LIKE @q)');
+    params.q = `%${search}%`;
+  }
+
+  const clause = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const rows = db.prepare(
+    `SELECT * FROM events ${clause} ORDER BY id ${order === 'desc' ? 'DESC' : 'ASC'}
+     LIMIT @limit OFFSET @offset`).all({ ...params, limit: Number(limit), offset: Number(offset) });
+  const total = db.prepare(`SELECT COUNT(*) n FROM events ${clause}`).get(params).n;
+  return { rows, total };
+}
+
+/**
+ * The shape of the log over a window — what a performance review reads.
+ *
+ * Answers the questions that used to need a person reading a thousand lines: is
+ * each stage running, is it erroring, what is it erroring *about*, and how long
+ * is it taking. Grouped by stage because that is the unit the operator thinks in.
+ */
+export function logSummary({ days = 2 } = {}) {
+  const win = `-${Number(days)} days`;
+
+  const byStage = db.prepare(`
+    SELECT stage,
+           COUNT(*) events,
+           SUM(level = 'debug')    debug,
+           SUM(level = 'info')     info,
+           SUM(level = 'warn')     warn,
+           SUM(level = 'error')    errors,
+           SUM(level = 'critical') critical,
+           MIN(ts) first_at, MAX(ts) last_at
+    FROM events WHERE ts >= datetime('now', ?)
+    GROUP BY stage ORDER BY events DESC`).all(win);
+
+  // Grouped on the first sixty characters, because these messages end in a job
+  // title or a URL and are otherwise the same failure repeated. Ungrouped, the
+  // top-twenty list is twenty spellings of one problem.
+  const topProblems = db.prepare(`
+    SELECT stage, level, substr(message, 1, 60) pattern, COUNT(*) n, MAX(ts) last_at
+    FROM events
+    WHERE ts >= datetime('now', ?) AND level IN ('warn','error','critical')
+    GROUP BY stage, level, pattern
+    ORDER BY n DESC LIMIT 25`).all(win);
+
+  const runs = db.prepare(`
+    SELECT run_id, stage, MIN(ts) started_at, COUNT(*) lines,
+           SUM(level IN ('error','critical')) errors,
+           MAX(duration_ms) duration_ms
+    FROM events
+    WHERE ts >= datetime('now', ?) AND run_id IS NOT NULL
+    GROUP BY run_id ORDER BY started_at DESC LIMIT 200`).all(win);
+
+  const days_ = db.prepare(`
+    SELECT substr(ts,1,10) day, COUNT(*) events,
+           SUM(level IN ('error','critical')) errors, SUM(level='warn') warn
+    FROM events WHERE ts >= datetime('now', ?)
+    GROUP BY day ORDER BY day DESC`).all(win);
+
+  return { days: Number(days), byStage, topProblems, runs, byDay: days_ };
+}
+
+/** Distinct stages and components present in the log, for the viewer's filters. */
+export function logFacets({ days = 7 } = {}) {
+  const win = `-${Number(days)} days`;
+  return {
+    stages: db.prepare(
+      `SELECT DISTINCT stage FROM events WHERE stage IS NOT NULL AND ts >= datetime('now', ?)
+       ORDER BY stage`).all(win).map(r => r.stage),
+    components: db.prepare(
+      `SELECT DISTINCT component FROM events WHERE component IS NOT NULL AND ts >= datetime('now', ?)
+       ORDER BY component`).all(win).map(r => r.component),
+    levels: LOG_LEVELS,
+    // How far back there is anything to download, so the UI can offer a range it
+    // can actually honour instead of a menu of empty files.
+    earliest: db.prepare('SELECT MIN(ts) t FROM events').get().t,
+    total: db.prepare('SELECT COUNT(*) n FROM events').get().n,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +649,41 @@ for (const col of ['verdict TEXT', 'evidence_note TEXT']) {
   try { db.exec(`ALTER TABLE skill_suggestions ADD COLUMN ${col}`); } catch { /* already added */ }
 }
 
+/**
+ * How many postings must ask for a skill before the operator is asked about it.
+ *
+ * Every skill a job description mentions and the CV does not evidence became a
+ * question, immediately, on the strength of one posting. That is 170 pending
+ * confirmations and 586 already dismissed — React, Java, QuickBooks, PySpark,
+ * Informatica PowerCenter — and every single pending one came from exactly one
+ * job. The gate itself is right and is doing what it was built to do; the funnel
+ * feeding it has no floor, so a queue meant to catch "you have clearly done this,
+ * confirm it" is instead a list of things the candidate has never touched.
+ *
+ * A skill asked for by three different postings is a signal. A skill asked for by
+ * one is a job description. Below the floor it is still counted — nothing is
+ * thrown away, and a skill that keeps coming up will cross the line on its own.
+ */
+export const SKILL_SUGGESTION_THRESHOLD = 3;
+
+// One-time: put the existing backlog behind the new volume floor.
+//
+// The queue had 170 pending suggestions when the floor was introduced, and 168
+// of them had been asked for by a single posting. Leaving them pending would
+// mean the change only applied to skills discovered afterwards, and the operator
+// would still open the dashboard to the same wall of one-off questions the floor
+// exists to prevent. Demoted rather than deleted: the counts are intact and any
+// of them will come back on its own the third time a posting asks.
+//
+// Guarded by a settings flag rather than by the data, because a suggestion that
+// legitimately returns to 'watching' later must not be re-swept by a restart.
+if (!db.prepare(`SELECT 1 FROM settings WHERE key = 'skill_floor_backfilled'`).get()) {
+  const n = db.prepare(`
+    UPDATE skill_suggestions SET status = 'watching'
+    WHERE status = 'pending' AND job_count < ?`).run(SKILL_SUGGESTION_THRESHOLD).changes;
+  db.prepare(`INSERT INTO settings (key, value) VALUES ('skill_floor_backfilled', ?)`).run(String(n));
+}
+
 // One canonical skill normaliser, shared with profile.js — it carries the alias map
 // (ga4/gtm/js…), so a suggestion for "Google Analytics" dedups against, and is
 // suppressed by, an already-confirmed "GA4". A separate local normaliser here would
@@ -481,17 +697,32 @@ const normSkill = normaliseSkill;
  * just because another posting mentions it. Returns how many rows were newly
  * created as pending suggestions.
  */
+export function skillSuggestionThreshold() {
+  const v = Number(getSetting('skill_suggestion_threshold', SKILL_SUGGESTION_THRESHOLD));
+  return Number.isFinite(v) && v >= 1 ? v : SKILL_SUGGESTION_THRESHOLD;
+}
+
 export function recordSkillSuggestions(skills, notes = {}) {
   if (!Array.isArray(skills) || skills.length === 0) return 0;
   const ts = now();
+  const threshold = skillSuggestionThreshold();
+  // New skills start under watch, not in the operator's queue. They are promoted
+  // below once enough separate postings have asked for the same thing.
   const upsert = db.prepare(`
     INSERT INTO skill_suggestions (skill_norm, display, job_count, status, first_seen, last_seen, verdict, evidence_note)
-    VALUES (@norm, @display, 1, 'pending', @ts, @ts, @verdict, @note)
+    VALUES (@norm, @display, 1, @initial, @ts, @ts, @verdict, @note)
     ON CONFLICT (skill_norm) DO UPDATE SET
       job_count = job_count + 1,
       last_seen = @ts,
       verdict = COALESCE(@verdict, verdict),
-      evidence_note = COALESCE(@note, evidence_note)`);
+      evidence_note = COALESCE(@note, evidence_note),
+      -- Promotion happens here rather than in a sweep, so the moment a skill
+      -- earns its place is the moment it appears. 'dismissed' is untouched: a
+      -- skill the operator has already said no to is not resurrected by volume,
+      -- which was true before this change and stays true.
+      status = CASE
+        WHEN status = 'watching' AND job_count + 1 >= @threshold THEN 'pending'
+        ELSE status END`);
   const isNew = db.prepare(`SELECT 1 FROM skill_suggestions WHERE skill_norm = ?`);
   let created = 0;
   db.transaction(rows => {
@@ -500,11 +731,29 @@ export function recordSkillSuggestions(skills, notes = {}) {
       if (!norm) continue;
       const existed = isNew.get(norm);
       const note = notes[raw] || notes[norm] || null;
-      upsert.run({ norm, display: String(raw).trim(), ts, verdict: note ? 'unevidenced' : null, note });
+      upsert.run({
+        norm, display: String(raw).trim(), ts, threshold,
+        initial: threshold <= 1 ? 'pending' : 'watching',
+        verdict: note ? 'unevidenced' : null, note,
+      });
       if (!existed) created++;
     }
   })(skills);
   return created;
+}
+
+/**
+ * Skills being counted but not yet asked about.
+ *
+ * Surfaced so the floor is visible rather than a silent drop: an operator who
+ * wonders why a skill they keep seeing in postings has not been offered can look
+ * at how close it is, and lower the threshold if they disagree with it.
+ */
+export function watchedSkills(limit = 30) {
+  return db.prepare(`
+    SELECT skill_norm, display, job_count, verdict, evidence_note, last_seen
+    FROM skill_suggestions WHERE status = 'watching'
+    ORDER BY job_count DESC, last_seen DESC LIMIT ?`).all(limit);
 }
 
 /** Pending suggestions, most-wanted first. Optionally hide ones already confirmed. */

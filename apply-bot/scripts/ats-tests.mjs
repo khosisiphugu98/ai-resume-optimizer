@@ -197,8 +197,15 @@ const SEARCH_PAGE = at('https://www.board.test/a-job-99.aspx', `
 setSetting('allow_generic_autosubmit', '1');
 const rSearch = await applyExternal(page, { ...job(8024), external_apply_url: SEARCH_PAGE }, ctx, { submit: true });
 setSetting('allow_generic_autosubmit', '');
-t('a search page is not an application form', rSearch.outcome, 'ready');
-t('and says so', /not an application form/.test(rSearch.heldForReview || ''), true);
+// `manual`, not `ready`. `ready` files the job as awaiting_review, which put
+// seventeen pages that are not application forms into the operator's approval
+// queue on a board running in auto mode — and approving one is the documented
+// way *past* this very check, so the only action the queue offered would have
+// submitted a keyword salad into a job-search page. No human decision turns a
+// search form into an application, so this is terminal.
+t('a search page is not an application form', rSearch.outcome, 'manual');
+t('and says so', /not an application form/.test(rSearch.reason || ''), true);
+t('it does not go into the review queue', rSearch.heldForReview, undefined);
 t("the board's search bar was never answered", await page.locator('#q').inputValue(), '');
 
 // And with neither, the default is unchanged.

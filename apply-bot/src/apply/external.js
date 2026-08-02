@@ -3,8 +3,8 @@ import path from 'node:path';
 import { PATHS, SELECTORS } from '../config.js';
 import { bumpRate, getSetting } from '../db.js';
 import { assertNoChallenge, ChallengeDetected, postingClosedReason } from '../browser.js';
-import { collectFieldsInPage, fillField, fromDomField, isSiteSearch } from './fields.js';
-import { collectA11yInPage, toFieldSpec, fillA11yField } from './a11y.js';
+import { collectFieldsInPage, fillField, fromDomField, isSiteSearch, readFieldValue } from './fields.js';
+import { collectA11yInPage, toFieldSpec, fillA11yField, readA11yValue } from './a11y.js';
 import { runWizard, buttonByName, stepSignature, firstVisible, waitForFirstVisible, captureFailureContext, ADVANCE_NAME, TERMINAL_NAME } from './wizard.js';
 import { resolveFormBatch } from '../answer/resolver.js';
 import { normaliseQuestion } from '../answer/bank.js';
@@ -70,6 +70,15 @@ async function shot(page, jobId, label) {
  */
 const NOT_AN_APPLICATION =
   /create (an? )?(email|job)?\s*alert|job alerts?\b|alert for\b[^.]{0,80}\bjobs\b|we (will )?(not|never) spam|subscribe to\b[^.]{0,40}\b(alerts?|newsletter)|sign up for job|get jobs like this/i;
+
+/**
+ * The hold reason for a page with no way to attach a CV.
+ *
+ * A constant because two places have to agree on it: the gate that raises it and
+ * the branch below that recognises it and refuses to call it a review item.
+ */
+export const NOT_AN_APPLICATION_HOLD =
+  'nowhere to attach a CV, so this is not an application form';
 
 /** Why this container is not an application form, or null. */
 export async function notAnApplicationForm(frame, rootSelector) {
@@ -187,6 +196,13 @@ export function fillCollected(frame, item, value) {
   return item.collector === 'a11y'
     ? fillA11yField(frame, item.node, value)
     : fillField(frame, item.field, value);
+}
+
+/** Read one control back, whichever collector found it. Null when unreadable. */
+export function readCollected(frame, item) {
+  return item.collector === 'a11y'
+    ? readA11yValue(frame, item.node)
+    : readFieldValue(frame, item.field);
 }
 
 /**
@@ -376,8 +392,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   const looksLikeAnApplication = vendor.vendor === 'generic' && !approved
     ? async ({ filled }) => {
       if (!sawFileControl) {
-        return `nowhere to attach a CV, so this is not an application form `
-          + `(${filled.length} field(s) filled). Filled and held rather than sent.`;
+        return `${NOT_AN_APPLICATION_HOLD} (${filled.length} field(s) filled).`;
       }
       // There was a slot and we came empty-handed. A CV-less application to a
       // form that asked for one is not worth sending under anyone's name.
@@ -404,6 +419,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     mayFinish,
     resolve: items => resolveFormBatch(items, answerCtx),
     fill: (item, value) => fillCollected(frame, item, value),
+    verify: item => readCollected(frame, item),
 
     // A button named "Submit" ends the form. A button named "Continue" never
     // does, whatever its type — on a multi-step form the Next button is usually
@@ -426,7 +442,7 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
 
   if (result.outcome === 'parked') {
     return {
-      outcome: 'parked', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps,
+      outcome: 'parked', vendor: vendor.vendor, url, filled, ledger: result.ledger, screenshots, steps: result.steps,
       parked: result.parked.map(p => ({
         question: p.question, questionNorm: normaliseQuestion(p.question),
         fieldType: p.fieldType, options: p.options, reason: p.reason, tier: p.tier,
@@ -443,10 +459,30 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
     throw new Error(result.reason);
   }
 
+  // A page with nowhere to attach a CV is not an application, and no amount of
+  // human review turns it into one.
+  //
+  // It was coming back as `ready`, which run.js files as `awaiting_review` — so
+  // seventeen pages that are not application forms are sitting in the Review
+  // column of a board running in auto mode, waiting for an approval that cannot
+  // help. Worse, approving one is the documented way *past* this very check
+  // (`approved` exempts it above), so the only action the Review column offers
+  // would submit a keyword salad into a job-search page.
+  //
+  // `manual` is the honest outcome and already exists for exactly this: terminal,
+  // recorded with what was filled, never re-queued, and out of the operator's
+  // approval queue where it was only ever noise.
+  if (result.outcome === 'ready' && String(result.reason || '').startsWith(NOT_AN_APPLICATION_HOLD)) {
+    return {
+      outcome: 'manual', vendor: vendor.vendor, url, reason: result.reason,
+      filled, ledger: result.ledger, screenshots, steps: result.steps,
+    };
+  }
+
   // Reached the end of the form without pressing submit.
   if (result.outcome === 'ready') {
     return {
-      outcome: 'ready', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps,
+      outcome: 'ready', vendor: vendor.vendor, url, filled, ledger: result.ledger, screenshots, steps: result.steps,
       // Why, in words the operator can act on. This string was already being built
       // and then dropped on the floor by run.js, so "Ready for review" in auto mode
       // looked like a bug rather than a policy.
@@ -475,13 +511,13 @@ export async function applyExternal(page, job, ctx, { submit = false, resumePath
   // An unverified click is its own outcome, terminal, and a person decides.
   if (!confirmed) {
     return {
-      outcome: 'submitted_unconfirmed', vendor: vendor.vendor, url, filled, screenshots,
+      outcome: 'submitted_unconfirmed', vendor: vendor.vendor, url, filled, ledger: result.ledger, screenshots,
       steps: result.steps, evidence,
       reason: 'clicked submit but saw no confirmation — it may have gone through, so it will not be retried automatically',
     };
   }
 
-  return { outcome: 'submitted', vendor: vendor.vendor, url, filled, screenshots, steps: result.steps, evidence };
+  return { outcome: 'submitted', vendor: vendor.vendor, url, filled, ledger: result.ledger, screenshots, steps: result.steps, evidence };
 }
 
 /**

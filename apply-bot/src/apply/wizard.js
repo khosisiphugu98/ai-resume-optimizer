@@ -50,6 +50,8 @@ async function wayForward(findTerminal, findAdvance) {
  *   findTerminal()       → a locator that submits, or null
  *   signature(nodes)     → a comparable identity for the step
  *   onStep({ step })     → optional; screenshots, event emission
+ *   verify(node)         → optional; the control's current value, read back out
+ *                          of the page. See the ledger note below.
  *   mayFinish({filled})  → optional; a reason to hold instead of pressing
  *                          submit, or null to allow it. Checked at the
  *                          terminal button, because that is the first moment
@@ -57,14 +59,42 @@ async function wayForward(findTerminal, findAdvance) {
  *                          to be — `submit` is decided before a single field
  *                          has been seen.
  *
- * Returns { outcome, filled, parked, steps, reason }. `outcome` is one of
+ * Returns { outcome, filled, parked, ledger, steps, reason }. `outcome` is one of
  * `ready` (reached submit, did not press it), `submitted`, `parked`, `stuck`.
  */
 export async function runWizard({
   collect, resolve, fill, findAdvance, findTerminal, signature,
-  onStep = null, beforeAdvance = null, mayFinish = null, submit = false, maxSteps = MAX_STEPS,
+  onStep = null, beforeAdvance = null, mayFinish = null, verify = null,
+  submit = false, maxSteps = MAX_STEPS,
 }) {
   const filled = [];
+  /**
+   * Every control this run saw, and what became of it.
+   *
+   * `filled` is a record of successes: it holds the questions that got an answer
+   * and says nothing whatever about the ones that did not. So a form with eleven
+   * fields where four were answered recorded exactly the same thing as a form
+   * with four — and the operator watching the browser fill in half a page had no
+   * way to show it, because the system's own account of the attempt agreed with
+   * itself and mentioned nothing missing.
+   *
+   * The ledger is the other half: one row per control per step, carrying its
+   * disposition and, where the page could be read back, proof that the value is
+   * actually in the DOM. `required` travels with it, because a required control
+   * that ended up empty is the single most useful line in the whole record.
+   */
+  const ledger = [];
+  const note = (step, node, disposition, extra = {}) => {
+    ledger.push({
+      step,
+      uid: node?.uid ?? null,
+      question: String(node?.question ?? '').slice(0, 200),
+      role: node?.role ?? node?.fieldType ?? null,
+      required: !!node?.required,
+      disposition,
+      ...extra,
+    });
+  };
   // Questions this run could not answer. Collected rather than returned on sight,
   // so the step is completed and captured before the run ends — see the note at
   // the resolve() call below.
@@ -129,7 +159,9 @@ export async function runWizard({
       // A question that parked is settled for this step — asking again on the
       // next re-collect would spend another model call to reach the same answer.
       for (const p of parked) {
-        for (const n of byRepresentative.get(p.uid) || []) handled.add(n.uid);
+        const group = byRepresentative.get(p.uid) || [];
+        note(steps, group[0] || p, 'parked', { reason: p.reason ?? null, tier: p.tier ?? null });
+        for (const n of group) handled.add(n.uid);
       }
 
       for (const r of resolved) {
@@ -137,7 +169,13 @@ export async function runWizard({
         const node = group[0];
         if (!node) continue;
         for (const n of group) handled.add(n.uid);
-        if (r.status !== 'ok') continue;
+        if (r.status !== 'ok') {
+          // The resolver looked at it and produced nothing. Not a park and not a
+          // failure — but it is a control that will reach the employer empty, so
+          // it belongs in the record rather than nowhere.
+          note(steps, node, 'no-answer', { reason: r.reason ?? r.status ?? null });
+          continue;
+        }
 
         // Last line before anything is typed. The resolver rejects refusal words
         // at their two model paths, but this is the only point every value from
@@ -145,11 +183,13 @@ export async function runWizard({
         // here is a word like "unanswerable" sitting in an employer's ATS under
         // the candidate's name. Cheap to check, so it is checked again.
         if (NON_ANSWER_VALUE.test(String(r.value ?? ''))) {
+          const reason = `refused to type "${String(r.value).trim()}" — a non-answer reached the fill layer at tier ${r.tier}`;
           parkedFields.push({
             question: r.question, fieldType: r.fieldType, options: node.options,
-            reason: `refused to type "${String(r.value).trim()}" — a non-answer reached the fill layer at tier ${r.tier}`,
+            reason,
             tier: 'sentinel-blocked',
           });
+          note(steps, node, 'refused', { reason, tier: 'sentinel-blocked' });
           continue;
         }
 
@@ -181,16 +221,47 @@ export async function runWizard({
           // A value that will not go into the control is not an answer. Record it
           // and carry on with the rest of the step — one stubborn control must not
           // cost the fields that would have gone in cleanly.
+          const reason = `could not apply "${r.value}": ${lastError?.message || 'no control accepted it'}`;
           parkedFields.push({
             question: r.question, fieldType: r.fieldType, options: node.options,
-            reason: `could not apply "${r.value}": ${lastError?.message || 'no control accepted it'}`,
+            reason,
             tier: 'fill-error',
           });
+          note(steps, node, 'fill-error', { intended: String(r.value ?? '').slice(0, 120), reason });
           continue;
         }
 
         const prefilled = landed === r.value && node.currentValue
           && String(node.currentValue).trim() === String(r.value).trim();
+
+        // Did it actually stick?
+        //
+        // Everything above this line trusts the filler's own word. That word is
+        // `String(value)` on a text input — returned whether or not the page kept
+        // it — so a controlled component that reverts on its next render reports a
+        // clean fill and leaves the box empty. Reading the control back is the only
+        // way to tell those apart, and it is the difference between a log that says
+        // what was sent and a log that says what was attempted.
+        //
+        // An unreadable control is not a failed one: `verify` returns null when
+        // there is nothing to read, and that is recorded as unverified, never as a
+        // revert. Only a control that reads back *differently* is a defect.
+        let verified = null;
+        let readBack = null;
+        if (verify) {
+          readBack = await verify(node).catch(() => null);
+          if (readBack != null) {
+            verified = sameValue(readBack, landed) || sameValue(readBack, r.value);
+          }
+        }
+
+        note(steps, node, verified === false ? 'reverted' : (prefilled ? 'prefilled' : 'filled'), {
+          value: String(landed ?? '').slice(0, 120),
+          tier: prefilled ? 'prefilled' : r.tier,
+          copies: applied,
+          verified,
+          ...(verified === false ? { readBack: String(readBack ?? '').slice(0, 120) } : {}),
+        });
 
         // The options travel with the value. Without them a later reader — the
         // pre-send check, or a person looking at the submission record — sees
@@ -201,6 +272,10 @@ export async function runWizard({
           tier: prefilled ? 'prefilled' : r.tier,
           kind: node.role, probable: !prefilled && !!r.probable,
           options: node.options || null,
+          // Carried onto the record the review card and the submission log read,
+          // so "17 fields filled" can be told apart from "17 fields attempted".
+          ...(verified === null ? {} : { verified }),
+          ...(verified === false ? { readBack: readBack ?? '' } : {}),
           ...(applied > 1 ? { copies: applied } : {}),
         });
       }
@@ -214,7 +289,16 @@ export async function runWizard({
       signatureNow = afterSignature;
     }
 
-    if (onStep) await onStep({ step: steps, nodes });
+    // Controls that were on the page when the step finished and were never dealt
+    // with. Two ways to get here: a node the collector found without a usable uid,
+    // and a node revealed on the last re-collect after MAX_RECOLLECTS was spent.
+    // Both leave a live control untouched, and neither said so anywhere before.
+    for (const n of nodes) {
+      if (!n.uid) { note(steps, n, 'no-handle'); continue; }
+      if (!handled.has(n.uid)) note(steps, n, 'not-reached');
+    }
+
+    if (onStep) await onStep({ step: steps, nodes, ledger });
 
     // --- anything unanswered ends the run, now that the step is done --------
     //
@@ -223,7 +307,7 @@ export async function runWizard({
     // required field would only fail validation on the next screen, and submitting
     // is out of the question — so this is where the run stops.
     if (parkedFields.length) {
-      return { outcome: 'parked', parked: parkedFields, filled, steps };
+      return { outcome: 'parked', parked: parkedFields, filled, ledger, steps };
     }
 
     // --- a way forward, once the step has finished rendering ----------------
@@ -246,15 +330,15 @@ export async function runWizard({
     }
 
     if (terminal) {
-      if (!submit) return { outcome: 'ready', filled, steps };
+      if (!submit) return { outcome: 'ready', filled, ledger, steps };
       const hold = mayFinish ? await mayFinish({ filled, steps }) : null;
-      if (hold) return { outcome: 'ready', filled, steps, reason: hold };
-      return { outcome: 'submit', terminal, filled, steps };
+      if (hold) return { outcome: 'ready', filled, ledger, steps, reason: hold };
+      return { outcome: 'submit', terminal, filled, ledger, steps };
     }
 
     if (!next) {
       return {
-        outcome: 'stuck', filled, steps,
+        outcome: 'stuck', filled, ledger, steps,
         reason: `step ${steps} has no next, review or submit control`
           + ` (still none after ${CONTROL_RENDER_TIMEOUT / 1000}s)`,
       };
@@ -274,7 +358,7 @@ export async function runWizard({
     // with no fields resolves no fields and calls no model.
     if (lastSignature !== null && signatureNow !== '' && signatureNow === lastSignature) {
       return {
-        outcome: 'stuck', filled, steps,
+        outcome: 'stuck', filled, ledger, steps,
         reason: `form did not advance past step ${steps - 1} — the same fields came back after clicking next`,
       };
     }
@@ -285,7 +369,7 @@ export async function runWizard({
     await next.page().waitForTimeout(1800);
   }
 
-  return { outcome: 'stuck', filled, steps, reason: `exceeded ${maxSteps} steps without reaching submit` };
+  return { outcome: 'stuck', filled, ledger, steps, reason: `exceeded ${maxSteps} steps without reaching submit` };
 }
 
 /**
@@ -298,6 +382,30 @@ export async function runWizard({
  */
 export function stepSignature(items) {
   return items.map(i => `${i.role}|${i.question}`).sort().join('\n');
+}
+
+/**
+ * Is what the page holds the same answer we put there?
+ *
+ * Deliberately forgiving about form and unforgiving about content. A control
+ * normalises what it is given — a phone box strips spaces, a select returns its
+ * label where we sent its value, a rich text box trims — and calling any of that
+ * a reverted field would fill the log with false alarms and teach the operator to
+ * ignore it. What it will not forgive is an empty box where a value was typed,
+ * which is the only case this check exists to catch.
+ */
+export function sameValue(a, b) {
+  const norm = v => String(v ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const x = norm(a);
+  const y = norm(b);
+  if (x === y) return true;
+  if (!x || !y) return false;
+  // A select showing "South Africa +27" for a value of "South Africa", or a
+  // number box showing "5" for "5 years".
+  if (x.includes(y) || y.includes(x)) return true;
+  // Punctuation and separators differ far more often than content does.
+  const bare = v => v.replace(/[^a-z0-9]/g, '');
+  return !!bare(x) && bare(x) === bare(y);
 }
 
 /**
